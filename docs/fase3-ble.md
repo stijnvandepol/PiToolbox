@@ -7,7 +7,7 @@ Claude ──▶ pitoolbox-mcp ──┬── USB-serieel (CLI + RPC)     ◀�
                            └── BLE (alleen RPC) ──▶ BlueZ ──▶ Flipper
 ```
 
-> **Wat is geverifieerd en wat niet.** Alles over de Flipper-firmware komt uit de officiële broncode (flipperzero-firmware, commit `3fb1d517`), alles over BlueZ uit de BlueZ-documentatie in de bluez-repo. Gedrag op de echte Pi 5 + Flipper is in deze sessie niet getest; dat staat als checklist onderaan en is in de tekst gemarkeerd met *(niet geverifieerd)*.
+> **Wat is geverifieerd en wat niet.** Alles over de Flipper-firmware komt uit de officiële broncode (flipperzero-firmware, commit `3fb1d517`), alles over BlueZ uit de BlueZ-documentatie in de bluez-repo. Gedrag op de echte Pi (4 of 5) + Flipper is in deze sessie niet getest; dat staat als checklist onderaan en is in de tekst gemarkeerd met *(niet geverifieerd)*.
 
 ## 1. Op de Pi: voorwaarden
 
@@ -37,7 +37,7 @@ Claude ──▶ pitoolbox-mcp ──┬── USB-serieel (CLI + RPC)     ◀�
 
    De service zelf krijgt de groep via `SupplementaryGroups=` in de systemd-unit; die groep moet dus bestaan (het pakket `bluez` maakt hem aan). Verder is er aan de hardening niets veranderd: bleak praat alleen via een AF_UNIX-verbinding met de system bus en opent zelf geen Bluetooth-sockets, dus `RestrictAddressFamilies` blokkeert niets (commentaar in `deploy/systemd/pitoolbox-mcp.service`).
 
-4. **De ingebouwde Bluetooth van de Pi 5.** De Pi 5 heeft Bluetooth 5.0 / BLE aan boord: de Infineon CYW43455 doet Wi-Fi en Bluetooth in een chip ([Raspberry Pi, "Introducing Raspberry Pi 5"](https://www.raspberrypi.com/news/introducing-raspberry-pi-5/)). Een aparte dongle is niet nodig. De chip deelt de radio met de Wi-Fi van de Pi; een officiële bron over onderlinge storing is niet gevonden, dus meet het zelf (zie 4, "Interpreteren") als je veel Wi-Fi-verkeer hebt.
+4. **De ingebouwde Bluetooth van de Pi (4 of 5).** De Pi 5 heeft Bluetooth 5.0 / BLE aan boord: de Infineon CYW43455 doet Wi-Fi en Bluetooth in een chip ([Raspberry Pi, "Introducing Raspberry Pi 5"](https://www.raspberrypi.com/news/introducing-raspberry-pi-5/)). De Pi 4 heeft dezelfde chipfamilie (BCM43455); op de test-Pi 4 is dat `hci1`. Een aparte dongle is niet nodig. De chip deelt de radio met de Wi-Fi van de Pi; een officiële bron over onderlinge storing is niet gevonden, dus meet het zelf (zie 4, "Interpreteren") als je veel Wi-Fi-verkeer hebt.
 
 ## 2. Aan de Flipper-kant
 
@@ -116,7 +116,8 @@ download /ext/subghz/x.sub (48213 B)                   9.4 KiB/s (9625 B/s)     
 ### Interpreteren
 
 - **Er is geen officieel doorvoercijfer** van de Flipper over BLE om tegen te toetsen. Gebruik `--compare-usb` als eigen referentie en vergelijk BLE met USB op dezelfde Pi en Flipper.
-- **Latency** wordt vooral bepaald door het BLE-verbindingsinterval. De Flipper onderhandelt daarover na het verbinden (`gap.c`, `aci_l2cap_connection_parameter_update_req`); de uitkomst hangt van de Pi/BlueZ-instellingen af. Een grote spreiding (min/max ver uit elkaar) wijst op her-onderhandeling of storing.
+- **Latency** wordt vooral bepaald door het BLE-verbindingsinterval. De Flipper stuurt antwoorden als indicaties en wacht na elk pakket op de bevestiging (`bt.c`, `bt_rpc_send_bytes_callback`). Elk RPC-frame kost dus ongeveer twee intervallen. Het interval kiest de Pi: Linux gebruikt standaard 30–50 ms (`net/bluetooth/hci_core.c`). De Flipper vraagt vanaf Linux nooit om een korter interval, want `gap_verify_connection_parameters` in `gap.c` draait alleen als de link nog niet beveiligd is. Gemeten op een Pi 4 met Momentum mntm-012: ~98 ms per frame, 1,2 KiB/s. Sneller kan alleen met root, zie [BLE sneller maken](#ble-sneller-maken-root-eenmalig). Een grote spreiding (min/max ver uit elkaar) wijst op her-onderhandeling of storing.
+- **Schrijfgrootte:** pitoolbox leest de echte MTU via D-Bus (op de Flipper 414), omdat de cache van bleak bij een gebonden apparaat op 23 blijft staan. Een write is dus maximaal 243 bytes (`BLE_SVC_SERIAL_CHAR_VALUE_LEN_MAX`).
 - **Doorvoer** bepaalt hoe groot een bestand mag zijn voor een tool-aanroep: een bestand van 256 KiB duurt bij 10 KiB/s ruim 25 s. Houd rekening met de time-outs van de tools; lees over BLE liever kleine bestanden.
 - **Verbinden kost seconden** (verbinden, dienstontdekking, start van de RPC-sessie) en zit alleen in de eerste meting; latency en download meten daarna op een bestaande verbinding.
 - Zijn alle metingen bij elke run slecht, probeer dan eens de Wi-Fi van de Pi tijdelijk stil te leggen of een ander kanaal; de radio wordt gedeeld, een officiële bron over de invloed is niet gevonden.
@@ -147,6 +148,18 @@ Daarbij: er is maar één RPC-sessie tegelijk. Staat er al een RPC-sessie open (
 - Valt de verbinding weg (Flipper uit, buiten bereik, Bluetooth uitgezet, app ertussen), dan opent de eerstvolgende tool-aanroep de verbinding opnieuw; de Flipper adverteert na een verbroken verbinding vanzelf weer (`gap.c`). Het precieze gedrag (aantal pogingen, wachttijden) staat in `core/devices/_flipper_ble.py` en moet op de hardware worden bevestigd. *(niet geverifieerd)*
 - Een tool die tijdens het wegvallen draait, geeft een fout (bijvoorbeeld `device_not_connected` of `device_timeout`) in plaats van te blijven hangen. *(niet geverifieerd)*
 
+### BLE sneller maken (root, eenmalig)
+
+**Nog niet getest.** Laat de Pi zelf een korter interval kiezen. De Flipper staat minimaal 7,5 ms toe (`serial_profile.c`). Probeer het eerst tijdelijk:
+
+```bash
+echo 6  | sudo tee /sys/kernel/debug/bluetooth/hci1/conn_min_interval   # eenheid 1,25 ms → 7,5 ms
+echo 12 | sudo tee /sys/kernel/debug/bluetooth/hci1/conn_max_interval   # 15 ms
+uv run pitoolbox-flipper ble-test
+```
+
+Blijvend: zet in `/etc/bluetooth/main.conf` onder `[LE]` de regels `MinConnectionInterval=6` en `MaxConnectionInterval=12`, en draai daarna `sudo systemctl restart bluetooth`. Parameters die BlueZ per apparaat heeft opgeslagen gaan voor. Controleer dat met `sudo grep -A4 ConnectionParameters /var/lib/bluetooth/<adapter-MAC>/<flipper-MAC>/info`. Bestaat die sectie, verwijder hem dan terwijl bluetooth gestopt is. De verwachting is ~15–30 ms per frame, maar dat is nog niet gemeten. Let op: wifi en BT delen de radio van de BCM43455. Wordt wifi merkbaar trager, neem dan `MaxConnectionInterval=24`. `sudo deploy/install.sh --alleen-systeem --bluez-le` zet de twee regels er met backup in (BlueZ kent geen `main.conf.d`), zie [fase5-onderweg.md](fase5-onderweg.md).
+
 ## 8. Problemen oplossen
 
 | Symptoom | Oorzaak en oplossing |
@@ -163,11 +176,13 @@ Daarbij: er is maar één RPC-sessie tegelijk. Staat er al een RPC-sessie open (
 | BLE-verbinding is er, maar RPC doet niets | "RPC is busy": er is al een RPC-sessie (zie 6). Sluit de app of de USB-RPC-sessie. |
 | Tool geeft `unsupported_transport` | Dat tool is CLI-gebaseerd (6): verbind USB of zet `PITOOLBOX_FLIPPER_TRANSPORT=usb`. |
 | Pairing werkt alleen op Linux | De pairing-commando's praten met BlueZ en geven op Windows/macOS een duidelijke melding; ontwikkel/test ze op de Pi. |
-| Doorvoer slecht | Zie 4, "Interpreteren"; vergelijk met `--compare-usb`. |
+| Doorvoer slecht | Zie 4, "Interpreteren" en "BLE sneller maken"; vergelijk met `--compare-usb`. |
+| "Bluetooth-adapter hciN bestaat niet in BlueZ" | Verkeerde `PITOOLBOX_FLIPPER_BLE_ADAPTER`/`--adapter`. Kijk met `bluetoothctl list`. Een USB-wifikaart met BT (zoals de MT7921 van de Alfa) kan een `hciN` hebben die niet opstart (`dmesg`: `Opcode 0x0c03 failed`). Gebruik dan de ingebouwde adapter. |
+| Log: "was nog verbonden in BlueZ; eerst verbreken" | Een vorig proces is gecrasht, of een ander proces (bijv. de service naast `ble-test`) had de link. Pitoolbox verbreekt die link voor een verse RPC-sessie. Het andere proces verbindt bij zijn volgende call opnieuw. |
 
 ## 9. Hardware-testlijst
 
-Op een echte Pi 5 (Kali) met een echte Flipper, in deze volgorde:
+Op een echte Pi 4 of 5 (Kali) met een echte Flipper, in deze volgorde:
 
 - [ ] `systemctl status bluetooth` is actief; `bluetoothctl show` meldt `Powered: yes`.
 - [ ] Gebruiker en `pitoolbox` zitten in `bluetooth`; `systemctl start pitoolbox-mcp` start zonder fout (groep bestaat).
