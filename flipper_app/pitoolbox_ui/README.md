@@ -7,9 +7,9 @@ Een Flipper-app (FAP) waarmee je PiToolbox op de Pi bedient, zonder telefoon of 
 - **Status:** uplink, voeding/onderspanning, Flipper-link (USB/BLE), actieve captures, open bevestigingen, laatste toolcall.
 - **Presets:** vaste prompts uit de Pi-config gaan naar de agent-loop. Het antwoord kun je scrollen.
 
-De app is een **dom invoerapparaat**. Hij stuurt alleen ids (actie, preset, bevestigings-handle), nooit toolnamen, argumenten of tekst. De Pi valideert alles en voert alles uit via de `ToolRunner` (frontend `flipper_ui`). Het protocol staat in [docs/fase4-protocol.md](../../docs/fase4-protocol.md).
+De app is een **dom invoerapparaat**. Hij stuurt alleen ids (actie, preset, bevestigings-handle), nooit toolnamen, argumenten of tekst. De Pi valideert alles en voert alles uit via de `ToolRunner` (frontend `flipper-ui`). Het protocol staat in [docs/fase4-protocol.md](../../docs/fase4-protocol.md).
 
-> **Status:** de app bouwt zonder waarschuwingen tegen mntm-012 (API 87.1). De bridge op de Pi bestaat nog niet; die komt na de agent-loop. Op hardware is de app nog **niet getest** (de Flipper was offline na de BusFault uit de spike).
+> **Status:** de app bouwt zonder waarschuwingen tegen mntm-012 (API 87.1). De bridge op de Pi is klaar (`PITOOLBOX_FLIPPER_UI=on`, zie de README in de root) en getest tegen een nagebootste app. Op hardware is de app nog **niet getest** (de Flipper was offline na de BusFault uit de spike). Na een `ir_send` gaat de app even dicht en weer open: de Infrared-app heeft de loader nodig.
 
 ## Bestanden
 

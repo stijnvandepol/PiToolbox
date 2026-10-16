@@ -129,6 +129,9 @@ De server werkt met elke MCP-client (Claude Desktop, Cursor, Open WebUI, ...). P
 | `PITOOLBOX_AGENT_MAX_STEPS` / `PITOOLBOX_AGENT_MAX_CALLS_PER_STEP` | `8` / `8`: tool-rondes per beurt, tool calls per modelantwoord |
 | `PITOOLBOX_AGENT_TURN_TIMEOUT_S` / `PITOOLBOX_AGENT_MAX_RESULT_CHARS` | `300` / `8000`: tijd per beurt (tussen stappen gecontroleerd), lengte van een tool-resultaat naar het model |
 | `PITOOLBOX_AGENT_MAX_HISTORY_CHARS` | `120000`: daarboven vallen de oudste hele beurten uit de geschiedenis (het model krijgt daar een melding van) |
+| `PITOOLBOX_FLIPPER_UI` | `off`; `on` = bridge naar de Flipper-app (in `pitoolbox-mcp` **of** `pitoolbox-agent`, nooit in beide) |
+| `PITOOLBOX_FLIPPER_UI_APP` | `/ext/apps/Tools/pitoolbox_ui.fap` (alleen een `.fap` onder `/ext/apps/`) |
+| `PITOOLBOX_FLIPPER_UI_PRESETS` | `~/.config/pitoolbox/flipper_presets.yaml`; ontbreekt het bestand, dan zijn er geen presets |
 
 **LLM-provider (fase 4).** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. `openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
 
@@ -140,7 +143,28 @@ uv run pitoolbox-agent            # chat met het ingestelde LLM (PITOOLBOX_LLM_*
 
 Het model gebruikt dezelfde tools als de MCP-server, altijd via de ToolRunner (validatie, scope, policy, audit). **Een transmit voert het model nooit zelf uit.** `confirm_action` is voor het model onzichtbaar en wordt geweigerd als het hem toch aanroept, en het model ziet geen `pending_id`. Na de beurt toont de agent de samenvatting en vraagt `Bevestigen? [j/N]`. Alleen `j`/`ja` voert de actie uit, eenmalig en binnen 60 s. Prompt-injectie via tool-uitvoer (een SSID, bestandsinhoud) kan zo hooguit een bevestigingsvraag opleveren. Tools buiten `PITOOLBOX_TOOL_ALLOWLIST` krijgt het model niet te zien.
 
+Is de Flipper-app gekoppeld (zie hieronder), dan vraagt de agent niet zelf: de vraag staat dan op de Flipper.
+
 Commando's: `/stop` (noodstop), `/help`, `/exit`. Ctrl+C breekt alleen de lopende beurt af en is **geen** noodstop: captures lopen door, en een open bevestiging wordt afgewezen. Zonder geconfigureerde provider stopt `pitoolbox-agent` met exitcode 2. In de audit-log staat per beurt een `agent_turn_start`/`agent_turn_end` (model, tellingen, tokens), zonder berichtinhoud.
+
+## Bediening op de Flipper (fase 4)
+
+De Flipper-app `pitoolbox_ui` ([flipper_app/pitoolbox_ui](flipper_app/pitoolbox_ui/README.md)) toont bevestigingsvragen, snelle acties (status, wifi-scan, captures stoppen, noodstop), een statusscherm en presets. Op de Pi draait de bridge in het proces dat de Flipper bezit: zet `PITOOLBOX_FLIPPER_UI=on` in **één** proces (normaal de service `pitoolbox-mcp`). Twee processen met de Flipper verbreken elkaars BLE-link.
+
+**Flipper verplicht.** Zolang de app verbonden is, bevestigt alleen OK op de Flipper een transmit, uit welke frontend die ook komt. `confirm_action` vanuit een chat geeft dan `confirm_on_flipper`: druk OK op de Flipper (Back = nee). De actie blijft open tot de TTL verloopt. Zonder verbonden app geldt de gewone regel. De audit-log toont koppelen en loskoppelen (`physical_confirmer`) en per bevestiging `confirmed_on: "flipper"`.
+
+Starten: open de app zelf op de Flipper (Apps → Tools → PiToolbox), of laat de Pi hem starten zodra er iets te bevestigen is. Dat doet de Pi alleen als er geen andere app open staat. Zolang de app open is, weigeren Sub-GHz/NFC/RFID via de CLI (`app_locked`). Bij `ir_send` gaat de app even dicht en weer open, omdat de Infrared-app de loader nodig heeft.
+
+Presets (`PITOOLBOX_FLIPPER_UI_PRESETS`; hoogstens 12, label hoogstens 24 tekens ASCII; de prompt blijft op de Pi):
+
+```yaml
+presets:
+  - id: 1
+    label: "Wifi-overzicht"
+    prompt: "Doe een wifi-scan en vat samen welke netwerken in scope zijn."
+```
+
+Een preset draait als agent-beurt en heeft dus een LLM-config nodig (`PITOOLBOX_LLM_*`). Ontwerp en protocol: [docs/fase4-protocol.md](docs/fase4-protocol.md).
 
 ## Flipper draadloos via Bluetooth LE (fase 3)
 
@@ -222,6 +246,9 @@ src/pitoolbox/
     devices/system.py         # get_throttled, uplink, schijf
     tools/                    # base, runner, flipper_tools, wifi_tools, system_tools
   frontends/mcp_server.py     # MCPServer (opvolger van FastMCP in mcp 2.x), stdio + HTTP
+  frontends/agent_cli.py      # pitoolbox-agent (terminal)
+  frontends/flipper_ui/       # bridge naar de Flipper-app: protocol, bridge, presets
+  agent/ llm/                 # agent-loop; providers (openai-compatible, anthropic, openai)
   auth/                       # OAuth 2.1: provider, SQLite-store, /login, crypto, CLI
   flipper_cli.py              # pitoolbox-flipper: ble-scan/pair/unpair/list/test
 deploy/                       # install.sh, env-voorbeeld, en per doel een map:
@@ -232,8 +259,10 @@ deploy/                       # install.sh, env-voorbeeld, en per doel een map:
   bluetooth/                  #   optioneel BLE-interval voor main.conf (fase 5, niet getest)
 docs/fase2-remote.md          # installatie remote + troubleshooting
 docs/fase3-ble.md             # Flipper via Bluetooth: koppelen, testen, troubleshooting
-docs/fase4-spike.md           # onderzoek Flipper als bediening (nog niet gebouwd)
+docs/fase4-spike.md           # onderzoek Flipper als bediening (DataExchange)
+docs/fase4-protocol.md        # protocol FAP <-> Pi, bevestigen, bridge
 docs/fase5-onderweg.md        # klaar voor onderweg: installeren, controleren, terugdraaien
+flipper_app/pitoolbox_ui/     # Flipper-app (C, ufbt)
 scripts/gen_proto.py          # protobuf opnieuw genereren
 tests/
 ```

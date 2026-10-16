@@ -11,7 +11,7 @@ Achtergrond en metingen staan in [fase4-spike.md](fase4-spike.md). Bronverwijzin
 
 - **Kanaal:** de FAP draait met een RPC-koppeling (`StartRequest{args:"RPC"}`), en alle berichten gaan via `app_data_exchange_request` (DataExchange). Pi → FAP is een gewone RPC-opdracht met een `command_id`; de FAP bevestigt hem. FAP → Pi is een ongevraagd frame met `command_id = 0` (spike §3).
 - **De FAP is een onbetrouwbaar invoerapparaat.** Hij heeft geen geheimen en neemt geen beslissingen. Hij stuurt alleen ids: een snelle actie, een preset of een bevestigings-handle. Toolnamen, argumenten en vrije tekst stuurt hij nooit. Wat een id betekent, bepaalt de Pi (vaste tabel of Pi-config). Alles wat binnenkomt wordt gevalideerd voordat de bridge iets doet.
-- **Elke actie gaat via de `ToolRunner`** met frontend-id `flipper_ui`. Validatie, policy, scope en audit blijven dus precies zoals bij MCP.
+- **Elke actie gaat via de `ToolRunner`** met frontend-id `flipper-ui`. Validatie, policy, scope en audit blijven dus precies zoals bij MCP.
 - **Klein en voorspelbaar:** elk bericht is hoogstens 512 bytes, er gaan hoogstens 5 berichten per seconde per richting, en de Pi stuurt naar de FAP met stop-and-wait.
 
 ## 2. Codering: binair, vaste velden
@@ -104,20 +104,27 @@ Doel: een transmit die een agent of frontend voorstelt (`confirmation_required` 
 
 ```
 Pi (bridge)                                    FAP
- pending (via AgentSession, frontend flipper_ui)
+ pending van ELKE frontend (mcp, agent, flipper-ui) → PendingStore-luisteraar → rij
  handle = ConfirmHandles.issue(pending, instance, ttl)
- CONFIRM_PROMPT{handle, ttl_s, summary}  ───▶  scherm "Zenden? 60s", licht + 1x trillen
+ CONFIRM_PROMPT{handle, ttl_s, summary "(van mcp)"}  ───▶  scherm "Zenden? 60s", licht + 1x trillen
                                                OK pas na 1 s actief (geen doorgeschoten knopdruk)
                                         ◀───  CONFIRM_ANSWER{handle, ja/nee}
  pending = ConfirmHandles.take(handle, instance)   (eenmalig, TTL, zelfde instance)
- ja:  AgentSession.confirm(pending, approved=True)  -> runner.call("flipper_ui","confirm_action",…)
- nee: AgentSession.confirm(pending, approved=False)
+ ja:  runner.confirm_physical(lease, pending)   (TTL, eenmalig, nieuwe scope-check)
+ nee: runner.reject_physical(lease, pending)
  CONFIRM_CLOSED{handle, uitgevoerd|geweigerd|mislukt}  ───▶  "Bevestiging: uitgevoerd" in status
 ```
 
 - **Handle:** een willekeurig u32 van de Pi (`secrets`), nooit 0 en binnen een bridge nooit hergebruikt. De `pending_id` zelf gaat niet naar de FAP. Een antwoord geldt alleen voor een handle die deze Pi aan **deze** FAP-instance gaf, alleen **één keer**, en alleen **binnen de TTL** volgens de klok van de Pi. Het aftellen op de FAP is alleen voor de mens. Een antwoord met een verkeerde instance verbruikt de handle niet.
-- **Binding blijft intact:** de bevestiging loopt via dezelfde frontend-id als de call die de pending maakte (`AgentSession.confirm`), dus `PendingStore.take` controleert opnieuw de binding, de TTL, het eenmalig gebruik en de scope (README, "Bevestiging").
-- **Andere frontends:** een pending van MCP of de Claude-app wordt standaard niet op de Flipper getoond. Daar bevestigt de mens in het gesprek. Een frontend kan zich later wel aanmelden met een eigen callback (`request_confirmation(summary, ttl, on_answer)`). De bridge roept dan alleen die callback aan, en die bevestigt met de eigen frontend-id. De Flipper kan dus nooit een pending van een andere frontend "overnemen".
+- **Flipper verplicht (besluit Stijn, VOORTGANG.md).** Zodra WELCOME echt is afgeleverd, koppelt de bridge zich als **fysieke bevestiger** (`runner.attach_physical_confirmer`). De lease is een object van de `PendingStore`, geen frontend-id: een andere frontend kan hem dus niet nadoen. Zolang hij gekoppeld is:
+  - weigert `confirm_action` uit **elke** frontend (ook `flipper-ui` zelf) met `confirm_on_flipper`, en de pending blijft staan;
+  - toont de bridge pendings van **alle** frontends, met de bron erbij ("(van mcp)"), zodat de mens ziet wie het vraagt;
+  - bevestigt alleen `runner.confirm_physical(lease, …)`. TTL, eenmalig gebruik en de nieuwe scope-check gelden zoals altijd. De audit krijgt `confirmed_on: "flipper"` en `created_by`;
+  - mag afwijzen uit de chat nog wel, want afwijzen zendt niets.
+
+  Een agent-sessie krijgt bij een geweigerde bevestiging de status `ON_FLIPPER`. De bevestiging blijft dan open, en zodra de Flipper antwoordt, krijgt het model het resultaat te horen. `pitoolbox-agent` vraagt niet "Bevestigen?" zolang de app gekoppeld is.
+- **Loskoppelen** gebeurt als eerste stap, vóór alle andere opruimwerk, bij APP_CLOSED, een verbroken link, een hangende app, geen HELLO op tijd of het stoppen van de bridge. Daarna geldt weer de oude regel (gebonden aan de eigen frontend).
+- **Racevrij:** koppelen, loskoppelen en elke `claim` lopen onder dezelfde lock van de `PendingStore`. Een bevestiging uit de chat ziet dus óf de lease (geweigerd, niets verbruikt) óf geen lease (oude regel). Valt de link weg, dan blijft de lease staan tot de bridge hem loskoppelt: in dat gat weigert de chat (fail closed). Een OK die nog onderweg is na het loskoppelen, gebruikt een verlopen lease en voert niets uit (`STALE_CONFIRMER`). OK en chat tegelijk: de claim is atomair en eenmalig, dus de actie kan nooit twee keer lopen. Een stresstest koppelt los en aan terwijl threads bevestigen, en controleert dat er nooit een chat-bevestiging slaagde terwijl de lease gekoppeld was.
 - **Eén vraag tegelijk:** de Pi zet verdere vragen in de rij (hoogstens 8 open handles). Een CONFIRM_CLOSED met `ingetrokken` haalt de vraag weg: `emergency_stop` wist alle pendings, en de bridge stuurt dan voor elke open handle CONFIRM_CLOSED. Verloopt de TTL, dan sluit de FAP het scherm zonder iets te sturen, en de Pi stuurt CONFIRM_CLOSED met `verlopen`.
 - **Sessieverlies of nieuwe HELLO:** alle handles van die instance worden ingetrokken. De pending zelf verloopt daarna vanzelf in de `PendingStore`.
 
@@ -132,7 +139,7 @@ Snelle acties zijn vast in de FAP (ids) en vast op de Pi (`protocol.QUICK_ACTION
 | 3 | Stop captures | `capture_stop {capture_id}` voor elke actieve capture. De ids komen uit `status`, nooit van de FAP |
 | 4 | Noodstop | `emergency_stop {}`. Altijd toegestaan, ook als er al een actie loopt |
 
-Presets staan in de Pi-config, als lijst van `{id, label, prompt}`. Alleen `id` en `label` gaan naar de FAP. Een ACTION met `kind = preset` start een agent-beurt (`AgentSession(frontend="flipper_ui").run_turn(prompt)`). Tussendoor gaat er PROGRESS naar de FAP (bijv. "tool: wifi_scan"), en aan het eind het antwoord in RESULT-delen (`chunk_result`, tekst via `to_display_text` naar ASCII). Zonder LLM-config is bit1 in WELCOME uit, en een preset krijgt ERROR `AGENT_UNAVAILABLE`.
+Presets staan in de Pi-config, als lijst van `{id, label, prompt}`. Alleen `id` en `label` gaan naar de FAP. Een ACTION met `kind = preset` start een agent-beurt (`AgentSession(frontend="flipper-ui").run_turn(prompt)`). Tussendoor gaat er PROGRESS naar de FAP (bijv. "tool: wifi_scan"), en aan het eind het antwoord in RESULT-delen (`chunk_result`, tekst via `to_display_text` naar ASCII). Zonder LLM-config is bit1 in WELCOME uit, en een preset krijgt ERROR `AGENT_UNAVAILABLE`.
 
 ## 8. Starten
 
@@ -189,31 +196,38 @@ Wat `pitoolbox_ui` daarom doet (`pitoolbox_ui.c`):
 
 Blijvend restrisico: tussen de controle `if(rpc_app->callback)` in de firmware en het eerste statement van onze callback zit een venster van een paar instructies. Daarin kan het afsluiten van de app net vallen. Dat venster hebben alle firmware-apps. De teller maakt het zo klein als vanuit een FAP kan.
 
-## 10. Bridge op de Pi (gepland, nog niet gebouwd)
+## 10. Bridge op de Pi
 
-Komt na de agent-loop. De codec is zo opgezet dat de bridge vooral bestaande onderdelen aan elkaar koppelt:
+Gebouwd in [`src/pitoolbox/frontends/flipper_ui/bridge.py`](../src/pitoolbox/frontends/flipper_ui/bridge.py) (tests: `tests/test_flipper_ui_bridge.py`, `tests/test_flipper_app_channel.py`, met een nagebootste FAP in `tests/flipper_fakes.py`). Aan met `PITOOLBOX_FLIPPER_UI=on`, in `pitoolbox-mcp` of `pitoolbox-agent`. **Nooit in twee processen tegelijk:** één proces bezit de Flipper, twee verbreken elkaars BLE-link.
 
 ```
-FlipperDevice (één RPC-sessie, gedeeld met de tools; RpcClient is niet thread-safe)
-  └─ event-hook: command_id 0 + app_data_exchange_request → bridge.on_frame(bytes)
-     (direct afhandelen, niet in de eventqueue van max 256: spike test 4)
-FlipperUiBridge (eigen thread)
-  ├─ decode_from_fap → RateLimiter → SeqTracker → dispatch
-  ├─ HELLO: reset; WELCOME, PRESETS, STATUS
-  ├─ ACTION quick → worker: QUICK_ACTIONS[id] → runner.call("flipper_ui", tool, args)
-  │                → samenvatten → chunk_result → zendrij
-  ├─ ACTION preset → worker: AgentSession("flipper_ui").run_turn(prompt, on_event)
-  │                  on_event: tool-start → PROGRESS; PendingConfirmation → ConfirmHandles.issue → CONFIRM_PROMPT
-  ├─ CONFIRM_ANSWER → ConfirmHandles.take(handle, instance) → session.confirm(...) → CONFIRM_CLOSED
-  ├─ CANCEL → AgentSession/flipper.abort() waar mogelijk, ERROR CANCELLED
-  ├─ zendrij → device.app_data_exchange(bytes) (stop-and-wait, 3x opnieuw bij CMD_ERROR, ≤5/s)
-  ├─ ConfirmHandles.expire() elke seconde → CONFIRM_CLOSED(EXPIRED)
-  └─ zonder FAP-sessie en idle: start_request pollen (§8)
+FlipperDevice (één RPC-sessie, gedeeld met de tools; één lock)
+  ├─ RpcClient.event_hook: elk ongevraagd frame vóór de eventqueue
+  │    DataExchange van de app / zijn APP_CLOSED → AppEvent → bridge (niet in de queue van 256)
+  ├─ app_send: één DataExchange, stop-and-wait; immuun voor de noodstop, nooit een reconnect
+  └─ poll_app_events: leest alleen als niemand op de lock wacht (tool-calls gaan voor)
+FlipperUiBridge
+  ├─ hoofdlus: alle bridge-toestand; andere threads zetten alleen werk in de inbox
+  ├─ lezer: poll_app_events
+  ├─ zender: ≤5/s, 3x opnieuw na 200 ms bij CMD_ERROR, PROGRESS ≤1/s (nieuwste wint)
+  ├─ workers: action, confirm, device, aux; de noodstop heeft een eigen thread
+  ├─ HELLO → WELCOME → lease koppelen → PRESETS, STATUS, open pendings tonen
+  ├─ ACTION quick → QUICK_ACTIONS[id] → runner.call("flipper-ui", tool, args) → RESULT
+  ├─ ACTION preset → AgentSession("flipper-ui").run_turn(prompt) → PROGRESS/RESULT
+  ├─ CONFIRM_ANSWER → ConfirmHandles.take → runner.confirm_physical / reject_physical
+  ├─ CANCEL → agent-beurt stopt bij de volgende stap; tool-call via abort waar mogelijk
+  └─ zonder app en idle: start_request pollen (§8); nieuwe pending → app starten als de loader vrij is
 ```
 
-- Bij `APP_CLOSED` of een verbroken transport worden alle handles ingetrokken (`revoke_all`) en stopt de zendrij.
-- Lange storage-operaties tijdens een FAP-sessie vermijden of opknippen: ze blokkeren beide richtingen (spike test 4).
-- Sub-GHz/RFID via de CLI (USB) kunnen niet zolang de FAP draait (`loader_lock`, spike §2). Daarom zitten ze niet in de snelle acties.
+- **Starten:** handmatig (§8, verzoeken ouder dan 30 s volgens de Flipper-klok worden genegeerd), of door de Pi bij een nieuwe pending. De Pi start de app **alleen als de loader vrij is**, en sluit nooit een app van de gebruiker. Na een verbroken link start de bridge de app opnieuw, met backoff, tot 5 minuten. Sloot de gebruiker de app zelf, of kwam er nooit een HELLO, dan niet.
+- **`ir_send` heeft de loader nodig.** Staat de app open, dan sluit `FlipperDevice` hem eerst, voert de Infrared-app uit en start de app daarna opnieuw (handoff). De app groet dan met een nieuwe instance. Mislukt de herstart, dan koppelt de bridge los. Het scherm van de app gaat bij elke IR-transmit dus even dicht en weer open.
+- **Sub-GHz/NFC/RFID via de CLI** weigeren met `app_locked` zolang de app open is: het verlaten van de RPC-sessie zou hem sluiten (`loader_lock`, spike §2). Daarom zitten ze ook niet in de snelle acties.
+- Bij `APP_CLOSED` of een verbroken transport: eerst de lease los, dan alle handles intrekken (`revoke_all`) en de zendrij leeg.
+- Lange storage-operaties tijdens een app-sessie vermijden of opknippen: ze blokkeren beide richtingen (spike test 4).
+
+### Nog niet op hardware getest
+
+Handshake en snelle acties over BLE; `storage_delete` en de datumaanvraag op Momentum; de timing van de `ir_send`-handoff (hoe lang de loader bezet blijft na APP_CLOSED); het gedrag als de app hangt; de valtest (20x); of OK/Back op de echte app de vraag-flow volgt.
 
 ## 11. Testen
 
