@@ -174,6 +174,11 @@ Zo'n 15 tot 25 s na die laatste run is de Flipper **volledig vastgelopen**. USB-
 
 **Oordeel:** de gewenste uitkomst (de app stopt, reconnect geeft weer OK) is gehaald. Maar in 3 van de 4 runs ging dat via een reboot en niet via een nette SessionClose. In de vierde run ging het eerst goed, waarna de Flipper vastliep. Dat de oorzaak in de SessionClose-afhandeling zit, is een **aanname**: de reboots vallen in tijd samen met het verbreken, maar een crashlog heb ik niet. Het kan ook aan de test-FAP's liggen. De officiële `rpc_debug_app_free` ruimt bijvoorbeeld `view_dispatcher` en `scene_manager` op met `free()` in plaats van met `*_free()`, en dat is als interne app nooit een probleem geweest. Het vastlopen kan ook komen doordat ik de `log debug`-sessie op USB met Ctrl+C en close heb afgebroken. Uitzoeken voordat we de FAP bouwen; zie "Handmatig nog te doen".
 
+**Aanvulling (Stijn, na de reset):** de Flipper was opnieuw opgestart met een **BusFault** op het scherm. Een BusFault is een ongeldige geheugentoegang. Dat past bij een use-after-free: bij sessieverlies geeft `rpc_system_app_free` het `RpcAppSystem` vrij (`rpc_app.c`) en wacht tot de FAP zijn callback op NULL zet. Een FAP die daarna nog die context gebruikt (de pointer uit de `"RPC %08lX"`-args, of een `rpc_system_app_*`-aanroep vanuit een andere thread, zoals de ticker van dxprobe), leest vrijgegeven geheugen. **Nog niet bewezen** (geen PC/adres genoteerd), maar dit is de werkhypothese. **Eis voor onze FAP:**
+- Bij `RpcAppEventTypeSessionClose`: in de callback direct `rpc_system_app_set_callback(rpc, NULL, NULL)`, een vlag zetten en de pointer op NULL zetten. Daarna in die FAP nooit meer een `rpc_system_app_*`-aanroep, uit geen enkele thread.
+- Alle `rpc_system_app_*`-aanroepen achter één mutex, samen met de controle op die vlag.
+- Testen met een opzettelijke BLE-drop tijdens verzenden, minstens 20 keer, voordat we de FAP als stabiel beschouwen.
+
 ### Test 6: args-limiet: **nog te doen**
 
 Niet uitgevoerd, omdat de Flipper na test 5 vastzat. `pitb_argprobe.fap` staat klaar en laat precies zien wat er aankomt (lengte, checksum, begin en eind).
