@@ -2,7 +2,7 @@
 
 Software voor een Raspberry Pi 5 (Kali Linux ARM64) die een **Flipper Zero** en een **Alfa AWUS036AXML** aanstuurt via een LLM, voor je eigen lab en apparaten.
 
-> **Status: fase 2.** Kern + MCP-server over stdio (lokaal) en streamable HTTP met OAuth 2.1 (remote, via een Cloudflare Tunnel naar de Claude-app). Flipper via USB. BLE, de Flipper-app en de agent-loop komen in latere fases.
+> **Status: fase 3.** Kern + MCP-server over stdio (lokaal) en streamable HTTP met OAuth 2.1 (remote, via een Cloudflare Tunnel naar de Claude-app). Flipper via USB of Bluetooth LE. De Flipper-app en de agent-loop komen in latere fases.
 
 ## Ontwerp in het kort
 
@@ -108,6 +108,24 @@ De server werkt met elke MCP-client (Claude Desktop, Cursor, Open WebUI, ...). P
 | `PITOOLBOX_AUTH_DB` | `~/.local/state/pitoolbox/auth.sqlite` |
 | `PITOOLBOX_ACCESS_TOKEN_TTL_S` / `PITOOLBOX_REFRESH_TOKEN_TTL_S` | `900` / `604800` |
 | `PITOOLBOX_EXTRA_REDIRECT_URIS` | leeg (alleen tijdelijk voor de MCP Inspector) |
+| `PITOOLBOX_FLIPPER_TRANSPORT` | `auto` (eerst USB, anders BLE), of `usb` / `ble` |
+| `PITOOLBOX_FLIPPER_BLE_ADDRESS` | geen (dan zoeken op naamprefix); aanbevolen om vast te zetten |
+| `PITOOLBOX_FLIPPER_BLE_NAME_PREFIX` | `Flipper` |
+| `PITOOLBOX_FLIPPER_KEEPALIVE_S` | `20` (alleen BLE; `0` = uit) |
+
+## Flipper draadloos via Bluetooth LE (fase 3)
+
+`FlipperDevice` heeft één interface met twee transports: USB (serial) en BLE ([bleak](https://github.com/hbldh/bleak) op BlueZ). Over BLE gebruikt pitoolbox de seriële GATT-service van de Flipper (UUID's uit de firmwarebron `targets/f7/ble_glue/services/serial_service_uuid.inc`), met de flow control van de firmware: de host schrijft nooit meer dan de door de Flipper gemelde buffercredit.
+
+> **Beperking:** over BLE opent de Flipper direct een RPC-sessie en is er **geen CLI** (`applications/services/bt/bt_service/bt.c`). Daarom werken over BLE alleen `system_info`, `storage_list`, `storage_read` en `ir_send`. `subghz_rx`, `nfc_read` en `rfid_read` hebben USB nodig: met `transport=auto` en een aangesloten kabel schakelt pitoolbox daar automatisch voor over, anders krijg je `unsupported_transport`.
+
+```bash
+uv run pitoolbox-flipper ble-scan              # Flippers in de buurt
+uv run pitoolbox-flipper ble-pair AA:BB:..:FF  # voer de 6-cijferige code van het Flipper-scherm in
+uv run pitoolbox-flipper ble-test --compare-usb  # system_info, storage_list, ping-latency, doorvoer
+```
+
+Koppelen gaat via een eigen BlueZ-agent over D-Bus (geen `bluetoothctl`, geen shell). Daarna zet je `PITOOLBOX_FLIPPER_BLE_ADDRESS`. Bij `auto` en `ble` wordt na een verbroken verbinding opnieuw verbonden, en een keepalive-ping houdt een idle BLE-link levend. Stap voor stap, met troubleshooting: [docs/fase3-ble.md](docs/fase3-ble.md).
 
 ## Remote via de Claude-app (fase 2)
 
@@ -148,7 +166,9 @@ src/pitoolbox/
   config.py
   core/
     scope.py policy.py audit.py errors.py proc.py
-    devices/flipper.py        # FlipperDevice: USB nu, BLE later, zelfde interface
+    devices/flipper.py        # FlipperDevice: USB of BLE achter één interface
+    devices/_flipper_ble.py   # BLE-transport (bleak), serial-service-UUID's, flow control
+    devices/_ble_pairing.py   # BlueZ-agent (D-Bus) voor koppelen met PIN
     devices/_flipper_rpc/     # framing, RPC-client, gegenereerde protobuf (pb/)
     devices/_flipper_cli.py   # vaste CLI-sjablonen + parsers per firmwareprofiel
     devices/wifi.py           # AlfaAdapter, CaptureManager, parsers
@@ -156,11 +176,25 @@ src/pitoolbox/
     tools/                    # base, runner, flipper_tools, wifi_tools, system_tools
   frontends/mcp_server.py     # MCPServer (opvolger van FastMCP in mcp 2.x), stdio + HTTP
   auth/                       # OAuth 2.1: provider, SQLite-store, /login, crypto, CLI
+  flipper_cli.py              # pitoolbox-flipper: ble-scan/pair/unpair/list/test
 deploy/                       # cloudflared-config, systemd-units, install.sh, env-voorbeeld
 docs/fase2-remote.md          # installatie remote + troubleshooting
+docs/fase3-ble.md             # Flipper via Bluetooth: koppelen, testen, troubleshooting
 scripts/gen_proto.py          # protobuf opnieuw genereren
 tests/
 ```
+
+## Hardware-testchecklist fase 3
+
+Volledige lijst in [docs/fase3-ble.md](docs/fase3-ble.md). In het kort:
+
+- [ ] `ble-scan` vindt de Flipper; `ble-pair` vraagt de code van het Flipper-scherm en koppelt
+- [ ] `ble-test`: system_info en storage_list via BLE; noteer ping-latency en doorvoer (KiB/s) en vergelijk met `--compare-usb`
+- [ ] Haalt BlueZ op de Pi 5 een grote MTU, of blijft het bij 20 bytes per write (traag maar werkend)?
+- [ ] `ir_send` via BLE (bevestigen → zendt)
+- [ ] `subghz_rx` met `transport=auto`: zonder kabel `unsupported_transport`, met kabel automatisch via USB
+- [ ] Flipper buiten bereik en terug: de volgende call verbindt opnieuw; keepalive houdt een idle link levend
+- [ ] De service als gebruiker `pitoolbox` (groep `bluetooth`) kan BLE gebruiken zonder D-Bus-fouten
 
 ## Hardware-testchecklist fase 2
 

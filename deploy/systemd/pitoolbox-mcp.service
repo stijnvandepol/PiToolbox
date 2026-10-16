@@ -20,6 +20,10 @@ Documentation=file:///opt/pitoolbox/docs/fase2-remote.md
 # Alleen loopback nodig; geen network-online.target. De tunnel (cloudflared-pitoolbox.service)
 # is een aparte unit en hoeft niet "Requires" te zijn van de MCP-server.
 After=network.target
+# Fase 3 (BLE): als bluetoothd op dezelfde boot start, eerst die; zonder bluetooth.service
+# (geen BLE gebruikt) doet deze ordening niets. Bewust geen Wants=/Requires=: USB-only werkt ook
+# zonder BlueZ.
+After=bluetooth.service
 # Herstartbeperking (staat in [Unit], zie systemd.unit): max. 5 starts per 5 minuten, daarna blijft
 # de unit "failed" tot `systemctl reset-failed pitoolbox-mcp` (zo draait een kapotte config niet
 # eindeloos in een lus). Geldt voor alle starts, ook handmatige (systemd.unit).
@@ -35,8 +39,16 @@ Type=exec
 User=pitoolbox
 Group=pitoolbox
 # Flipper Zero is /dev/ttyACM* (groep dialout); vcgencmd praat met /dev/vcio (groep video).
+# Fase 3 (Flipper over BLE): bleak/dbus-fast praat met BlueZ (org.bluez) over de system D-Bus en
+# opent zelf geen Bluetooth-sockets. Debian (en dus Kali) voegt in /usr/share/dbus-1/system.d/
+# bluetooth.conf expliciet een <policy group="bluetooth"> met <allow send_destination="org.bluez"/>
+# toe (patch debian/patches/bluetooth.conf.patch in https://salsa.debian.org/bluetooth-team/bluez;
+# upstream https://github.com/bluez/bluez/blob/master/src/bluetooth.conf staat send_destination
+# org.bluez ook in <policy context="default"> toe). De groep is dus de bedoelde, gedocumenteerde
+# route voor niet-root; de groep wordt door het Debian-pakket 'bluez' aangemaakt (postinst). De
+# groep MOET bestaan (sudo apt install bluez), anders weigert systemd de unit te starten.
 # SupplementaryGroups= vult de groepen uit /etc/group aan, het vervangt ze niet (systemd.exec).
-SupplementaryGroups=dialout video
+SupplementaryGroups=dialout video bluetooth
 
 # Alle PITOOLBOX_*-variabelen. Het bestand bevat later ook API-sleutels: chmod 600, eigenaar
 # pitoolbox. systemd leest het zelf in vanuit de service manager (systemd.exec: "from the file
@@ -114,6 +126,16 @@ LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+# BLE (fase 3) en deze hardening, nagelopen tegen de bleak 3.0.2- en dbus-fast-broncode:
+#  - RestrictAddressFamilies: de BlueZ-backend van bleak gebruikt alleen een AF_UNIX-verbinding met
+#    /run/dbus/system_bus_socket (dbus-fast: socket.AF_UNIX; er komt geen AF_BLUETOOTH in voor);
+#    de AF_BLUETOOTH-sockets zijn van bluetoothd zelf. AF_UNIX staat al in de lijst hieronder:
+#    geen wijziging nodig. Connect() op een socketbestand lukt ook met ProtectSystem=strict.
+#  - PrivateDevices staat al uit; BLE heeft geen device-nodes nodig (alles loopt via bluetoothd).
+#  - CapabilityBoundingSet/AmbientCapabilities: een D-Bus-client heeft geen capabilities nodig
+#    (peer-credentials via SO_PEERCRED, AUTH EXTERNAL op uid).
+#  - ProtectHome=yes verbergt /run/user; BlueZ draait op de system bus, niet de sessiebus.
+#  Dit is niet op een Pi getest: zie de hardware-testlijst in docs/fase3-ble.md.
 # Bewust NIET gezet:
 #  - PrivateDevices=yes: maakt een minimale /dev zonder /dev/ttyACM* (Flipper) en /dev/vcio.
 #    Wil je dit strakker, gebruik DevicePolicy=closed + DeviceAllow= (systemd.resource-control).

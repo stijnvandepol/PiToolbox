@@ -83,7 +83,9 @@ class FakeFlipperTransport:
         rfid_script: str = "rfid_read_tag.txt",
         nfc_script: str = "nfc_scanner_tag.txt",
         start_in_rpc: bool = False,
+        kind: str = "usb",
     ) -> None:
+        self.kind = kind  # "ble": gedraagt zich als BLE (geen CLI) zodra start_in_rpc ook waar is
         self.device_info = (
             device_info if device_info is not None else fixture_json("device_info.json")
         )
@@ -130,6 +132,10 @@ class FakeFlipperTransport:
         self._error_text = ""
 
     # --- ByteTransport ----------------------------------------------------------------
+
+    @property
+    def starts_in_rpc(self) -> bool:
+        return self.start_in_rpc
 
     @property
     def is_open(self) -> bool:
@@ -533,3 +539,374 @@ class FakeFlipperTransport:
         self._line.clear()
         self._app_running = False
         self._emit(MAIN_PROMPT)
+
+
+# --- BLE: GATT-kant van een Flipper + fake bleak --------------------------------------------
+#
+# Nagebootst uit serial_service.c: TX = indicaties, flow control = uint32 big-endian met de
+# vrije RPC-buffer (alleen een notify als het krediet op 0 stond en de buffer leeg is), RX = write
+# (without response). De RPC-engine erachter is de FakeFlipperTransport in RPC-modus.
+
+BLE_ADV_UUID = "00003080-0000-1000-8000-00805f9b34fb"
+
+# Letterlijke kopieën, los van de productiecode (zodat een typefout daar opvalt).
+RX_UUID_FAKE = "19ed82ae-ed21-4c9d-4145-228e62fe0000"
+TX_UUID_FAKE = "19ed82ae-ed21-4c9d-4145-228e61fe0000"
+FLOW_UUID_FAKE = "19ed82ae-ed21-4c9d-4145-228e63fe0000"
+
+
+def wait_until(condition: Any, timeout: float = 3.0) -> bool:
+    """Poll tot `condition()` waar is (voor gebeurtenissen in de BLE-loopthread)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.005)
+    return bool(condition())
+
+
+class FakeBleFlipper:
+    """De GATT-server van één Flipper. Thread-safe: tests en de bleak-loop praten tegelijk."""
+
+    def __init__(
+        self,
+        *,
+        address: str = "80:E1:26:00:00:01",
+        name: str = "Flipper Testy",
+        rssi: int = -60,
+        buff_size: int = 1024,
+        mtu: int = 247,
+        indication_size: int = 100,
+        paired: bool = True,
+        swallow: bool = False,
+        files: dict[str, bytes] | None = None,
+    ) -> None:
+        self.address = address
+        self.name = name
+        self.rssi = rssi
+        self.buff_size = buff_size
+        self.mtu = mtu
+        self.indication_size = indication_size
+        self.paired = paired
+        self.swallow = swallow  # RX-bytes alleen tellen, niet door de RPC-engine halen
+        self.rpc = FakeFlipperTransport(start_in_rpc=True, kind="ble", files=files)
+        # --- schakelaars ---
+        self.advertising = True
+        self.auto_refill = True
+        self.refill_delay_s = 0.0
+        self.connect_error: BaseException | None = None
+        self.missing_chars = False
+        self.initial_credit: int | None = None  # None = buff_size
+        # --- waarnemingen ---
+        self.connects = 0
+        self.writes: list[int] = []  # lengte van elke RX-write
+        self.credits_before: list[int] = []  # krediet (Flipper-kant) vlak voor elke write
+        self.overflows = 0  # writes groter dan het krediet
+        self.received = bytearray()
+        self.write_responses: list[bool] = []
+        self.indications = 0
+        self.refills = 0
+        # --- intern ---
+        self.credit = buff_size
+        self._lock = threading.Lock()
+        self._client: FakeBleakClient | None = None
+        self._loop: Any = None
+        self._subs: dict[str, Any] = {}
+
+    # --- verbinding -------------------------------------------------------------------
+
+    def attach(self, client: FakeBleakClient, loop: Any) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        with self._lock:
+            self._client = client
+            self._loop = loop
+            self._subs.clear()
+            self.connects += 1
+            self.credit = self.buff_size if self.initial_credit is None else self.initial_credit
+        self.rpc.close()
+        self.rpc.open()  # nieuwe RPC-sessie (bt.c opent die bij elke verbinding)
+
+    def detach(self, client: FakeBleakClient) -> None:
+        with self._lock:
+            if self._client is client:
+                self._client = None
+
+    def drop_link(self) -> None:
+        """De link valt weg (Flipper uit, buiten bereik): disconnected_callback volgt."""
+        with self._lock:
+            client, loop = self._client, self._loop
+            self._client = None
+        if client is not None and loop is not None:
+            client.mark_lost()
+            loop.call_soon_threadsafe(client.fire_disconnected)
+
+    # --- GATT-kant ---------------------------------------------------------------------
+
+    def _auth_error(self) -> BaseException:
+        from bleak.exc import BleakGATTProtocolError, BleakGATTProtocolErrorCode
+
+        return BleakGATTProtocolError(BleakGATTProtocolErrorCode.INSUFFICIENT_AUTHENTICATION)
+
+    def read_flow(self) -> bytes:
+        if not self.paired:
+            raise self._auth_error()
+        with self._lock:
+            value = self.credit
+        return int(value).to_bytes(4, "big")
+
+    def subscribe(self, uuid: str, callback: Any, characteristic: Any) -> None:
+        if not self.paired:
+            raise self._auth_error()
+        with self._lock:
+            self._subs[uuid] = (callback, characteristic)
+
+    def write_rx(self, data: bytes, response: bool) -> None:
+        if not self.paired:
+            if response:
+                raise self._auth_error()
+            return  # write without response naar een geweigerd attribuut verdwijnt stil
+        with self._lock:
+            self.writes.append(len(data))
+            self.credits_before.append(self.credit)
+            self.write_responses.append(response)
+            if len(data) > self.credit:
+                self.overflows += 1
+            self.credit = max(0, self.credit - len(data))
+            self.received.extend(data)
+            drained = self.credit == 0
+        if not self.swallow:
+            try:
+                self.rpc.write(bytes(data))
+            except TransportError:
+                self.drop_link()  # de simulator liet de verbinding vallen (fail_on_rpc_kind)
+                return
+            self._pump()
+        if drained and self.auto_refill and self._loop is not None:
+            self._loop.call_later(self.refill_delay_s, self.refill)
+
+    def _pump(self) -> None:
+        """Antwoordbytes van de RPC-engine als indicaties van `indication_size` bytes."""
+        while True:
+            data = self.rpc.read(4096, 0.0)
+            if not data:
+                return
+            for i in range(0, len(data), self.indication_size):
+                self._deliver(TX_UUID_FAKE, data[i : i + self.indication_size])
+                self.indications += 1
+
+    def refill(self) -> None:
+        """RPC-buffer leeg: de Flipper meldt de volle bufferruimte (notify_buffer_is_empty)."""
+        with self._lock:
+            self.credit = self.buff_size
+            self.refills += 1
+        self._deliver(FLOW_UUID_FAKE, self.buff_size.to_bytes(4, "big"))
+
+    def _deliver(self, uuid: str, data: bytes) -> None:
+        with self._lock:
+            sub = self._subs.get(uuid)
+            loop = self._loop
+        if sub is not None and loop is not None:
+            callback, characteristic = sub
+            loop.call_soon_threadsafe(callback, characteristic, bytearray(data))
+
+
+class FakeBleChar:
+    def __init__(self, flipper: FakeBleFlipper, uuid: str, properties: list[str]) -> None:
+        self._flipper = flipper
+        self.uuid = uuid
+        self.properties = properties
+
+    @property
+    def max_write_without_response_size(self) -> int:
+        return self._flipper.mtu - 3
+
+
+class FakeBleServices:
+    def __init__(self, flipper: FakeBleFlipper) -> None:
+        self._chars = {
+            RX_UUID_FAKE: FakeBleChar(
+                flipper, RX_UUID_FAKE, ["write-without-response", "write", "read"]
+            ),
+            TX_UUID_FAKE: FakeBleChar(flipper, TX_UUID_FAKE, ["read", "indicate"]),
+            FLOW_UUID_FAKE: FakeBleChar(flipper, FLOW_UUID_FAKE, ["read", "notify"]),
+        }
+        if flipper.missing_chars:
+            del self._chars[FLOW_UUID_FAKE]
+
+    def get_characteristic(self, uuid: str) -> FakeBleChar | None:
+        return self._chars.get(str(uuid).lower())
+
+
+class FakeBleakClient:
+    """Vervanger voor `bleak.BleakClient`; `world` wordt per test gebonden (install_fake_bleak)."""
+
+    world: FakeBleWorld
+
+    def __init__(
+        self,
+        address_or_ble_device: Any,
+        disconnected_callback: Any = None,
+        services: Any = None,
+        *,
+        timeout: float = 30,
+        pair: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        self.address = str(getattr(address_or_ble_device, "address", address_or_ble_device))
+        self._flipper = self.world.find(self.address)
+        self._disconnected_callback = disconnected_callback
+        self._connected = False
+        self.pair_requested = pair
+
+    async def connect(self, **kwargs: Any) -> None:
+        import asyncio
+
+        from bleak.exc import BleakDeviceNotFoundError
+
+        if self._flipper is None or not self._flipper.advertising:
+            raise BleakDeviceNotFoundError(self.address, f"{self.address} niet gevonden")
+        self._flipper.attach(self, asyncio.get_running_loop())
+        self._connected = True
+
+    async def disconnect(self) -> None:
+        if self._connected and self._flipper is not None:
+            self._connected = False
+            self._flipper.detach(self)
+
+    # --- door FakeBleFlipper aangeroepen ---
+
+    def mark_lost(self) -> None:
+        self._connected = False
+
+    def fire_disconnected(self) -> None:
+        if self._disconnected_callback is not None:
+            self._disconnected_callback(self)
+
+    # --- bleak-API ---
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    @property
+    def name(self) -> str:
+        return self._flipper.name if self._flipper is not None else self.address
+
+    @property
+    def mtu_size(self) -> int:
+        return 23  # zoals BlueZ
+
+    @property
+    def services(self) -> FakeBleServices:
+        assert self._flipper is not None
+        return FakeBleServices(self._flipper)
+
+    def _require_connected(self) -> FakeBleFlipper:
+        from bleak.exc import BleakError
+
+        if not self._connected or self._flipper is None:
+            raise BleakError("Not connected")
+        return self._flipper
+
+    async def read_gatt_char(self, char: Any, *, use_cached: bool = False) -> bytearray:
+        flipper = self._require_connected()
+        assert str(char).lower() == FLOW_UUID_FAKE
+        return bytearray(flipper.read_flow())
+
+    async def start_notify(self, char: Any, callback: Any, **kwargs: Any) -> None:
+        flipper = self._require_connected()
+        uuid = str(char).lower()
+        characteristic = FakeBleServices(flipper).get_characteristic(uuid)
+        assert characteristic is not None
+        flipper.subscribe(uuid, callback, characteristic)
+
+    async def write_gatt_char(self, char: Any, data: Any, response: bool | None = None) -> None:
+        from bleak.exc import BleakError
+
+        flipper = self._require_connected()
+        assert str(char).lower() == RX_UUID_FAKE
+        if not response and len(data) > flipper.mtu - 3:
+            raise BleakError("data langer dan max_write_without_response_size")
+        flipper.write_rx(bytes(data), bool(response))
+
+
+class FakeBleWorld:
+    """Alle BLE-apparaten in de buurt: Flippers en ruis."""
+
+    def __init__(self, *flippers: FakeBleFlipper) -> None:
+        self.flippers: list[FakeBleFlipper] = list(flippers)
+        self.noise: list[tuple[str, str, int, list[str]]] = []  # (adres, naam, rssi, uuids)
+        self.scan_error: BaseException | None = None
+
+    def add_noise(
+        self, address: str, name: str, rssi: int = -80, service_uuids: list[str] | None = None
+    ) -> None:
+        self.noise.append((address, name, rssi, service_uuids or []))
+
+    def find(self, address: str) -> FakeBleFlipper | None:
+        for flipper in self.flippers:
+            if flipper.address.lower() == address.lower():
+                return flipper
+        return None
+
+    def seen(self) -> dict[str, tuple[Any, Any]]:
+        from bleak.backends.device import BLEDevice
+        from bleak.backends.scanner import AdvertisementData
+
+        result: dict[str, tuple[Any, Any]] = {}
+        entries: list[tuple[str, str, int, list[str]]] = [
+            (f.address, f.name, f.rssi, [BLE_ADV_UUID]) for f in self.flippers if f.advertising
+        ]
+        entries.extend(self.noise)
+        for address, name, rssi, uuids in entries:
+            device = BLEDevice(address, name, None)
+            adv = AdvertisementData(name or None, {}, {}, uuids, None, rssi, ())
+            result[address] = (device, adv)
+        return result
+
+
+class FakeBleakScanner:
+    world: FakeBleWorld
+
+    @classmethod
+    async def discover(
+        cls, timeout: float = 5.0, *, return_adv: bool = False, **kwargs: Any
+    ) -> Any:
+        if cls.world.scan_error is not None:
+            raise cls.world.scan_error
+        seen = cls.world.seen()
+        return seen if return_adv else [d for d, _ in seen.values()]
+
+    @classmethod
+    async def find_device_by_filter(
+        cls, filterfunc: Any, timeout: float = 10.0, **kwargs: Any
+    ) -> Any:
+        if cls.world.scan_error is not None:
+            raise cls.world.scan_error
+        for device, adv in cls.world.seen().values():
+            if filterfunc(device, adv):
+                return device
+        return None
+
+    @classmethod
+    async def find_device_by_address(
+        cls, device_identifier: str, timeout: float = 10.0, **kwargs: Any
+    ) -> Any:
+        return await cls.find_device_by_filter(
+            lambda d, ad: d.address.lower() == device_identifier.lower(), timeout
+        )
+
+
+def install_fake_bleak(monkeypatch: Any, world: FakeBleWorld) -> None:
+    """Laat `_flipper_ble` de fake client en scanner gebruiken (niets raakt echte Bluetooth)."""
+    from pitoolbox.core.devices import _flipper_ble
+
+    monkeypatch.setattr(
+        _flipper_ble, "BleakClient", type("BoundFakeClient", (FakeBleakClient,), {"world": world})
+    )
+    monkeypatch.setattr(
+        _flipper_ble,
+        "BleakScanner",
+        type("BoundFakeScanner", (FakeBleakScanner,), {"world": world}),
+    )

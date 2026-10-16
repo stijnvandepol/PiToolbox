@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -25,6 +26,13 @@ class Settings(BaseModel):
     flipper_port: str | None = None
     # "auto" = kiezen op basis van firmware_origin_fork uit DeviceInfo
     flipper_cli_profile: str = "auto"
+    # Fase 3: "auto" = eerst USB, dan BLE; of vast "usb" / "ble".
+    flipper_transport: Literal["auto", "usb", "ble"] = "auto"
+    # BLE: vast adres van de gepairde Flipper (aanbevolen), anders zoeken op naamprefix.
+    flipper_ble_address: str | None = None
+    flipper_ble_name_prefix: str = "Flipper"
+    # Interval (s) voor een RPC-ping als de verbinding idle is; 0 = uit.
+    flipper_keepalive_s: float = 20.0
     alfa_iface: str = "wlan1"
     uplink_iface: str = "wlan0"
     confirm_ttl_s: int = 60
@@ -57,6 +65,13 @@ class Settings(BaseModel):
             captures_dir=_env_path("PITOOLBOX_CAPTURES_DIR", "~/captures"),
             flipper_port=os.environ.get("PITOOLBOX_FLIPPER_PORT") or None,
             flipper_cli_profile=os.environ.get("PITOOLBOX_FLIPPER_CLI_PROFILE", "auto"),
+            flipper_transport=cast(
+                Literal["auto", "usb", "ble"],
+                os.environ.get("PITOOLBOX_FLIPPER_TRANSPORT", "auto"),
+            ),
+            flipper_ble_address=os.environ.get("PITOOLBOX_FLIPPER_BLE_ADDRESS") or None,
+            flipper_ble_name_prefix=os.environ.get("PITOOLBOX_FLIPPER_BLE_NAME_PREFIX", "Flipper"),
+            flipper_keepalive_s=float(os.environ.get("PITOOLBOX_FLIPPER_KEEPALIVE_S", "20")),
             alfa_iface=os.environ.get("PITOOLBOX_ALFA_IFACE", "wlan1"),
             uplink_iface=os.environ.get("PITOOLBOX_UPLINK_IFACE", "wlan0"),
             confirm_ttl_s=int(os.environ.get("PITOOLBOX_CONFIRM_TTL_S", "60")),

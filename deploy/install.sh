@@ -6,7 +6,7 @@
 # /etc/pitoolbox/pitoolbox.env, /etc/pitoolbox/scope.yaml, auth-database, audit-log of captures.
 #
 # Wat dit script doet:
-#   1. maakt systeemgebruikers/groepen 'pitoolbox' (in dialout + video) en 'cloudflared'
+#   1. maakt systeemgebruikers/groepen 'pitoolbox' (in dialout + video + bluetooth) en 'cloudflared'
 #   2. maakt /opt/pitoolbox (code), /etc/pitoolbox (0750), /var/lib/pitoolbox (0700, state),
 #      /etc/cloudflared (0750 root:cloudflared)
 #   3. kopieert de repo naar /opt/pitoolbox
@@ -78,9 +78,17 @@ if ! getent passwd "${APP_USER}" >/dev/null; then
 else
     info "gebruiker ${APP_USER} bestaat al"
 fi
-# dialout: Flipper-serial (/dev/ttyACM*); video: vcgencmd (/dev/vcio). Dit staat ook als
-# SupplementaryGroups= in de unit; lidmaatschap hier is nodig voor handmatig testen als die gebruiker.
-for grp in dialout video; do
+# dialout: Flipper-serial (/dev/ttyACM*); video: vcgencmd (/dev/vcio); bluetooth: BlueZ over D-Bus
+# (fase 3). Dit staat ook als SupplementaryGroups= in de unit; lidmaatschap hier is nodig voor
+# handmatig testen als die gebruiker.
+# Een groep die in SupplementaryGroups= staat maar niet bestaat laat de unit falen. Normaal maakt
+# het bluez-pakket 'bluetooth' aan; zonder bluez maken we hem hier leeg aan, zodat een
+# installatie met alleen USB ook start.
+if ! getent group bluetooth >/dev/null; then
+    warn "groep 'bluetooth' bestaat niet (bluez niet geïnstalleerd?); maak hem aan zodat de unit start"
+    groupadd --system bluetooth
+fi
+for grp in dialout video bluetooth; do
     if getent group "${grp}" >/dev/null; then
         usermod --append --groups "${grp}" "${APP_USER}"
     else

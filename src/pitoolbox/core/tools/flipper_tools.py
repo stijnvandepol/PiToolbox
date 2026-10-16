@@ -206,7 +206,8 @@ TOOLS: list[ToolSpec] = [
         name="subghz_rx",
         description=(
             "Luistert met de Sub-GHz-radio van de Flipper op een frequentie en geeft de "
-            "gedecodeerde pakketten terug. Alleen ontvangen, er wordt niets verzonden."
+            "gedecodeerde pakketten terug. Alleen ontvangen, er wordt niets verzonden. "
+            "Alleen via USB (de Flipper-CLI bestaat niet over BLE)."
         ),
         risk=Risk.READ,
         params=SubGhzRxArgs,
@@ -218,7 +219,8 @@ TOOLS: list[ToolSpec] = [
         name="nfc_read",
         description=(
             "Wacht tot een NFC-tag bij de Flipper wordt gehouden en geeft de herkende "
-            "protocollen terug (bijv. ISO14443-3A -> Mifare Classic). Leest geen kaartinhoud."
+            "protocollen terug (bijv. ISO14443-3A -> Mifare Classic). Leest geen kaartinhoud. "
+            "Alleen via USB (de Flipper-CLI bestaat niet over BLE)."
         ),
         risk=Risk.READ,
         params=NfcReadArgs,
@@ -229,7 +231,8 @@ TOOLS: list[ToolSpec] = [
         name="rfid_read",
         description=(
             "Wacht tot een 125 kHz-RFID-tag bij de Flipper wordt gehouden en geeft protocol, "
-            "data (hex) en leesbare info terug."
+            "data (hex) en leesbare info terug. "
+            "Alleen via USB (de Flipper-CLI bestaat niet over BLE)."
         ),
         risk=Risk.READ,
         params=RfidReadArgs,

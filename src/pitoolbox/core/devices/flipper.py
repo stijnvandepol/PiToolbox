@@ -10,6 +10,12 @@ Bronnen (zie de verwijzingen bij de afzonderlijke onderdelen):
   heropenen van de poort begint er dus altijd een verse CLI-shell.
 * Sessiehandshake en CR-only-detail: afgeleid van busse/flipperzero-mcp (MIT).
 
+Naast USB bestaat BLE (`_flipper_ble.BleTransport`): daar is er geen CLI. De Flipper opent bij
+een BLE-verbinding meteen een RPC-sessie (applications/services/bt/bt_service/bt.c,
+`RpcOwnerBle`); een transport met `starts_in_rpc` krijgt dus nooit CLI-bytes,
+`start_rpc_session` of Ctrl+C. Acties die de CLI nodig hebben (Sub-GHz/NFC/RFID) werken alleen
+via USB; in "auto"-modus schakelt het device daarvoor over naar USB als er een Flipper op USB zit.
+
 Eén lock rond alle device-I/O. `status()` en `abort()` nemen die lock nooit blokkerend.
 `abort()` verhoogt een generatieteller; lopende CLI-lussen en RPC-wachttijden controleren die
 elke ~50 ms, sturen Ctrl+C (0x03, `cli_is_pipe_broken_or_is_etx_next_char`) en geven `Aborted`.
@@ -21,6 +27,7 @@ import logging
 import re
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +45,7 @@ from pitoolbox.core.errors import (
     DeviceError,
     DeviceNotConnected,
     DeviceTimeout,
+    UnsupportedTransport,
 )
 
 if TYPE_CHECKING:
@@ -63,8 +71,24 @@ class TransportError(DeviceError):
     code = "transport_error"
 
 
+_CLI_NEEDS_USB = (
+    "Sub-GHz/NFC/RFID gaan via de Flipper-CLI en die bestaat alleen via USB; "
+    "sluit de Flipper aan met USB"
+)
+
+
 class ByteTransport(Protocol):
     """Minimale bytestroom naar de Flipper; in tests vervangen door een simulator."""
+
+    @property
+    def kind(self) -> str:
+        """'usb' of 'ble'."""
+        ...
+
+    @property
+    def starts_in_rpc(self) -> bool:
+        """True: de verbinding staat na `open()` al in een RPC-sessie (geen CLI), zoals BLE."""
+        ...
 
     @property
     def is_open(self) -> bool: ...
@@ -87,6 +111,9 @@ class ByteTransport(Protocol):
 class UsbSerialTransport:
     """pyserial-transport. Zonder expliciete poort wordt op VID:PID 0483:5740 gezocht."""
 
+    kind = "usb"
+    starts_in_rpc = False  # de poort start in de CLI (cli_vcp.c)
+
     def __init__(self, port: str | None = None, baudrate: int = 115200) -> None:
         self._port = port
         self._baudrate = baudrate  # CDC negeert de baudrate; pyserial wil er wel een
@@ -107,6 +134,21 @@ class UsbSerialTransport:
         if len(found) > 1:
             log.warning("meerdere Flippers gevonden, eerste gekozen: %s", found[0].device)
         return str(found[0].device)
+
+    @staticmethod
+    def is_present(port: str | None = None) -> bool:
+        """Zit er een Flipper op USB (VID:PID), of staat de opgegeven poort in de lijst?"""
+        try:
+            UsbSerialTransport.find_port()
+            return True
+        except (DeviceNotConnected, OSError):
+            pass
+        if port:
+            try:
+                return any(str(p.device) == port for p in list_ports.comports())
+            except OSError:
+                return False
+        return False
 
     @property
     def is_open(self) -> bool:
@@ -168,6 +210,25 @@ class UsbSerialTransport:
         return f"usb-serieel {self._opened_port or self._port or '(auto)'}"
 
 
+def _auto_prefers_usb(settings: Settings) -> bool:
+    """'auto': USB als er een Flipper op zit. Een expliciet ingestelde poort wint tenzij er ook
+    een BLE-adres is ingesteld (dan is BLE het vangnet als de poort er niet is)."""
+    if UsbSerialTransport.is_present(settings.flipper_port):
+        return True
+    return settings.flipper_port is not None and settings.flipper_ble_address is None
+
+
+def make_transport(settings: Settings) -> ByteTransport:
+    """Kies USB of BLE volgens `flipper_transport` (bij 'auto' op dit moment: USB eerst)."""
+    mode = settings.flipper_transport
+    if mode == "usb" or (mode == "auto" and _auto_prefers_usb(settings)):
+        return UsbSerialTransport(settings.flipper_port)
+    # Pas hier importeren: bleak is zwaar en voor USB-gebruik niet nodig.
+    from pitoolbox.core.devices._flipper_ble import BleTransport
+
+    return BleTransport(settings.flipper_ble_address, settings.flipper_ble_name_prefix)
+
+
 @dataclass(frozen=True)
 class FlipperTiming:
     """Wachttijden in seconden; tests verkleinen deze."""
@@ -225,10 +286,19 @@ class FlipperDevice:
         cli_profile: str = "auto",
         *,
         timing: FlipperTiming | None = None,
+        keepalive_s: float = 0.0,
+        usb_probe: Callable[[], bool] | None = None,
     ) -> None:
+        """`keepalive_s` > 0: RPC-ping na zoveel seconden idle. `usb_probe` (alleen in 'auto'):
+        zit er nu een Flipper op USB? Dan schakelt een CLI-actie over BLE naar USB over."""
         self._factory = transport_factory
         self._profile_setting = cli_profile
         self._timing = timing or FlipperTiming()
+        self._keepalive_s = keepalive_s
+        self._usb_probe = usb_probe
+        self._last_io = time.monotonic()
+        self._ka_thread: threading.Thread | None = None
+        self._ka_stop = threading.Event()
         self._lock = threading.Lock()  # alle device-I/O
         self._gen_lock = threading.Lock()
         self._abort_gen = 0
@@ -244,13 +314,21 @@ class FlipperDevice:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> FlipperDevice:
-        """Lui: opent de poort pas bij het eerste gebruik."""
+        """Lui: verbindt pas bij het eerste gebruik. De transportkeuze (USB/BLE) wordt bij elke
+        (her)verbinding opnieuw gemaakt, zodat 'auto' een net aangesloten kabel oppakt."""
         port = settings.flipper_port
 
-        def factory() -> ByteTransport:
-            return UsbSerialTransport(port)
+        def probe() -> bool:
+            return UsbSerialTransport.is_present(port)
 
-        return cls(factory, settings.flipper_cli_profile)
+        usb_probe = probe if settings.flipper_transport == "auto" else None
+
+        return cls(
+            lambda: make_transport(settings),
+            settings.flipper_cli_profile,
+            keepalive_s=settings.flipper_keepalive_s,
+            usb_probe=usb_probe,
+        )
 
     # --- publieke levenscyclus --------------------------------------------------------
 
@@ -261,6 +339,7 @@ class FlipperDevice:
         return {
             "connected": transport is not None and transport.is_open,
             "transport": transport.describe() if transport is not None else "nog niet geopend",
+            "transport_kind": transport.kind if transport is not None else None,
             "mode": self._mode,
             "busy": self._busy_op is not None,
             "operation": self._busy_op,
@@ -271,6 +350,9 @@ class FlipperDevice:
         """Open de poort en breng de Flipper in een bekende CLI-toestand."""
 
         def op(gen: int, attempt: _Attempt) -> None:
+            if self._tx().starts_in_rpc:
+                self._ensure_rpc(gen)  # BLE: geen CLI, de sessie loopt al
+                return
             self._ensure_cli(gen)
             if self._profile_setting.strip().lower() not in ("", "auto"):
                 self._get_profile(gen)
@@ -280,12 +362,17 @@ class FlipperDevice:
     def close(self) -> None:
         """Sluit de verbinding; een lopende operatie wordt eerst afgebroken."""
         self._bump_generation()
+        self._stop_keepalive()
         with self._lock:
             self._drop_connection()
 
     def abort(self) -> None:
         """Breek lopende en wachtende operaties af. Blokkeert niet op de I/O-lock."""
         self._bump_generation()
+        # Een schrijfactie die op BLE-flow-control wacht kent de generatieteller niet.
+        interrupt = getattr(self._transport, "interrupt", None)
+        if callable(interrupt):
+            interrupt()
         # Een draaiende operatie ruimt zelf op (finally). Alleen als het apparaat vrij is maar
         # er toch een app open staat (eerdere mislukte opruiming) sluiten we die hier.
         if self._app_active and self._mode == "rpc" and self._lock.acquire(blocking=False):
@@ -305,6 +392,22 @@ class FlipperDevice:
             return dict(self._fetch_device_info(gen))
 
         return self._run("system_info", op)
+
+    def ping(self, payload: bytes = b"pitoolbox") -> float:
+        """Eén RPC-ping (system_ping_request); geeft de round-trip in seconden terug."""
+
+        def op(gen: int, attempt: _Attempt) -> float:
+            client = self._ensure_rpc(gen)
+            main = flipper_pb2.Main()
+            main.system_ping_request.data = payload
+            t0 = time.monotonic()
+            frames = client.request(main, self._timing.rpc_timeout_s, cancel=self._cancel(gen))
+            elapsed = time.monotonic() - t0
+            if frames[0].system_ping_response.data != payload:
+                raise DeviceError("ping-antwoord komt niet overeen met de verzonden data")
+            return elapsed
+
+        return self._run("ping", op)
 
     def storage_list(self, path: str) -> list[dict[str, Any]]:
         """Lijst een map: [{name, type: 'file'|'dir', size}]."""
@@ -364,6 +467,7 @@ class FlipperDevice:
         """Luister `duration_s` seconden op `frequency_hz` met de interne CC1101."""
 
         def op(gen: int, attempt: _Attempt) -> dict[str, Any]:
+            self._require_cli_transport()
             profile = self._get_profile(gen)
             command = profile.subghz_rx_command(frequency_hz)  # valideert de frequentie
             self._ensure_cli(gen)
@@ -389,6 +493,7 @@ class FlipperDevice:
         """Lees een 125 kHz-tag (stopt zodra er een tag is of na `timeout_s`)."""
 
         def op(gen: int, attempt: _Attempt) -> dict[str, Any]:
+            self._require_cli_transport()
             profile = self._get_profile(gen)
             self._ensure_cli(gen)
             body = self._cli_exec(
@@ -412,6 +517,7 @@ class FlipperDevice:
         """Detecteer een NFC-tag via de NFC-subshell (`nfc` -> `scanner -t` -> `exit`)."""
 
         def op(gen: int, attempt: _Attempt) -> dict[str, Any]:
+            self._require_cli_transport()
             profile = self._get_profile(gen)
             self._ensure_cli(gen)
             entered = self._cli_exec(
@@ -506,6 +612,7 @@ class FlipperDevice:
                 yield gen
             finally:
                 self._busy_op = None
+                self._last_io = time.monotonic()
 
     def _run(self, name: str, op: Callable[[int, _Attempt], T]) -> T:
         """Voer `op` uit onder de lock, met één reconnect bij een transportfout."""
@@ -523,7 +630,7 @@ class FlipperDevice:
                 log.warning("transportfout bij %s (%s); één keer opnieuw verbinden", name, exc)
             except (FrameError, DeviceTimeout):
                 # Na een desync of time-out weten we niet meer in welke modus de poort staat.
-                self._forget_mode()
+                self._protocol_failure()
                 raise
             try:
                 self._ensure_open()
@@ -532,8 +639,18 @@ class FlipperDevice:
                 self._drop_connection()
                 raise DeviceError(f"Flipper-verbinding mislukt na reconnect: {exc}") from exc
             except (FrameError, DeviceTimeout):
-                self._forget_mode()
+                self._protocol_failure()
                 raise
+
+    def _protocol_failure(self) -> None:
+        """Desync of time-out. USB: modus opnieuw bepalen via de CLI. Een transport zonder CLI
+        (BLE) kan niet hersynchroniseren; daar sluiten we de link en krijgt de volgende actie
+        een verse RPC-sessie."""
+        transport = self._transport
+        if transport is not None and transport.starts_in_rpc:
+            self._drop_connection()
+        else:
+            self._forget_mode()
 
     def _forget_mode(self, *, fresh_shell: bool = False) -> None:
         """Modus kwijt. `fresh_shell`: poort is net (her)opend, dus zeker geen RPC-sessie."""
@@ -551,15 +668,25 @@ class FlipperDevice:
         transport = self._transport
         if transport is not None and transport.is_open:
             return
-        if transport is None:
-            transport = self._factory()
-            self._transport = transport
+        if transport is not None:
+            # Weggevallen verbinding: eerst netjes opruimen (BLE: loop-thread en link).
+            try:
+                transport.close()
+            except Exception as exc:  # noqa: BLE001 - opruimen mag een reconnect niet blokkeren
+                log.debug("fout bij opruimen oude transport: %s", exc)
+        # Bij elke (her)verbinding opnieuw kiezen: 'auto' pakt zo een net aangesloten kabel op.
+        transport = self._factory()
+        self._transport = transport
         transport.open()
         # Na (her)openen begint DTR een verse CLI-shell (cli_vcp.c): toestand opnieuw bepalen.
         self._forget_mode(fresh_shell=True)
         self._device_info = None
         if self._profile_setting.strip().lower() in ("", "auto"):
             self._profile = None
+        if transport.starts_in_rpc:
+            self._enter_native_rpc()
+        self._last_io = time.monotonic()
+        self._start_keepalive()
 
     def _drop_connection(self) -> None:
         transport = self._transport
@@ -572,6 +699,61 @@ class FlipperDevice:
         self._device_info = None
         if self._profile_setting.strip().lower() in ("", "auto"):
             self._profile = None
+
+    # --- keepalive --------------------------------------------------------------------
+
+    def _start_keepalive(self) -> None:
+        if self._keepalive_s <= 0:
+            return
+        thread = self._ka_thread
+        if thread is not None and thread.is_alive():
+            return
+        stop = threading.Event()
+        self._ka_stop = stop
+        thread = threading.Thread(
+            target=_keepalive_main,
+            args=(weakref.ref(self), stop, self._keepalive_s),
+            name="flipper-keepalive",
+            daemon=True,
+        )
+        self._ka_thread = thread
+        thread.start()
+
+    def _stop_keepalive(self) -> None:
+        self._ka_stop.set()
+        thread, self._ka_thread = self._ka_thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def _keepalive_tick(self) -> None:
+        """Eén RPC-ping als de link idle is. Slaat over als het device bezet is."""
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            transport, client = self._transport, self._client
+            # Alleen voor transports die altijd RPC zijn (BLE): USB heeft geen keepalive nodig
+            # en blijft zo exact zoals in fase 1.
+            if (
+                transport is None
+                or not transport.is_open
+                or not getattr(transport, "starts_in_rpc", False)
+                or self._mode != "rpc"
+                or client is None
+                or self._app_active
+                or time.monotonic() - self._last_io < self._keepalive_s
+            ):
+                return
+            ping = flipper_pb2.Main()
+            ping.system_ping_request.data = b"keepalive"
+            try:
+                client.request(ping, self._timing.probe_timeout_s)
+            except DeviceError as exc:
+                log.warning("keepalive-ping mislukte (%s); verbinding wordt gesloten", exc)
+                self._drop_connection()  # de volgende actie verbindt opnieuw
+                return
+            self._last_io = time.monotonic()
+        finally:
+            self._lock.release()
 
     # --- ruwe leesprimitieven ---------------------------------------------------------
 
@@ -653,7 +835,31 @@ class FlipperDevice:
             lambda line: line == _GENERIC_PROMPT_SUFFIX, self._timing.prompt_timeout_s, gen
         )
 
+    def _require_cli_transport(self) -> None:
+        """CLI-acties: op een transport zonder CLI (BLE) eerst naar USB wisselen of weigeren."""
+        if not self._tx().starts_in_rpc:
+            return
+        if self._usb_probe is not None and self._usb_probe():
+            log.info("CLI-actie gevraagd over BLE; overschakelen naar USB")
+            self._drop_connection()
+            self._ensure_open()  # de factory kiest nu USB
+            if not self._tx().starts_in_rpc:
+                return
+        raise UnsupportedTransport(_CLI_NEEDS_USB)
+
+    def _enter_native_rpc(self) -> RpcClient:
+        """Transport zonder CLI: de RPC-sessie loopt al, er is alleen een client nodig."""
+        transport = self._tx()
+        client = RpcClient(transport, read_slice_s=self._timing.read_slice_s)
+        self._client = client
+        self._mode = "rpc"
+        self._maybe_rpc = False
+        self._app_active = False
+        return client
+
     def _ensure_cli(self, gen: int | None) -> None:
+        if self._tx().starts_in_rpc:
+            raise UnsupportedTransport(_CLI_NEEDS_USB)
         if self._mode == "cli":
             return
         if self._mode == "rpc" and self._client is not None and self._leave_rpc(gen):
@@ -692,6 +898,8 @@ class FlipperDevice:
     def _ensure_rpc(self, gen: int | None) -> RpcClient:
         if self._mode == "rpc" and self._client is not None:
             return self._client
+        if self._tx().starts_in_rpc:
+            return self._enter_native_rpc()
         self._sync_cli(gen)
         transport = self._tx()
         transport.reset_input()
@@ -908,6 +1116,22 @@ class FlipperDevice:
             log.warning("app afsluiten mislukte: %s", exc)
         finally:
             self._app_active = False
+
+
+def _keepalive_main(
+    ref: weakref.ReferenceType[FlipperDevice], stop: threading.Event, interval: float
+) -> None:
+    """Threadlus; houdt alleen een zwakke verwijzing zodat een vergeten device opgeruimd wordt."""
+    tick = max(0.02, min(interval / 4, 1.0))
+    while not stop.wait(tick):
+        device = ref()
+        if device is None:
+            return
+        try:
+            device._keepalive_tick()
+        except Exception:
+            log.exception("keepalive-tick faalde")
+        del device
 
 
 def _is_app_state(main: Main, state: int) -> bool:

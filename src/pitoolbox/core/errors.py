@@ -31,6 +31,12 @@ class UnsupportedFirmware(DeviceError):
     code = "unsupported_firmware"
 
 
+class UnsupportedTransport(DeviceError):
+    """Actie kan niet over de huidige verbinding (bijv. CLI-tools over BLE: alleen RPC)."""
+
+    code = "unsupported_transport"
+
+
 class InvalidState(ToolboxError):
     """Bijv. scan in managed mode gevraagd terwijl de adapter in monitor staat."""
 
