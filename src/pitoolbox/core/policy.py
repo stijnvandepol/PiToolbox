@@ -38,8 +38,12 @@ class Policy:
         self._scope_store = scope_store
         self._allowlist = set(allowlist or [])
 
+    def allows_tool(self, name: str) -> bool:
+        """Staat de tool in de allowlist (of is er geen allowlist)? Zonder scope-check."""
+        return not self._allowlist or name in self._allowlist
+
     def decide(self, spec: ToolSpec, args: ToolArgs) -> Decision:
-        if self._allowlist and spec.name not in self._allowlist:
+        if not self.allows_tool(spec.name):
             return Decision(Verdict.DENY, f"tool {spec.name} staat niet in de allowlist")
         if spec.risk is Risk.CONTROL:
             return Decision(Verdict.ALLOW)

@@ -80,6 +80,12 @@ class Settings(BaseModel):
     llm_max_retries: int = 2  # alleen bij 429/5xx/time-out/verbindingsfout
     llm_max_tokens: int = 4096
 
+    # --- fase 4: grenzen van de agent-loop (gecontroleerd in `agent.session.AgentLimits`) ---
+    agent_max_steps: int = 8  # tool-rondes per gebruikersbeurt
+    agent_max_calls_per_step: int = 8  # tool-calls per modelantwoord
+    agent_turn_timeout_s: float = 300.0  # wandkloktijd per beurt (tussen stappen gecontroleerd)
+    agent_max_result_chars: int = 8000  # tool-resultaat naar het model, daarna ingekort
+
     @field_validator("flipper_ble_adapter")
     @classmethod
     def _check_ble_adapter(cls, value: str | None) -> str | None:
@@ -127,4 +133,8 @@ class Settings(BaseModel):
             llm_timeout_s=float(os.environ.get("PITOOLBOX_LLM_TIMEOUT_S", "60")),
             llm_max_retries=int(os.environ.get("PITOOLBOX_LLM_MAX_RETRIES", "2")),
             llm_max_tokens=int(os.environ.get("PITOOLBOX_LLM_MAX_TOKENS", "4096")),
+            agent_max_steps=int(os.environ.get("PITOOLBOX_AGENT_MAX_STEPS", "8")),
+            agent_max_calls_per_step=int(os.environ.get("PITOOLBOX_AGENT_MAX_CALLS_PER_STEP", "8")),
+            agent_turn_timeout_s=float(os.environ.get("PITOOLBOX_AGENT_TURN_TIMEOUT_S", "300")),
+            agent_max_result_chars=int(os.environ.get("PITOOLBOX_AGENT_MAX_RESULT_CHARS", "8000")),
         )

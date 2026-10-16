@@ -36,6 +36,7 @@ dev = [
 pitoolbox-mcp = "pitoolbox.frontends.mcp_server:main"
 pitoolbox-auth = "pitoolbox.auth.cli:main"
 pitoolbox-flipper = "pitoolbox.flipper_cli:main"
+pitoolbox-agent = "pitoolbox.frontends.agent_cli:main"
 
 [tool.ruff]
 line-length = 100

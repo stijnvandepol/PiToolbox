@@ -261,3 +261,10 @@ def test_pending_clear() -> None:
 def test_pending_ttl_property() -> None:
     assert PendingStore(ttl_s=42).ttl_s == 42
     assert PendingStore().ttl_s == 60.0
+
+
+def test_allows_tool_follows_allowlist(fixed_scope: Scope) -> None:
+    assert Policy(ScopeStore.fixed(fixed_scope)).allows_tool("wat_dan_ook")
+    policy = Policy(ScopeStore.fixed(fixed_scope), allowlist=["status"])
+    assert policy.allows_tool("status")
+    assert not policy.allows_tool("ir_send")

@@ -3,6 +3,11 @@
 Velden: ts, frontend, tool, risk, args, decision, ok, error, result, duration_ms
 (+ pending_id bij bevestigingen). Lange strings worden ingekort zodat bijv.
 storage_read de log niet opblaast; bestandsinhoud hoort in captures, niet hier.
+
+De agent-loop (fase 4) schrijft daarnaast per beurt een regel met `event`
+("agent_turn_start" / "agent_turn_end": model, stopreden, aantallen, tokens; nooit
+berichtinhoud) en regels met `source: "agent"` voor wat de agent zelf weigert of de
+gebruiker afwijst. Toolcall-regels hebben geen `event`-veld.
 """
 
 from __future__ import annotations
