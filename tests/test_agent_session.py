@@ -44,7 +44,15 @@ from pitoolbox.core.scope import Scope
 from pitoolbox.core.tools import build_registry
 from pitoolbox.core.tools.base import ToolContext
 from pitoolbox.core.tools.runner import CONFIRM_TOOL, ToolRunner
-from pitoolbox.llm import LLMServerError, Message, ProviderState, StopReason, ToolResult
+from pitoolbox.llm import (
+    AssistantMessage,
+    LLMServerError,
+    Message,
+    ProviderState,
+    StopReason,
+    ToolResult,
+    UserMessage,
+)
 
 FRONTEND = "agent-cli"
 IR_POWER = {"device": "tv", "button": "Power"}
@@ -231,6 +239,35 @@ def test_step_limit(tmp_path: Path, make_ctx: Callable[..., ToolContext]) -> Non
     # Volgende beurt werkt gewoon (geschiedenis is geldig).
     lab.provider.add(reply("Oké, gestopt."))
     assert lab.turn("stop maar").stop is TurnStop.END_TURN
+
+
+def test_long_history_drops_oldest_whole_turns(
+    tmp_path: Path, make_ctx: Callable[..., ToolContext]
+) -> None:
+    lab = Lab(tmp_path, make_ctx(tmp_path), limits=AgentLimits(max_history_chars=10_000))
+    for i in range(6):  # elke beurt ~4000 tekens: tool call + antwoord
+        lab.provider.add(use(tool_call("status")), reply(f"antwoord {i} " + "x" * 4000))
+        lab.turn(f"vraag {i}")
+    # De laatste provider-call kreeg een geldige, begrensde geschiedenis (assert_valid_history
+    # draait in de fake) die met een gebruikersbeurt begint.
+    sent = lab.provider.requests[-1].messages
+    assert isinstance(sent[0], UserMessage)
+    assert "vraag 0" not in sent[0].text
+    assert "oudere gespreksbeurt(en) zijn weggelaten" in sent[0].text
+    assert sum(len(m.text) for m in sent if isinstance(m, AssistantMessage)) < 10_000
+    assert any(r.get("event") == "agent_history_trimmed" for r in lab.audit())
+
+
+def test_history_keeps_last_turn_even_if_over_budget(
+    tmp_path: Path, make_ctx: Callable[..., ToolContext]
+) -> None:
+    lab = Lab(tmp_path, make_ctx(tmp_path), limits=AgentLimits(max_history_chars=10_000))
+    lab.provider.add(reply("y" * 20_000), reply("kort"))
+    lab.turn("eerste")
+    lab.turn("tweede")
+    sent = lab.provider.requests[-1].messages
+    # De te grote eerste beurt valt weg; de nieuwe beurt staat er altijd.
+    assert isinstance(sent[0], UserMessage) and sent[0].text.endswith("tweede")
 
 
 def test_calls_per_step_limit(tmp_path: Path, make_ctx: Callable[..., ToolContext]) -> None:

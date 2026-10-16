@@ -85,6 +85,7 @@ class Settings(BaseModel):
     agent_max_calls_per_step: int = 8  # tool-calls per modelantwoord
     agent_turn_timeout_s: float = 300.0  # wandkloktijd per beurt (tussen stappen gecontroleerd)
     agent_max_result_chars: int = 8000  # tool-resultaat naar het model, daarna ingekort
+    agent_max_history_chars: int = 120_000  # daarboven vallen de oudste hele beurten weg
 
     @field_validator("flipper_ble_adapter")
     @classmethod
@@ -137,4 +138,7 @@ class Settings(BaseModel):
             agent_max_calls_per_step=int(os.environ.get("PITOOLBOX_AGENT_MAX_CALLS_PER_STEP", "8")),
             agent_turn_timeout_s=float(os.environ.get("PITOOLBOX_AGENT_TURN_TIMEOUT_S", "300")),
             agent_max_result_chars=int(os.environ.get("PITOOLBOX_AGENT_MAX_RESULT_CHARS", "8000")),
+            agent_max_history_chars=int(
+                os.environ.get("PITOOLBOX_AGENT_MAX_HISTORY_CHARS", "120000")
+            ),
         )

@@ -102,6 +102,10 @@ class AgentLimits(BaseModel):
     max_calls_per_step: int = Field(default=8, ge=1, le=50)
     turn_timeout_s: float = Field(default=300.0, gt=0, le=3600)
     max_result_chars: int = Field(default=8000, ge=500, le=200_000)
+    # Grootte van de geschiedenis (in tekens, ruwe schatting van de context) voordat de oudste
+    # hele beurten wegvallen. Tekens i.p.v. tokens: providerneutraal en zonder tokenizer;
+    # ~4 tekens per token, dus 120 000 tekens is ruim binnen een context van 32k+ tokens.
+    max_history_chars: int = Field(default=120_000, ge=10_000, le=2_000_000)
 
     @classmethod
     def from_settings(cls, settings: Settings) -> AgentLimits:
@@ -111,6 +115,7 @@ class AgentLimits(BaseModel):
                 max_calls_per_step=settings.agent_max_calls_per_step,
                 turn_timeout_s=settings.agent_turn_timeout_s,
                 max_result_chars=settings.agent_max_result_chars,
+                max_history_chars=settings.agent_max_history_chars,
             )
         except ValidationError as exc:
             fields = ", ".join(
@@ -259,6 +264,18 @@ def model_tool_defs(specs: Iterable[ToolSpec]) -> tuple[ToolDef, ...]:
     return tuple(defs)
 
 
+def _message_chars(message: Message) -> int:
+    """Ruwe grootte van een bericht in tekens, inclusief tool calls en providerstate."""
+    if isinstance(message, UserMessage):
+        return len(message.text)
+    if isinstance(message, ToolResult):
+        return len(message.content) + len(message.name)
+    size = len(message.text) + sum(len(c.name) + len(c.raw_arguments) for c in message.tool_calls)
+    if message.state is not None:
+        size += len(json.dumps(message.state.data, default=str, ensure_ascii=False))
+    return size
+
+
 def note(text: str) -> str:
     return f"{NOTE_PREFIX} {text}"
 
@@ -316,6 +333,7 @@ class AgentSession:
         self._turns += 1
         t0 = self._clock()
         turn = _Turn(deadline=t0 + self.limits.turn_timeout_s)
+        self._trim_history()
         start_len = len(self._history)
         notes, self._notes = self._notes, []
         self._history.append(UserMessage("\n".join([*notes, text]) if notes else text))
@@ -536,6 +554,39 @@ class AgentSession:
                     if call.id not in answered:
                         self._add_result(call, _error("not_executed", message))
                 return
+
+    # --- geschiedenis begrenzen ------------------------------------------------------------
+
+    def _trim_history(self) -> None:
+        """Laat de oudste hele beurten vallen tot de geschiedenis onder het budget zit.
+
+        Alleen afknippen vlak vóór een `UserMessage`: een beurt bevat al zijn tool calls en de
+        bijbehorende resultaten, dus de geschiedenis blijft geldig (geen resultaat zonder call).
+        Draait vóór de nieuwe gebruikersbeurt erbij komt; die blijft dus altijd staan, ook als
+        daarvoor alle eerdere beurten weg moeten. Het model krijgt een melding dat er iets weg is.
+        """
+        budget = self.limits.max_history_chars
+        sizes = [_message_chars(m) for m in self._history]
+        total = sum(sizes)
+        if total <= budget:
+            return
+        starts = [i for i, m in enumerate(self._history) if isinstance(m, UserMessage)]
+        cut = 0
+        for start in [*starts[1:], len(self._history)]:
+            cut = start
+            if total - sum(sizes[:cut]) <= budget:
+                break
+        if cut == 0:
+            return
+        dropped_turns = sum(1 for i in starts if i < cut)
+        del self._history[:cut]
+        self._notes.append(
+            note(
+                f"{dropped_turns} oudere gespreksbeurt(en) zijn weggelaten om binnen de "
+                "context te blijven; vraag de gebruiker als je die informatie nodig hebt."
+            )
+        )
+        self._audit_event("agent_history_trimmed", dropped_turns=dropped_turns)
 
     # --- alleen voor de frontend (na een expliciete menselijke keuze) ---------------------
 

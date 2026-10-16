@@ -128,6 +128,7 @@ De server werkt met elke MCP-client (Claude Desktop, Cursor, Open WebUI, ...). P
 | `PITOOLBOX_LLM_TIMEOUT_S` / `PITOOLBOX_LLM_MAX_RETRIES` / `PITOOLBOX_LLM_MAX_TOKENS` | `60` / `2` / `4096` |
 | `PITOOLBOX_AGENT_MAX_STEPS` / `PITOOLBOX_AGENT_MAX_CALLS_PER_STEP` | `8` / `8`: tool-rondes per beurt, tool calls per modelantwoord |
 | `PITOOLBOX_AGENT_TURN_TIMEOUT_S` / `PITOOLBOX_AGENT_MAX_RESULT_CHARS` | `300` / `8000`: tijd per beurt (tussen stappen gecontroleerd), lengte van een tool-resultaat naar het model |
+| `PITOOLBOX_AGENT_MAX_HISTORY_CHARS` | `120000`: daarboven vallen de oudste hele beurten uit de geschiedenis (het model krijgt daar een melding van) |
 
 **LLM-provider (fase 4).** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. `openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
 
