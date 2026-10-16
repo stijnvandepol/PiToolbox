@@ -259,7 +259,7 @@ Daar staan ook de ontwerpkeuzes met bronnen, het terugdraaien en wat je doet als
 
 ### 10. De Flipper-app (optioneel)
 
-De app `pitoolbox_ui` bouw je met ufbt, tegen de SDK van exact de firmware op je Flipper, en zet je op de SD-kaart in `/ext/apps/Tools/pitoolbox_ui.fap`. Bouwen en installeren: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md). Daarna `PITOOLBOX_FLIPPER_UI=on` in `/etc/pitoolbox/pitoolbox.env` en `sudo systemctl restart pitoolbox-mcp`. Zie [Bediening op de Flipper](#bediening-op-de-flipper).
+De app `pitoolbox_ui` bouw je met ufbt, tegen de SDK van exact de firmware op je Flipper. Daarna zet `uv run pitoolbox-flipper ui-install` hem op de SD-kaart in `/ext/apps/Tools/pitoolbox_ui.fap` (gecontroleerd op API en MD5), en test `uv run pitoolbox-flipper ui-test` hem van begin tot eind. Bouwen en installeren: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md). Daarna `PITOOLBOX_FLIPPER_UI=on` in `/etc/pitoolbox/pitoolbox.env` en `sudo systemctl restart pitoolbox-mcp`. Zie [Bediening op de Flipper](#bediening-op-de-flipper).
 
 ## Gebruik
 
@@ -479,6 +479,7 @@ src/pitoolbox/
   agent/ llm/                 # agent-loop; providers (openai-compatible, anthropic, openai)
   auth/                       # OAuth 2.1: provider, SQLite-store, /login, crypto, CLI
   flipper_cli.py              # pitoolbox-flipper: ble-scan/pair/unpair/list/test
+  flipper_ui_cli.py           # pitoolbox-flipper: ui-install/ui-test/ui-droptest
 deploy/                       # install.sh, env-voorbeeld, en per doel een map:
   systemd/ cloudflared/       #   service-units, tunnelconfig (fase 2)
   network/                    #   .link-bestanden: wlan0 = ingebouwd, wlan1 = Alfa (fase 5)

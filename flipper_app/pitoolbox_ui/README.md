@@ -43,11 +43,18 @@ Laatste controle bij elke build: de regel `APPCHK … Target: 7, API: 87.1` in d
 
 ## Installeren
 
-Zet `dist/pitoolbox_ui.fap` op de SD-kaart, in **`/ext/apps/Tools/pitoolbox_ui.fap`**. De Pi start de app op dat pad. Dat kan op drie manieren:
+Zet `dist/pitoolbox_ui.fap` op de SD-kaart, in **`/ext/apps/Tools/pitoolbox_ui.fap`**. De Pi start de app op dat pad. Het makkelijkst gaat dat vanaf de Pi, via USB of BLE:
+
+```bash
+uv run pitoolbox-flipper ui-install            # standaard dist/pitoolbox_ui.fap; --transport usb|ble, --force
+```
+
+`ui-install` controleert het bestand eerst: een ELF voor ARM, het manifest, de naam "PiToolbox", en API en hardware-target gelijk aan de firmware. Een verkeerde API weigert hij, want "App Too Old/New" kon de Flipper laten crashen (spike §2). Daarna schrijft hij in blokken van 512 B naar `<pad>.part`, controleert de MD5 op de Flipper en hernoemt pas dan. Een mislukte upload laat de oude app dus staan. Is er een app open op de Flipper, dan weigert hij. Staat dezelfde versie er al, dan schrijft hij niets. Gemeten: 24,5 KB in 3,6 s over BLE.
+
+Andere manieren:
 
 - qFlipper: File manager → `SD Card/apps/Tools/`, en sleep het bestand erin;
 - `ufbt launch` met de Flipper via USB (installeert en start, zonder RPC-koppeling, dus je ziet de handmatige start);
-- via de storage-RPC van de Pi (`storage_write_request` in blokken van 512 B, daarna `storage_md5sum_request` ter controle).
 
 ## Gebruik
 
@@ -70,10 +77,21 @@ In de spike crashte de Flipper met een BusFault toen BLE wegviel terwijl een tes
 6. Bij afsluiten eerst ontkoppelen en wachten tot er geen callback meer loopt. Pas daarna alles vrijgeven, met de juiste `*_free()`.
 7. Geen notificatie per bericht. Alleen één keer licht en één keer trillen bij een bevestigingsvraag.
 
-## Hardwaretest (nog te doen)
+## Hardwaretest
 
-1. App installeren in `/ext/apps/Tools/`. Start via RPC met `args:"RPC"`: verwacht `APP_STARTED` en daarna HELLO (`50 01 01 …`).
-2. WELCOME/STATUS/PRESETS met de hand sturen (scratchscript met `encode()` uit `protocol.py`) en het scherm controleren (screen stream).
-3. Handmatige start zonder Pi en met Pi: het verzoekbestand verschijnt en verdwijnt, en de app sluit zelf.
-4. **Valtest:** BLE verbreken terwijl de FAP verstuurt, minstens 20 keer. Stop bij de eerste bevriezing of BusFault en noteer wat er op het scherm staat.
-5. Na afloop: de Flipper op het bureaublad, zonder open app.
+Stop eerst `pitoolbox-mcp` of `pitoolbox-agent` als die de Flipper gebruiken. Er wordt nooit iets uitgezonden: alleen de tool `status` is toegestaan.
+
+```bash
+uv run pitoolbox-flipper ui-install                     # app erop (MD5-gecontroleerd)
+uv run pitoolbox-flipper ui-test [--wait-action 30]     # starten, HELLO, WELCOME, STATUS, sluiten
+uv run pitoolbox-flipper ui-droptest --rounds 20        # valtest: BLE-link N keer verbreken
+```
+
+Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. `ui-droptest` verbreekt de BLE-link via BlueZ (D-Bus, geen root) terwijl de Pi STATUS-berichten stuurt. Daarna moet de Flipper op een ping antwoorden en de app opnieuw starten. De test stopt bij de eerste fout en zegt wat je van het scherm moet noteren.
+
+**Resultaat 2026-10-17** (mntm-012, Pi 4, BLE via hci1):
+
+- `ui-install` over BLE: 24.560 B in 3,6 s, MD5 klopt.
+- `ui-test` over BLE: verbinden 8,1 s; daarna app gestart 0,9 s, HELLO 0,1 s, WELCOME 0,1 s, STATUS 0,6 s, sluiten 0,7 s.
+- `ui-droptest --rounds 20`: **20 van 20 geslaagd**, geen bevriezing of BusFault. Verbreking gezien na mediaan 2,4 s, app terug na mediaan 6,8 s (max 8,7 s), ping daarna ~97 ms.
+- **Nog met de hand:** OK/Back op een echte bevestigingsvraag, de snelle acties en presets vanuit het menu, de handmatige start (verzoekbestand).
