@@ -1,0 +1,11 @@
+{
+  "hardware_model": "Flipper Zero",
+  "hardware_name": "Flippy",
+  "hardware_ver": "12",
+  "firmware_origin_fork": "Official",
+  "firmware_version": "1.4.3",
+  "firmware_api_major": "87",
+  "firmware_api_minor": "1",
+  "protobuf_version_major": "0",
+  "protobuf_version_minor": "23"
+}

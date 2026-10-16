@@ -1,0 +1,5 @@
+Reading RFID...
+Press Ctrl+C to abort
+EM4100 1A2B3C4D5E
+FC: 1A Card: 3C4D
+Reading stopped

@@ -1,0 +1,12 @@
+
+BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key
+AA:BB:CC:11:22:33, 2025-01-10 12:00:01, 2025-01-10 12:00:10,  6, 130, WPA2, CCMP, PSK, -45,       25,        0,   0.  0.  0.  0,   7, HomeNet, 
+AA:BB:CC:44:55:66, 2025-01-10 12:00:02, 2025-01-10 12:00:10, 36, 866, WPA3 WPA2, CCMP, SAE, -58,       12,        0,   0.  0.  0.  0,   9, Garage-5G, 
+10:20:30:40:50:60, 2025-01-10 12:00:03, 2025-01-10 12:00:09, 11,  54, OPN,  ,   , -80,        3,        0,   0.  0.  0.  0,  15, CoffeeShop Free, 
+DE:AD:BE:EF:00:01, 2025-01-10 12:00:03, 2025-01-10 12:00:09,  1, 130, WPA2, CCMP, PSK, -71,        4,        0,   0.  0.  0.  0,   0, , 
+10:20:30:40:50:70, 2025-01-10 12:00:04, 2025-01-10 12:00:09,  3, 130, WPA2, CCMP, PSK, -1,        1,        0,   0.  0.  0.  0,  11, Foo, Bar, X, 
+
+Station MAC, First time seen, Last time seen, Power, # packets, BSSID, Probed ESSIDs
+11:22:33:44:55:66, 2025-01-10 12:00:05, 2025-01-10 12:00:10, -50,       10, AA:BB:CC:11:22:33, HomeNet
+66:55:44:33:22:11, 2025-01-10 12:00:06, 2025-01-10 12:00:08, -77,        2, (not associated) ,Hotspot,Phone wifi
+

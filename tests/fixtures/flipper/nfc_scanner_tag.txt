@@ -1,0 +1,5 @@
+Press Ctrl+C to abort
+
+Protocols detected: 
+Protocol [1]: ISO14443-3A -> ISO14443-4A -> Mifare Plus
+Protocol [2]: ISO14443-3A -> Mifare Classic

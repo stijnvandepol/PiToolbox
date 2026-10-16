@@ -1,0 +1,25 @@
+# Kopieer naar ~/.config/pitoolbox/scope.yaml en vul je EIGEN apparaten in.
+# Alles wat hier niet staat is buiten scope: capture en transmit worden geweigerd.
+version: 1
+
+wifi:
+  # capture_start mag alleen op een BSSID uit deze lijst, op het kanaal dat erbij staat.
+  - name: lab-ap
+    ssid: MijnLab
+    bssid: "AA:BB:CC:DD:EE:01"
+    channel: 6
+  - name: lab-ap-5g
+    ssid: MijnLab-5G
+    bssid: "AA:BB:CC:DD:EE:02"
+    channel: 36
+
+infrared:
+  # ir_send mag alleen deze bestanden (op de Flipper-SD) en, indien opgegeven, deze knoppen.
+  - name: tv
+    file: /ext/infrared/tv_woonkamer.ir
+    buttons: [Power, Vol_up, Vol_dn, Mute]
+
+subghz:
+  # Nog niet gebruikt in fase 1 (alleen RX); bedoeld voor latere transmit-tools.
+  - name: poortopener
+    frequency_hz: 433920000

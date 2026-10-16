@@ -1,0 +1,1 @@
+[{"dst": "default", "gateway": "10.0.0.1", "dev": "eth0", "protocol": "dhcp", "metric": 100, "flags": []}]

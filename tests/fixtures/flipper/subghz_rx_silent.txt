@@ -1,0 +1,5 @@
+Listening at frequency: 315000000 device: 0. Press CTRL+C to stop
+...
+---ETX---
+
+Packets received 0

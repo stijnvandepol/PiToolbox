@@ -1,0 +1,4 @@
+Reading RFID...
+Press Ctrl+C to abort
+---ETX---
+Reading stopped

@@ -1,0 +1,8 @@
+Interface wlan1
+	ifindex 4
+	wdev 0x100000001
+	addr 00:c0:ca:aa:bb:cc
+	type monitor
+	wiphy 1
+	channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz
+	txpower 3.00 dBm

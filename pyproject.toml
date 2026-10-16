@@ -1,0 +1,65 @@
+[project]
+name = "pitoolbox"
+version = "0.1.0"
+description = "Flipper Zero + Alfa wifi toolbox op een Raspberry Pi, bestuurbaar via MCP"
+readme = "README.md"
+authors = [
+    { name = "Stijn van de Pol", email = "Stijnvdpol0@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3.0",
+    "protobuf>=7.35.1",
+    "pydantic>=2.14.1",
+    "pyserial>=3.5",
+    "pyyaml>=6.0.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.84.0",
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.1",
+    "types-protobuf>=7.35.1.20260906",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[project.scripts]
+pitoolbox-mcp = "pitoolbox.frontends.mcp_server:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["src/pitoolbox/core/devices/_flipper_rpc/pb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "S", "BLE"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # Nederlandse tekst met typografische tekens
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/pitoolbox"]
+exclude = ["src/pitoolbox/core/devices/_flipper_rpc/pb/"]
+
+[[tool.mypy.overrides]]
+module = ["pitoolbox.core.devices._flipper_rpc.pb.*"]
+ignore_errors = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["serial", "serial.*"]
+ignore_missing_imports = true

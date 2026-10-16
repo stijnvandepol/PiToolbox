@@ -1,0 +1,11 @@
+Listening at frequency: 433920000 device: 0. Press CTRL+C to stop
+.Princeton 24bit
+Key:0x00ABCDEF
+Yek:0x00FEDCBA
+..
+Nice FLO 12bit
+Key:0x0000012A
+.
+---ETX---
+
+Packets received 2
