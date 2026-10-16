@@ -485,7 +485,10 @@ src/pitoolbox/
     devices/_bluez_devices.py # bekende apparaten: lijst, ontkoppelen, verbreken
     devices/_flipper_rpc/     # framing, RPC-client, gegenereerde protobuf (pb/)
     devices/_flipper_cli.py   # vaste CLI-sjablonen + parsers per firmwareprofiel
-    devices/wifi.py           # AlfaAdapter, CaptureManager, parsers
+    devices/wifi.py           # AlfaAdapter; publiek importpad voor de wifi-onderdelen
+    devices/_wifi_parse.py    # parsers voor iw- en airodump-ng-uitvoer
+    devices/_wifi_iface.py    # interfacetype (iw) en driverguard (sysfs)
+    devices/_wifi_capture.py  # CaptureManager (airodump-ng pcap)
     devices/system.py         # get_throttled, uplink, schijf
     tools/                    # base, runner, flipper_tools, wifi_tools, system_tools
   frontends/mcp_server.py     # MCPServer (opvolger van FastMCP in mcp 2.x), stdio + HTTP
