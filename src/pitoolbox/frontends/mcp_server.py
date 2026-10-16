@@ -1,4 +1,4 @@
-"""MCP-frontend: ontsluit elke ToolSpec van de ToolRunner als MCP-tool (stdio).
+"""MCP-frontend: ontsluit elke ToolSpec van de ToolRunner als MCP-tool (stdio of HTTP).
 
 Ontwerpkeuzes:
 - Het inputschema dat de client ziet is exact `spec.params.model_json_schema()`; er wordt
@@ -12,6 +12,9 @@ Ontwerpkeuzes:
   workerthread, zodat een lange tool de event loop niet blokkeert en `emergency_stop`
   gelijktijdig kan draaien.
 - stdout is gereserveerd voor het MCP-protocol: alle logging gaat naar stderr.
+- HTTP (fase 2): streamable HTTP op /mcp, alleen op loopback; cloudflared is de enige weg
+  naar buiten. OAuth 2.1 via de eigen authorization server (pitoolbox.auth). Bevestigingen
+  van transmit-acties zijn gebonden aan de OAuth-client: frontend = "mcp-http:<client_id>".
 """
 
 from __future__ import annotations
@@ -21,14 +24,18 @@ import functools
 import json
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from ipaddress import ip_address
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import anyio.to_thread
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.tools.base import Tool
 from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import ConfigDict
 
@@ -36,9 +43,20 @@ from pitoolbox.config import Settings
 from pitoolbox.core.tools.base import Risk, ToolSpec
 from pitoolbox.core.tools.runner import ToolRunner
 
+if TYPE_CHECKING:
+    from starlette.applications import Starlette
+
+    from pitoolbox.auth import AuthBundle
+
 log = logging.getLogger(__name__)
 
 SERVER_NAME = "pitoolbox"
+MCP_PATH = "/mcp"
+HTTP_FRONTEND = "mcp-http"
+# Origins die een browser-client mag meesturen (Claude zelf belt server-side, zonder Origin).
+CLAUDE_ORIGINS = ("https://claude.ai", "https://claude.com")
+
+Frontend = str | Callable[[], str]
 
 # Resultaten met deze foutcode zijn een normaal onderdeel van de flow, geen toolfout.
 _NON_ERROR_CODES = frozenset({"confirmation_required"})
@@ -96,11 +114,20 @@ def _to_call_result(result: dict[str, Any]) -> CallToolResult:
     )
 
 
-def _make_tool(runner: ToolRunner, spec: ToolSpec, frontend: str) -> Tool:
+def http_frontend() -> str:
+    """Frontend-naam per OAuth-client, zodat een pending_id niet door een andere client
+    (bijv. een gelekte token van een ander apparaat) bevestigd kan worden."""
+    token = get_access_token()
+    return f"{HTTP_FRONTEND}:{token.client_id}" if token else HTTP_FRONTEND
+
+
+def _make_tool(runner: ToolRunner, spec: ToolSpec, frontend: Frontend) -> Tool:
     async def call(**kwargs: Any) -> CallToolResult:
+        # Frontend bepalen vóór de thread-hop: de auth-context zit in een contextvar.
+        name = frontend() if callable(frontend) else frontend
         # Zelfde thread-pool als anyio.to_thread: de event loop blijft vrij tijdens de call.
         result = await anyio.to_thread.run_sync(
-            functools.partial(runner.call, frontend, spec.name, kwargs)
+            functools.partial(runner.call, name, spec.name, kwargs)
         )
         return _to_call_result(result)
 
@@ -117,10 +144,97 @@ def _make_tool(runner: ToolRunner, spec: ToolSpec, frontend: str) -> Tool:
     )
 
 
-def build_server(runner: ToolRunner, frontend: str = "mcp") -> MCPServer:
-    """Bouwt een MCPServer met één MCP-tool per `runner.specs()`-entry."""
+def build_server(
+    runner: ToolRunner, frontend: Frontend = "mcp", auth: AuthBundle | None = None
+) -> MCPServer:
+    """Bouwt een MCPServer met één MCP-tool per `runner.specs()`-entry.
+
+    Met `auth` worden de OAuth-routes van de SDK (authorize/token/register/revoke + metadata),
+    de protected-resource-metadata, de 401-met-resource_metadata en onze /login-routes actief.
+    """
     tools = [_make_tool(runner, spec, frontend) for spec in runner.specs()]
-    return MCPServer(name=SERVER_NAME, instructions=INSTRUCTIONS, tools=tools)
+    if auth is None:
+        return MCPServer(name=SERVER_NAME, instructions=INSTRUCTIONS, tools=tools)
+    server = MCPServer(
+        name=SERVER_NAME,
+        instructions=INSTRUCTIONS,
+        tools=tools,
+        auth=auth.auth_settings,
+        auth_server_provider=auth.provider,
+    )
+    for route in auth.routes:
+        server.custom_route(route.path, methods=sorted(route.methods or ["GET"]))(route.endpoint)
+    return server
+
+
+def _require_loopback(host: str) -> None:
+    if host == "localhost":
+        return
+    try:
+        if ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise SystemExit(
+        f"weiger te binden op {host!r}: alleen loopback (127.0.0.1/::1); "
+        "de tunnel is de enige weg naar buiten"
+    )
+
+
+def transport_security_for(settings: Settings) -> TransportSecuritySettings:
+    """Host-header-check (DNS-rebinding) voor de publieke hostnaam en lokaal testen."""
+    if not settings.public_url:
+        raise ValueError("PITOOLBOX_PUBLIC_URL ontbreekt")
+    public = urlsplit(settings.public_url)
+    if public.hostname is None:
+        raise ValueError(f"ongeldige PITOOLBOX_PUBLIC_URL: {settings.public_url!r}")
+    port = settings.http_port
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[public.netloc, f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"],
+        allowed_origins=[f"{public.scheme}://{public.netloc}", *CLAUDE_ORIGINS],
+    )
+
+
+def build_http_app(runner: ToolRunner, settings: Settings, auth: AuthBundle) -> Starlette:
+    """Starlette-app voor streamable HTTP op /mcp met OAuth."""
+    server = build_server(runner, frontend=http_frontend, auth=auth)
+    return server.streamable_http_app(
+        streamable_http_path=MCP_PATH,
+        transport_security=transport_security_for(settings),
+        host=settings.http_host,
+    )
+
+
+def _run_http(runner: ToolRunner, settings: Settings) -> None:
+    import uvicorn
+
+    from pitoolbox.auth import build_auth
+
+    _require_loopback(settings.http_host)
+    if settings.extra_redirect_uris:
+        log.warning(
+            "extra redirect-URI's actief (alleen voor testen): %s", settings.extra_redirect_uris
+        )
+    bundle = build_auth(settings, extra_redirect_uris=settings.extra_redirect_uris)
+    app = build_http_app(runner, settings, bundle)
+    log.info(
+        "HTTP op http://%s:%d%s, publiek als %s%s",
+        settings.http_host,
+        settings.http_port,
+        MCP_PATH,
+        settings.public_url,
+        MCP_PATH,
+    )
+    # proxy_headers uit: geen X-Forwarded-* vertrouwen (alleen cloudflared praat met ons).
+    uvicorn.run(
+        app,
+        host=settings.http_host,
+        port=settings.http_port,
+        proxy_headers=False,
+        server_header=False,
+        log_level="info",
+    )
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -129,9 +243,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--transport",
-        choices=["stdio"],
+        choices=["stdio", "http"],
         default="stdio",
-        help="transport (nu alleen stdio)",
+        help="stdio (lokaal) of http (streamable HTTP op 127.0.0.1, met OAuth)",
     )
     parser.add_argument(
         "--scope", type=Path, help="pad naar scope.yaml (overschrijft PITOOLBOX_SCOPE_FILE)"
@@ -164,10 +278,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     from pitoolbox.app import build_runner
 
     runner = build_runner(settings)
-    server = build_server(runner)
     log.info("pitoolbox-mcp start: %d tools, transport=%s", len(runner.specs()), args.transport)
     try:
-        server.run(args.transport)
+        if args.transport == "http":
+            _run_http(runner, settings)
+        else:
+            build_server(runner).run("stdio")
     except KeyboardInterrupt:
         log.info("pitoolbox-mcp gestopt")
     finally:

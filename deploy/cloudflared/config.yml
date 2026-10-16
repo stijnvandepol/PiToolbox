@@ -1,0 +1,53 @@
+# Cloudflare Tunnel (lokaal beheerd) voor pitoolbox.
+# Installeren als /etc/cloudflared/pitoolbox.yml (zie docs/fase2-remote.md).
+#
+# Bronnen (officiele Cloudflare-docs):
+#  - Configuratiebestand (sleutels tunnel, credentials-file, ingress, hostname, path, service,
+#    originRequest, verplichte catch-all):
+#    https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/configuration-file/
+#  - Tunnel aanmaken (login/create/route dns/run):
+#    https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/create-local-tunnel/
+#  - originRequest-opties (connectTimeout, httpHostHeader, noHappyEyeballs, ...):
+#    https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/origin-parameters/
+#
+# VERVANG de twee plaatsen met <TUNNEL-UUID> en de hostnaam toolbox.example.nl.
+# Controle na het invullen (offline, start niets):
+#   cloudflared tunnel --config /etc/cloudflared/pitoolbox.yml ingress validate
+#   cloudflared tunnel --config /etc/cloudflared/pitoolbox.yml ingress rule https://toolbox.example.nl/mcp
+#   cloudflared tunnel --config /etc/cloudflared/pitoolbox.yml ingress rule https://toolbox.example.nl/anders
+# (`ingress validate` en `ingress rule <URL>` staan in de configuratiebestand-docs hierboven.)
+
+# UUID die `cloudflared tunnel create pitoolbox` teruggeeft.
+tunnel: <TUNNEL-UUID>
+# Het credentials-bestand dat `tunnel create` schrijft; verplaatst naar /etc/cloudflared/,
+# eigenaar root:cloudflared, mode 0640 (zie docs/fase2-remote.md). Niet in git!
+credentials-file: /etc/cloudflared/<TUNNEL-UUID>.json
+
+# Geldt voor alle regels hieronder (tenzij een regel het zelf overschrijft).
+originRequest:
+  # Alleen de TCP-verbinding naar 127.0.0.1 (default 30s, hier korter: het is loopback).
+  connectTimeout: 10s
+
+# Regels worden van boven naar beneden geevalueerd, de eerste match wint. `path` is een reguliere
+# expressie (Go `regexp/syntax`) op het request-pad; cloudflared stuurt het volledige, ongewijzigde
+# pad door naar de service (zelfde docs-pagina). Daarom ankeren we met ^ ...
+# Alles wat niet matcht valt door naar de catch-all (404): de tunnel exposeert dus alleen de
+# routes die de MCP-server en zijn eigen OAuth-server nodig hebben.
+#
+# LET OP: controleer dat dit alle routes dekt die pitoolbox.auth registreert
+# (de OAuth-routes van de MCP-SDK: /authorize, /token, /register, /revoke, plus onze /login-routes).
+# Staat er een route in de code die hier niet in zit, dan is die niet bereikbaar via de tunnel.
+ingress:
+  # 1. MCP-endpoint en OAuth-server. `(/|$)` laat /mcp, /mcp/ en /login/... toe, maar niet
+  #    bijv. /mcpfoo of /tokens.
+  - hostname: toolbox.example.nl
+    path: '^/(mcp|authorize|token|register|revoke|login)(/|$)'
+    service: http://127.0.0.1:8765
+  # 2. Discovery-metadata: /.well-known/oauth-protected-resource[/mcp] en
+  #    /.well-known/oauth-authorization-server (RFC 9728 / RFC 8414).
+  - hostname: toolbox.example.nl
+    path: '^/\.well-known/'
+    service: http://127.0.0.1:8765
+  # 3. Verplichte catch-all als laatste regel: al het andere (andere hostnamen, andere paden) = 404.
+  #    (Docs: "must always include a catch-all rule that concludes the file".)
+  - service: http_status:404

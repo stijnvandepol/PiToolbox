@@ -1,0 +1,134 @@
+# pitoolbox MCP-server (streamable HTTP op 127.0.0.1:8765, eigen OAuth 2.1-server).
+# Installeren: deploy/install.sh kopieert dit naar /etc/systemd/system/ (nu niet starten of
+# enablen voordat /etc/pitoolbox/pitoolbox.env klopt, zie docs/fase2-remote.md).
+#
+# Bronnen:
+#  systemd.exec   https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html
+#  systemd.service https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
+#  systemd.unit   https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html
+#  (zelfde man-pages gelezen via https://man7.org/linux/man-pages/man5/systemd.exec.5.html, omdat
+#   freedesktop.org niet bereikbaar was voor de geautomatiseerde ophaalstap)
+#  capabilities(7) https://man7.org/linux/man-pages/man7/capabilities.7.html
+#  no_new_privs   https://www.kernel.org/doc/html/latest/userspace-api/no_new_privs.html
+#
+# Alles dat NIET uit de man-pages te verifieren was, en vooral het gedrag op de Pi zelf, is
+# gemarkeerd met "(niet geverifieerd)". Diagnose: `systemd-analyze security pitoolbox-mcp`.
+
+[Unit]
+Description=pitoolbox MCP-server (streamable HTTP, loopback)
+Documentation=file:///opt/pitoolbox/docs/fase2-remote.md
+# Alleen loopback nodig; geen network-online.target. De tunnel (cloudflared-pitoolbox.service)
+# is een aparte unit en hoeft niet "Requires" te zijn van de MCP-server.
+After=network.target
+# Herstartbeperking (staat in [Unit], zie systemd.unit): max. 5 starts per 5 minuten, daarna blijft
+# de unit "failed" tot `systemctl reset-failed pitoolbox-mcp` (zo draait een kapotte config niet
+# eindeloos in een lus). Geldt voor alle starts, ook handmatige (systemd.unit).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# Type=exec: systemd meldt een fout als de binary ontbreekt of User= niet bestaat. Bij Type=simple
+# (default) zou `systemctl start` dan toch "gelukt" melden (systemd.service, sectie Type=).
+Type=exec
+
+# Eigen systeemgebruiker, geen root. Door install.sh aangemaakt (home = /var/lib/pitoolbox).
+User=pitoolbox
+Group=pitoolbox
+# Flipper Zero is /dev/ttyACM* (groep dialout); vcgencmd praat met /dev/vcio (groep video).
+# SupplementaryGroups= vult de groepen uit /etc/group aan, het vervangt ze niet (systemd.exec).
+SupplementaryGroups=dialout video
+
+# Alle PITOOLBOX_*-variabelen. Het bestand bevat later ook API-sleutels: chmod 600, eigenaar
+# pitoolbox. systemd leest het zelf in vanuit de service manager (systemd.exec: "from the file
+# system of the service manager"), dus de unit zelf hoeft er niet bij te kunnen; de man-page
+# raadt environment-variabelen af voor geheimen ("not suitable for passing secrets", ze zijn
+# zichtbaar via D-Bus en erven door naar kindprocessen) - voor nu acceptabel, later evt.
+# LoadCredential= gebruiken.
+# Zonder "-" ervoor faalt de start als het bestand ontbreekt; dat willen we juist.
+EnvironmentFile=/etc/pitoolbox/pitoolbox.env
+
+WorkingDirectory=/var/lib/pitoolbox
+# De venv die `uv sync --frozen` in /opt/pitoolbox/.venv maakt (zie install.sh).
+ExecStart=/opt/pitoolbox/.venv/bin/pitoolbox-mcp --transport http
+
+# Herstarten na een crash (non-zero exit, signaal, timeout), niet na `systemctl stop`
+# (systemd.service, Restart=on-failure). 5 s wachten zodat een crash-lus de Pi niet belast.
+Restart=on-failure
+RestartSec=5
+# SIGTERM -> max. 20 s afsluiten (captures stoppen, Flipper vrijgeven), daarna SIGKILL.
+TimeoutStopSec=20
+
+# --- Rechten voor wifi (iw set type, airodump-ng) zonder root ---------------------------------
+# Ambient capabilities worden geerfd door kindprocessen (iw, ip, airodump-ng via de proc-runner)
+# terwijl de service als gewone gebruiker draait; de man-page zegt dat dit precies het doel is
+# ("run as non-privileged user but still ... some capabilities").
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+# Bounding set = precies deze twee; alle andere capabilities zijn voor dit proces en zijn
+# kinderen onbereikbaar. (Of de bounding set de ambient set moet bevatten staat niet expliciet in
+# de man-page; capabilities(7): een ambient capability moet permitted EN inheritable zijn. We
+# houden de twee sets daarom identiek - niet geverifieerd op de Pi, test: zie docs.)
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# NoNewPrivileges verhindert dat een execve() rechten WINT via setuid/setgid-bits of
+# bestands-capabilities (systemd.exec; kernel-doc no_new_privs). Bestands-capabilities op iw of
+# airodump-ng werken hier dus NIET, maar ambient capabilities worden volgens capabilities(7)
+# bewaard over een execve() van een niet-"privileged" programma (formule
+# P'(ambient) = (file is privileged) ? 0 : P(ambient); "privileged" = file capabilities of
+# set-uid/gid). Gevolg: de ambient caps werken zolang `iw`/`airodump-ng` zelf GEEN setuid-bit of
+# file-caps hebben. Controleer op Kali: `getcap $(command -v iw airodump-ng ip)` en
+# `ls -l $(command -v iw airodump-ng)` - de combinatie NoNewPrivileges + ambient staat niet
+# expliciet in de kernel-doc (niet geverifieerd). Werkt het niet, zet NoNewPrivileges=no als
+# allerlaatste redmiddel en laat de rest staan.
+NoNewPrivileges=yes
+
+# --- Bestandssysteem ---------------------------------------------------------------------------
+# Het hele bestandssysteem read-only, behalve /dev, /proc en /sys (systemd.exec).
+ProtectSystem=strict
+# /home, /root en /run/user zijn leeg en onbereikbaar. De service woont in /var/lib/pitoolbox.
+ProtectHome=yes
+# Het enige schrijfbare deel: auth-database, audit-log, captures (pcap) en uv-cache.
+# Moet bestaan voor de start (install.sh maakt het). scope.yaml staat read-only in
+# /etc/pitoolbox: de service kan zijn eigen scope niet aanpassen.
+ReadWritePaths=/var/lib/pitoolbox
+# Eigen /tmp en /var/tmp, opgeruimd bij stop.
+PrivateTmp=yes
+# Bestanden (captures, auth-db) alleen voor de eigenaar leesbaar.
+UMask=0077
+
+# --- Kernel en proces --------------------------------------------------------------------------
+# /proc/sys en /sys read-only. iw/ip/airodump-ng zetten via netlink (nl80211/rtnetlink), niet
+# via sysfs (niet geverifieerd op de Pi; bij problemen als eerste uitzetten).
+ProtectKernelTunables=yes
+# Geen kernelmodules laden/ontladen (mt7921u is al geladen door udev).
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# Geen systeemklok wijzigen (verwijdert o.a. CAP_SYS_TIME).
+ProtectClock=yes
+ProtectHostname=yes
+# Andere gebruikers' processen zijn onzichtbaar in /proc ("invisible", aanbevolen voor de meeste
+# services; werkt voor ons omdat de service niet-root is, systemd.exec).
+ProtectProc=invisible
+# Geen namespaces (unshare/clone/setns), geen personality-wissel, geen realtime-scheduling,
+# geen SUID/SGID-bits aanmaken, alleen de native syscall-architectuur.
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+# Bewust NIET gezet:
+#  - PrivateDevices=yes: maakt een minimale /dev zonder /dev/ttyACM* (Flipper) en /dev/vcio.
+#    Wil je dit strakker, gebruik DevicePolicy=closed + DeviceAllow= (systemd.resource-control).
+#  - MemoryDenyWriteExecute=yes: kan native Python-extensies (pydantic-core, protobuf) breken
+#    (man-page: onverenigbaar met programma's die dynamisch code genereren) (niet getest).
+#  - ProcSubset=pid: man-page: "not suitable for most non-trivial programs".
+
+# Netwerk-adresfamilies als allow-list (systemd.exec: zonder "~" is het een allow-list):
+#  AF_INET/AF_INET6  uvicorn op loopback (en later uitgaande LLM-API's)
+#  AF_UNIX           lokale IPC/syslog (man-page: AF_UNIX moet in de lijst staan)
+#  AF_NETLINK        iw / ip / airodump-ng (nl80211, rtnetlink) en Pythons interfacelijst
+#  AF_PACKET         airodump-ng leest 802.11-frames via een raw packet-socket (vereist
+#                    CAP_NET_RAW, zie capabilities(7): "Use RAW and PACKET sockets")
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK AF_PACKET
+
+[Install]
+# Alleen relevant bij `systemctl enable`; install.sh enabled niets.
+WantedBy=multi-user.target

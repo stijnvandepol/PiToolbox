@@ -1,0 +1,77 @@
+# Cloudflare Tunnel voor pitoolbox: de enige weg van buiten naar 127.0.0.1:8765.
+# Installeren: deploy/install.sh kopieert dit naar /etc/systemd/system/. De config en het
+# credentials-bestand (/etc/cloudflared/pitoolbox.yml en <UUID>.json) leg je zelf neer, zie
+# docs/fase2-remote.md. Deze unit is bewust een eigen unit en NIET `cloudflared service install`.
+#
+# Bronnen:
+#  - Cloudflare-voorbeeldunit (Type=notify, TimeoutStartSec=0, Restart=on-failure, RestartSec=5s,
+#    WantedBy=multi-user.target) en --no-autoupdate:
+#    https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/configure-tunnels/run-parameters/
+#  - `cloudflared tunnel --config <pad> run <UUID of NAAM>`:
+#    https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/local-management/create-local-tunnel/
+#  - systemd.exec / systemd.service / systemd.unit: https://www.freedesktop.org/software/systemd/man/latest/
+#    (gelezen via https://man7.org/linux/man-pages/man5/systemd.exec.5.html)
+#
+# De hardening hieronder is gematigd en NIET op cloudflared getest (niet geverifieerd): Cloudflare
+# publiceert geen hardened unit. Faalt de unit na een wijziging, haal dan eerst
+# ProtectKernelTunables/RestrictAddressFamilies/SystemCallArchitectures weg en kijk in
+# `journalctl -u cloudflared-pitoolbox`.
+
+[Unit]
+Description=Cloudflare Tunnel voor pitoolbox
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
+# cloudflared moet naar buiten kunnen (poort 7844 naar Cloudflare): wacht op "online".
+Wants=network-online.target
+After=network-online.target
+# Max. 5 starts per 5 minuten; daarna `systemctl reset-failed cloudflared-pitoolbox`.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+# cloudflared meldt zelf via sd_notify dat de tunnel staat (volgens de Cloudflare-voorbeeldunit).
+Type=notify
+# 0 = geen timeout op het opstarten (zoals in de Cloudflare-voorbeeldunit).
+TimeoutStartSec=0
+# Eigen systeemgebruiker (door install.sh aangemaakt). Heeft alleen leesrechten op
+# /etc/cloudflared; geen toegang tot /var/lib/pitoolbox.
+User=cloudflared
+Group=cloudflared
+# --no-autoupdate: cloudflared komt via apt (pkg.cloudflare.com), updates doen we met apt.
+# `--config` staat achter `tunnel`, zoals in de Cloudflare-docs. Naam i.p.v. UUID: de naam die je
+# bij `tunnel create` koos (hier: pitoolbox); de UUID werkt ook (docs: `run <UUID or NAME>`).
+# Pad van de binary: /usr/bin/cloudflared bij de .deb (niet geverifieerd; check `command -v cloudflared`).
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --config /etc/cloudflared/pitoolbox.yml run pitoolbox
+
+# Herstart na crash of verbroken verbinding, niet na `systemctl stop`.
+Restart=on-failure
+RestartSec=5s
+
+# --- Hardening (gematigd) ----------------------------------------------------------------------
+# cloudflared heeft geen enkele capability nodig (alleen uitgaande verbindingen, geen
+# poort < 1024): lege bounding set (systemd.exec: een lege toewijzing maakt de set leeg).
+# Let op: de ICMP-proxy van cloudflared (ping-groep) werkt dan niet; dat gebruiken we niet.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Geen schrijfpaden nodig: logging gaat naar de journal, config + credentials worden alleen gelezen.
+ProtectHome=yes
+PrivateTmp=yes
+# Minimale /dev (null, zero, urandom ...). cloudflared heeft geen echte devices nodig.
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+# Go-runtime: IPv4/IPv6/UDP (QUIC) naar de edge, AF_UNIX voor lokale resolvers, AF_NETLINK om
+# netwerkinterfaces te lezen (niet geverifieerd dat Go hier netlink voor nodig heeft; kost niets).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

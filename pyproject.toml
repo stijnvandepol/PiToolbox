@@ -22,6 +22,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "grpcio-tools>=1.84.0",
+    "httpx>=0.28.1",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
@@ -32,6 +33,7 @@ dev = [
 
 [project.scripts]
 pitoolbox-mcp = "pitoolbox.frontends.mcp_server:main"
+pitoolbox-auth = "pitoolbox.auth.cli:main"
 
 [tool.ruff]
 line-length = 100
