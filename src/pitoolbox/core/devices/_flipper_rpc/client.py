@@ -9,6 +9,8 @@ Aanpak afgeleid van busse/flipperzero-mcp (MIT), `protobuf_rpc.py` (framing, com
   laat antwoord op een eerdere timeout) gaan naar een eventqueue; `wait_event()` haalt ze
   daar weer uit. Volgorde van aankomst maakt dus niet uit (event vóór of na het antwoord).
 * Een niet-OK `command_status` wordt `RpcError` met de statusnaam uit flipper.proto.
+* `request_chunked()` verstuurt één verzoek in meerdere frames met hetzelfde command_id en
+  `has_next` (zoals `storage_write_request`, zie de docstring daar).
 * `event_hook` (optioneel) ziet elk ongevraagd frame vóór de eventqueue en mag het
   overnemen (True). Zo komen DataExchange-frames van de PiToolbox-app meteen bij de bridge,
   ook als ze binnenkomen terwijl `request()` op een ander antwoord wacht, en niet in de
@@ -24,7 +26,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from pitoolbox.core.devices._flipper_rpc.framing import (
@@ -222,6 +224,66 @@ class RpcClient:
         """
         kind = str(main.WhichOneof("content") or "leeg")
         cid = self.send(main)
+        return self._collect(cid, kind, timeout, cancel)
+
+    def request_chunked(
+        self,
+        mains: Sequence[Main],
+        timeout: float,
+        *,
+        cancel: Callable[[], bool] | None = None,
+        on_chunk: Callable[[int, int], None] | None = None,
+    ) -> list[Main]:
+        """Eén verzoek in meerdere frames: hetzelfde command_id, `has_next` op alle frames
+        behalve het laatste. Daarna verzamelen zoals `request()`.
+
+        Zo schrijft de officiële client een bestand (flipperzero_protobuf_py
+        `flipper_storage.py` `rpc_write`: blokken van 512 B, één command_id). De firmware
+        antwoordt pas na het laatste frame, of eerder met een fout (Momentum mntm-012
+        `applications/services/rpc/rpc_storage.c`, `rpc_system_storage_write_process`). Na zo'n
+        fout zet hij zijn schrijftoestand terug, en een volgend frame met hetzelfde command_id
+        zou het bestand opnieuw aanmaken (`FSOM_CREATE_ALWAYS`). Daarom kijkt deze methode na elk
+        frame zonder te wachten of er al een antwoord binnen is, en stopt ze bij een fout.
+        `on_chunk(verstuurd, totaal)` na elk frame (over BLE: nadat de flow control het toeliet).
+
+        Raises: zoals `request()`.
+        """
+        if not mains:
+            raise ValueError("request_chunked zonder frames")
+        kind = str(mains[0].WhichOneof("content") or "leeg")
+        cid = self._alloc_id()
+        total = len(mains)
+        for index, main in enumerate(mains):
+            if cancel is not None and cancel():
+                raise Aborted("RPC-verzoek in delen afgebroken")
+            main.command_id = cid
+            main.has_next = index < total - 1
+            self._transport.write(encode_frame(main.SerializeToString()))
+            if on_chunk is not None:
+                on_chunk(index + 1, total)
+            if main.has_next:
+                self._read_some(0.0)
+                self._check_early(cid, kind)
+        return self._collect(cid, kind, timeout, cancel)
+
+    def _check_early(self, cid: int, kind: str) -> None:
+        """Verwerk wat al binnen is zonder te wachten: een fout op `cid` stopt het verzoek."""
+        keep: deque[Main] = deque()
+        while self._inbox:
+            frame = self._inbox.popleft()
+            if frame.command_id == cid:
+                if frame.command_status != flipper_pb2.OK:
+                    raise RpcError(frame.command_status, kind)
+                keep.append(frame)  # onverwacht vroeg OK: laat het voor _collect staan
+                continue
+            self._queue_event(frame)
+            if frame.command_id == 0 and frame.command_status != flipper_pb2.OK:
+                raise RpcError(frame.command_status, kind)
+        self._inbox.extend(keep)
+
+    def _collect(
+        self, cid: int, kind: str, timeout: float, cancel: Callable[[], bool] | None
+    ) -> list[Main]:
         deadline = time.monotonic() + timeout
         responses: list[Main] = []
         while True:

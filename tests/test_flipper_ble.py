@@ -20,6 +20,7 @@ from flipper_fakes import (
     FakeBleWorld,
     fixture_json,
     install_fake_bleak,
+    make_fap,
     wait_until,
 )
 
@@ -1053,3 +1054,19 @@ def test_own_close_is_not_logged_as_link_loss(
     transport._on_disconnected(None)
     lost = [r for r in caplog.records if "verbroken" in r.getMessage()]
     assert lost and all(r.levelno == logging.DEBUG for r in lost)
+
+
+def test_install_app_over_ble_respects_flow_control(
+    world: FakeBleWorld, flipper: FakeBleFlipper
+) -> None:
+    """ui-install over BLE: frames van ~560 B (512 B data + pad) over een buffer van 1024 B."""
+    data = make_fap(body=6000)
+    device = make_device(flipper)
+    try:
+        result = device.install_app_file("/ext/apps/Tools/pitoolbox_ui.fap", data)
+    finally:
+        device.close()
+    assert flipper.rpc.files["/ext/apps/Tools/pitoolbox_ui.fap"] == data
+    assert not result.skipped
+    assert flipper.overflows == 0
+    assert flipper.refills > 0  # het krediet raakte op en werd aangevuld

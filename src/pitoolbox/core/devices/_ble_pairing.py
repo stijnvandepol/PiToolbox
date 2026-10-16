@@ -861,6 +861,32 @@ async def unpair_async(
             await bus.close()
 
 
+async def disconnect_async(
+    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
+) -> bool:
+    """Verbreek de BLE-link met een apparaat (Device1.Disconnect; Device.rst: "Disconnects all
+    connected profiles and then terminates low-level ACL connection"). De bonding blijft staan.
+
+    Geeft False als het apparaat niet bekend of niet verbonden was. Werkt zonder root met de
+    D-Bus-policy van BlueZ (groep `bluetooth`), net als koppelen. Bedoeld voor de valtest
+    (`pitoolbox-flipper ui-droptest`); het proces dat de link had, ziet een gewone verbreking.
+    """
+    mac = _mac(address)
+    adapter = _adapter_arg(adapter)
+    bus = await connect_bus(bus_factory)
+    try:
+        objects = await bus.get_managed_objects()
+        only = find_adapter(objects, adapter) if adapter is not None else None
+        path = find_device(objects, mac, only)
+        if path is None or not objects[path][DEVICE_IFACE].get("Connected", False):
+            return False
+        await _call(bus, "Verbinding verbreken", path, DEVICE_IFACE, "Disconnect")
+        return True
+    finally:
+        with contextlib.suppress(Exception):
+            await bus.close()
+
+
 async def list_devices_async(
     prefix: str = "",
     *,
@@ -928,6 +954,12 @@ def unpair(
     address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
 ) -> bool:
     return asyncio.run(unpair_async(address, bus_factory=bus_factory, adapter=adapter))
+
+
+def disconnect(
+    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
+) -> bool:
+    return asyncio.run(disconnect_async(address, bus_factory=bus_factory, adapter=adapter))
 
 
 def list_devices(

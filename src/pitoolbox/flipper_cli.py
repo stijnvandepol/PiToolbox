@@ -6,7 +6,9 @@ Subcommando's:
 - ``ble-unpair <adres>``: koppeling (bonding) uit BlueZ verwijderen;
 - ``ble-list``: gekoppelde Flippers volgens BlueZ;
 - ``ble-test``: de fase-3-meetscript: verbinden, system_info, opslaglijst, ping-latency en
-  downloadsnelheid, optioneel naast USB.
+  downloadsnelheid, optioneel naast USB;
+- ``ui-install``, ``ui-test``, ``ui-droptest``: de PiToolbox-app op de Flipper installeren, een
+  rooktest en de valtest (fase 4, zie flipper_ui_cli.py).
 
 Elk subcommando kent ``--adapter hciN`` (standaard PITOOLBOX_FLIPPER_BLE_ADAPTER, anders de
 standaardadapter van BlueZ), handig als er meerdere Bluetooth-adapters zijn.
@@ -31,6 +33,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Protocol
 
+from . import flipper_ui_cli
 from .config import Settings
 from .core.devices import _ble_pairing as ble_pairing
 from .core.errors import ToolboxError
@@ -138,7 +141,8 @@ def _rounds_arg(value: str) -> int:
 def _build_parser(settings: Settings) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pitoolbox-flipper",
-        description="Flipper Zero over Bluetooth LE koppelen en testen.",
+        description="Flipper Zero over Bluetooth LE koppelen en testen; PiToolbox-app installeren "
+        "en testen.",
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="commando")
     prefix_default = settings.flipper_ble_name_prefix
@@ -205,6 +209,8 @@ def _build_parser(settings: Settings) -> argparse.ArgumentParser:
         "--compare-usb", action="store_true", help="dezelfde metingen over USB ernaast zetten"
     )
     p_test.add_argument("--json", action="store_true", help="machineleesbare uitvoer")
+
+    flipper_ui_cli.add_parsers(sub, common, settings)
     return parser
 
 
@@ -670,6 +676,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_list(args)
         if args.command == "ble-test":
             return cmd_test(args, settings)
+        result = flipper_ui_cli.run(args, settings)
+        if result is not None:
+            return result
     except ToolboxError as exc:
         _err(f"Fout: {exc}")
         return 1

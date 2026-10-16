@@ -441,6 +441,37 @@ async def test_unpair_error_mapped() -> None:
     assert bus.closed
 
 
+async def test_disconnect_calls_device_disconnect_when_connected() -> None:
+    bus = FakeBus(make_objects(paired=True))
+    bus.objects[DEV][bp.DEVICE_IFACE]["Connected"] = True
+    assert await bp.disconnect_async(ADDR, bus_factory=factory(bus), adapter="hci0") is True
+    assert bus.calls == [(DEV, bp.DEVICE_IFACE, "Disconnect", [])]
+    assert bus.closed
+
+
+async def test_disconnect_not_connected_or_unknown_returns_false() -> None:
+    bus = FakeBus(make_objects(paired=True))
+    assert await bp.disconnect_async(ADDR, bus_factory=factory(bus)) is False
+    unknown = FakeBus(make_objects(device=False))
+    assert await bp.disconnect_async(ADDR, bus_factory=factory(unknown)) is False
+    assert bus.calls == [] and unknown.calls == []
+
+
+async def test_disconnect_error_mapped_and_adapter_validated() -> None:
+    bus = FakeBus(
+        make_objects(), errors={"Disconnect": bp.BluezDBusError("org.bluez.Error.Failed", "x")}
+    )
+    bus.objects[DEV][bp.DEVICE_IFACE]["Connected"] = True
+    with pytest.raises(bp.BlePairingError, match="Verbinding verbreken"):
+        await bp.disconnect_async(ADDR, bus_factory=factory(bus))
+    with pytest.raises(bp.BlePairingError, match="adapter"):
+        await bp.disconnect_async(ADDR, bus_factory=factory(bus), adapter="hci0;x")
+
+
+def test_disconnect_sync_wrapper() -> None:
+    assert bp.disconnect(ADDR, bus_factory=factory(FakeBus(make_objects()))) is False
+
+
 async def test_paired_devices_filters_prefix_and_state() -> None:
     objects = make_objects(paired=True)
     objects[f"{ADAPTER}/dev_11"] = {

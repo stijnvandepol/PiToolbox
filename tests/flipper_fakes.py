@@ -8,6 +8,12 @@ Gedrag nagebootst uit de firmwarebronnen (flipperzero-firmware 3fb1d517):
 * app_start/app_exit sturen een ongevraagde `app_state_response` met command_id 0
   (rpc_app.c), de Infrared-app bevestigt load/press met OK of ERROR_APP_CMD_ERROR
   (infrared_scene_rpc.c).
+* Opslag schrijven zoals Momentum mntm-012 `rpc_storage.c`: storage_write_request in frames met
+  één command_id en has_next; het eerste frame (of een ander command_id) opent het bestand met
+  CREATE_ALWAYS, alleen het laatste frame (of een fout) krijgt een antwoord, en na een fout
+  begint een volgend frame dus een nieuw, leeg bestand. mkdir maakt één niveau
+  (ERROR_STORAGE_EXIST als het er al is), md5sum geeft hex in kleine letters, rename verwijdert
+  een bestaand doel eerst (storage_external_api.c `storage_common_rename`).
 
 De uitvoer van subghz/rfid/nfc komt uit tests/fixtures/flipper/*.txt (zelf geschreven op basis
 van de printf-formaten; de decoder-tekst van Sub-GHz is synthetisch). De `*_momentum_*`-fixtures
@@ -23,6 +29,7 @@ firmwares SUBGHZ_FREQUENCY_RANGE_STR (op hardware bevestigd voor Momentum).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -132,6 +139,11 @@ class FakeFlipperTransport:
         self.fail_on_rpc_kind: str | None = None  # TransportError bij dit RPC-berichttype (1x)
         self.extra_frames: list[Any] = []  # komen vóór het eerstvolgende antwoord
         self.drop_app_started = False  # app start wel, maar meldt APP_STARTED niet
+        # --- opslag schrijven (ui-install) ---
+        self.dirs: set[str] = set()  # lege mappen (naast de mappen die uit `files` volgen)
+        self.write_chunks: list[int] = []  # grootte van elk storage_write-blok
+        self.fail_write_at: int | None = None  # dit blok (1-based, telt over alle writes) faalt
+        self.corrupt_writes = False  # het geschreven bestand wijkt 1 byte af
         # --- waarnemingen ---
         self.opens = 0
         self.closes = 0
@@ -154,6 +166,7 @@ class FakeFlipperTransport:
         self._running_app: str | None = None  # "Infrared" of het FAP-pad
         self._loaded_file: str | None = None
         self._error_text = ""
+        self._write: tuple[int, str, bytearray] | None = None  # (command_id, pad, inhoud)
 
     # --- ByteTransport ----------------------------------------------------------------
 
@@ -470,7 +483,11 @@ class FakeFlipperTransport:
     def _dir_entries(self, path: str) -> list[tuple[str, str, int]] | None:
         prefix = path.rstrip("/") + "/"
         entries: dict[str, tuple[str, str, int]] = {}
-        found = path in ("/ext", "/int")
+        found = path in ("/ext", "/int") or path in self.dirs
+        for directory in self.dirs:
+            if directory.startswith(prefix):
+                head = directory[len(prefix) :].split("/", 1)[0]
+                entries.setdefault(head, (head, "dir", 0))
         for file_path, data in self.files.items():
             if not file_path.startswith(prefix):
                 continue
@@ -576,6 +593,65 @@ class FakeFlipperTransport:
             self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_NOT_EXIST))
         else:
             self._send(request, self._ok(request))
+
+    def _is_dir(self, path: str) -> bool:
+        return path not in self.files and self._dir_entries(path) is not None
+
+    def _rpc_storage_write_request(self, request: Any) -> None:
+        req = request.storage_write_request
+        self.write_chunks.append(len(req.file.data))
+        if self._write is not None and self._write[0] != request.command_id:
+            self._write = None  # firmware: reset (ERROR_CONTINUOUS_COMMAND_INTERRUPTED)
+        if self._write is None:
+            parent = req.path.rsplit("/", 1)[0]
+            if not self._is_dir(parent):
+                self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_NOT_EXIST))
+                return
+            self._write = (request.command_id, req.path, bytearray())
+            self.files[req.path] = b""  # FSOM_CREATE_ALWAYS
+        _cid, path, buf = self._write
+        if self.fail_write_at is not None and len(self.write_chunks) == self.fail_write_at:
+            self._write = None
+            self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_INTERNAL))
+            return
+        buf.extend(req.file.data)
+        self.files[path] = bytes(buf)
+        if not request.has_next:
+            self._write = None
+            if self.corrupt_writes and buf:
+                buf[0] ^= 0xFF
+                self.files[path] = bytes(buf)
+            self._send(request, self._ok(request))
+
+    def _rpc_storage_md5sum_request(self, request: Any) -> None:
+        path = request.storage_md5sum_request.path
+        if path not in self.files:
+            self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_NOT_EXIST))
+            return
+        reply = self._reply(request)
+        reply.storage_md5sum_response.md5sum = hashlib.md5(
+            self.files[path], usedforsecurity=False
+        ).hexdigest()
+        self._send(request, reply)
+
+    def _rpc_storage_mkdir_request(self, request: Any) -> None:
+        path = request.storage_mkdir_request.path
+        if path in self.files or self._is_dir(path):
+            self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_EXIST))
+        elif not self._is_dir(path.rsplit("/", 1)[0]):
+            self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_NOT_EXIST))
+        else:
+            self.dirs.add(path)
+            self._send(request, self._ok(request))
+
+    def _rpc_storage_rename_request(self, request: Any) -> None:
+        old = request.storage_rename_request.old_path
+        new = request.storage_rename_request.new_path
+        if old not in self.files:
+            self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_NOT_EXIST))
+            return
+        self.files[new] = self.files.pop(old)
+        self._send(request, self._ok(request))
 
     def _rpc_system_get_datetime_request(self, request: Any) -> None:
         epoch = self.rtc_epoch if self.rtc_epoch is not None else int(time.time())
@@ -1162,3 +1238,44 @@ def install_fake_bleak(monkeypatch: Any, world: FakeBleWorld) -> None:
         "BleakScanner",
         type("BoundFakeScanner", (FakeBleakScanner,), {"world": world}),
     )
+
+
+# --- FAP-bestanden voor ui-install ----------------------------------------------------------
+
+
+def make_fap(
+    *,
+    name: str = "PiToolbox",
+    api: tuple[int, int] = (87, 1),
+    target: int = 7,
+    body: int = 3000,
+    machine: int = 40,
+    with_meta: bool = True,
+) -> bytes:
+    """Minimale ELF32-ARM met een `.fapmeta`-sectie zoals ufbt die maakt (zie core/devices/_fap.py
+    voor de bronnen van de layout). `body` bytes vulling maken het bestand groter."""
+    import struct
+
+    meta = struct.pack("<IIHHHHI", 0x52474448, 1, api[1], api[0], target, 4096, 0x00010000)
+    meta += name.encode("ascii").ljust(32, b"\0") + b"\0" + b"\0" * 32 + struct.pack("<I", 0)
+    names = b"\0.shstrtab\0" + (b".fapmeta\0" if with_meta else b".text\0")
+    filler = bytes((i * 7) & 0xFF for i in range(body))
+    data_off = 52
+    meta_off = data_off + len(filler)
+    names_off = meta_off + len(meta)
+    shoff = names_off + len(names)
+    sections = [
+        (0, 0, 0),  # SHN_UNDEF
+        (11, meta_off, len(meta)),  # .fapmeta (of .text)
+        (1, names_off, len(names)),  # .shstrtab
+    ]
+    header = bytearray(52)
+    header[:6] = b"\x7fELF\x01\x01"
+    header[6] = 1
+    struct.pack_into("<HHI", header, 16, 1, machine, 1)  # ET_REL, e_machine, EV_CURRENT
+    struct.pack_into("<I", header, 32, shoff)
+    struct.pack_into("<HHHHHH", header, 40, 52, 0, 0, 40, len(sections), 2)
+    table = b"".join(
+        struct.pack("<IIIIIIIIII", n, 1, 0, 0, off, size, 0, 0, 1, 0) for n, off, size in sections
+    )
+    return bytes(header) + filler + meta + names + table
