@@ -126,8 +126,20 @@ De server werkt met elke MCP-client (Claude Desktop, Cursor, Open WebUI, ...). P
 | `PITOOLBOX_LLM_BASE_URL` | verplicht bij `openai-compatible`; anders het officiële endpoint van de provider |
 | `PITOOLBOX_LLM_API_KEY` | geen; verplicht bij `anthropic`/`openai`, optioneel bij lokale servers |
 | `PITOOLBOX_LLM_TIMEOUT_S` / `PITOOLBOX_LLM_MAX_RETRIES` / `PITOOLBOX_LLM_MAX_TOKENS` | `60` / `2` / `4096` |
+| `PITOOLBOX_AGENT_MAX_STEPS` / `PITOOLBOX_AGENT_MAX_CALLS_PER_STEP` | `8` / `8`: tool-rondes per beurt, tool calls per modelantwoord |
+| `PITOOLBOX_AGENT_TURN_TIMEOUT_S` / `PITOOLBOX_AGENT_MAX_RESULT_CHARS` | `300` / `8000`: tijd per beurt (tussen stappen gecontroleerd), lengte van een tool-resultaat naar het model |
 
-**LLM-provider (fase 4, alleen de providerlaag; de agent-loop volgt).** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. `openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
+**LLM-provider (fase 4).** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. `openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
+
+## Agent in de terminal (fase 4)
+
+```bash
+uv run pitoolbox-agent            # chat met het ingestelde LLM (PITOOLBOX_LLM_*)
+```
+
+Het model gebruikt dezelfde tools als de MCP-server, altijd via de ToolRunner (validatie, scope, policy, audit). **Een transmit voert het model nooit zelf uit.** `confirm_action` is voor het model onzichtbaar en wordt geweigerd als het hem toch aanroept, en het model ziet geen `pending_id`. Na de beurt toont de agent de samenvatting en vraagt `Bevestigen? [j/N]`. Alleen `j`/`ja` voert de actie uit, eenmalig en binnen 60 s. Prompt-injectie via tool-uitvoer (een SSID, bestandsinhoud) kan zo hooguit een bevestigingsvraag opleveren. Tools buiten `PITOOLBOX_TOOL_ALLOWLIST` krijgt het model niet te zien.
+
+Commando's: `/stop` (noodstop), `/help`, `/exit`. Ctrl+C breekt alleen de lopende beurt af en is **geen** noodstop: captures lopen door, en een open bevestiging wordt afgewezen. Zonder geconfigureerde provider stopt `pitoolbox-agent` met exitcode 2. In de audit-log staat per beurt een `agent_turn_start`/`agent_turn_end` (model, tellingen, tokens), zonder berichtinhoud.
 
 ## Flipper draadloos via Bluetooth LE (fase 3)
 
