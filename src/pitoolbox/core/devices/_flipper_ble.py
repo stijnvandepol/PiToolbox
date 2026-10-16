@@ -112,7 +112,7 @@ from pitoolbox.core.devices._ble_pairing import (
     BusFactory,
     normalize_adapter,
 )
-from pitoolbox.core.devices.flipper import TransportError
+from pitoolbox.core.devices._flipper_transport import TransportError
 from pitoolbox.core.errors import Aborted, DeviceError, DeviceNotConnected
 
 log = logging.getLogger(__name__)

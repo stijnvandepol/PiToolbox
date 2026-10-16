@@ -79,9 +79,13 @@ def test_find_port_by_vid_pid(monkeypatch: pytest.MonkeyPatch) -> None:
         SimpleNamespace(vid=0x1234, pid=0x5678, device="COM1"),
         SimpleNamespace(vid=0x0483, pid=0x5740, device="COM7"),
     ]
-    monkeypatch.setattr("pitoolbox.core.devices.flipper.list_ports.comports", lambda: ports)
+    monkeypatch.setattr(
+        "pitoolbox.core.devices._flipper_transport.list_ports.comports", lambda: ports
+    )
     assert UsbSerialTransport.find_port() == "COM7"
-    monkeypatch.setattr("pitoolbox.core.devices.flipper.list_ports.comports", lambda: ports[:1])
+    monkeypatch.setattr(
+        "pitoolbox.core.devices._flipper_transport.list_ports.comports", lambda: ports[:1]
+    )
     with pytest.raises(DeviceNotConnected, match="0483:5740"):
         UsbSerialTransport.find_port()
 

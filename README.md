@@ -466,6 +466,8 @@ src/pitoolbox/
   core/
     scope.py policy.py audit.py errors.py proc.py
     devices/flipper.py        # FlipperDevice: USB of BLE achter één interface
+    devices/_flipper_transport.py  # ByteTransport-protocol en USB-transport (pyserial)
+    devices/_flipper_types.py # fouttypes, AppEvent en FlipperTiming
     devices/_flipper_ble.py   # BLE-transport (bleak), serial-service-UUID's, flow control
     devices/_ble_pairing.py   # BlueZ-agent (D-Bus) voor koppelen met PIN
     devices/_flipper_rpc/     # framing, RPC-client, gegenereerde protobuf (pb/)

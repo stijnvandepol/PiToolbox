@@ -50,16 +50,30 @@ import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
-
-import serial
-from serial.tools import list_ports
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from pitoolbox.core.devices._fap import FAP_APP_NAME, FAP_MAX_BYTES, inspect_fap
 from pitoolbox.core.devices._flipper_cli import CliProfile, select_profile
 from pitoolbox.core.devices._flipper_rpc.client import Main, RpcClient, RpcError
 from pitoolbox.core.devices._flipper_rpc.framing import FrameError, encode_frame
 from pitoolbox.core.devices._flipper_rpc.pb import application_pb2, flipper_pb2, storage_pb2
+from pitoolbox.core.devices._flipper_transport import (
+    FLIPPER_PID,
+    FLIPPER_VID,
+    ByteTransport,
+    TransportError,
+    UsbSerialTransport,
+)
+from pitoolbox.core.devices._flipper_types import (
+    AppEvent,
+    AppEventSink,
+    AppLocked,
+    AppNotRunning,
+    AppRejected,
+    DeviceBusy,
+    FlipperTiming,
+    _Attempt,
+)
 from pitoolbox.core.errors import (
     Aborted,
     DeviceError,
@@ -71,10 +85,28 @@ from pitoolbox.core.errors import (
 if TYPE_CHECKING:
     from pitoolbox.config import Settings
 
-log = logging.getLogger(__name__)
+__all__ = [
+    "FLIPPER_PID",
+    "FLIPPER_VID",
+    "STORAGE_CHUNK",
+    "AppEvent",
+    "AppEventSink",
+    "AppInstall",
+    "AppLocked",
+    "AppNotRunning",
+    "AppRejected",
+    "ByteTransport",
+    "DeviceBusy",
+    "DeviceError",
+    "FlipperDevice",
+    "FlipperTiming",
+    "ProgressFn",
+    "TransportError",
+    "UsbSerialTransport",
+    "make_transport",
+]
 
-FLIPPER_VID = 0x0483
-FLIPPER_PID = 0x5740
+log = logging.getLogger(__name__)
 
 _ETX = b"\x03"
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
@@ -84,51 +116,6 @@ _MAX_RAW_CHARS = 16_000
 
 T = TypeVar("T")
 
-
-class TransportError(DeviceError):
-    """I/O-fout op de transportlaag (kabel eruit, poort weg). Reden voor één reconnect."""
-
-    code = "transport_error"
-
-
-class DeviceBusy(DeviceError):
-    """Niet-blokkerende operatie: het device is bezet of iemand wacht er al op."""
-
-    code = "device_busy"
-
-
-class AppLocked(DeviceError):
-    """De loader is bezet (er is een app open); de Pi sluit nooit een app van de gebruiker."""
-
-    code = "app_locked"
-
-
-class AppNotRunning(DeviceError):
-    """De RPC-gekoppelde app draait niet (meer)."""
-
-    code = "app_not_running"
-
-
-class AppRejected(DeviceError):
-    """De app weigerde een DataExchange (`ERROR_APP_CMD_ERROR`: ongeldig of wachtrij vol)."""
-
-    code = "app_rejected"
-
-
-@dataclass(frozen=True)
-class AppEvent:
-    """Ongevraagd bericht van de RPC-gekoppelde app, voor de sink (de Flipper-bridge).
-
-    `data`: één DataExchange-payload. `closed`: de app sloot zelf (gebruiker of crash).
-    `lost`: de sessie of de link viel weg (de app sluit dan zelf; opnieuw starten kan).
-    """
-
-    kind: Literal["data", "closed", "lost"]
-    data: bytes = b""
-    reason: str = ""
-
-
-AppEventSink = Callable[[AppEvent], None]
 
 # Alleen een FAP op de SD-kaart onder /ext/apps, zonder "..": nooit een willekeurige app.
 _APP_PATH_RE = re.compile(r"^/ext/apps/(?:[A-Za-z0-9_-]+/)+[A-Za-z0-9_-]+\.fap$")
@@ -168,139 +155,6 @@ _CLI_NEEDS_USB = (
 )
 
 
-class ByteTransport(Protocol):
-    """Minimale bytestroom naar de Flipper; in tests vervangen door een simulator."""
-
-    @property
-    def kind(self) -> str:
-        """'usb' of 'ble'."""
-        ...
-
-    @property
-    def starts_in_rpc(self) -> bool:
-        """True: de verbinding staat na `open()` al in een RPC-sessie (geen CLI), zoals BLE."""
-        ...
-
-    @property
-    def is_open(self) -> bool: ...
-
-    def open(self) -> None: ...
-
-    def close(self) -> None: ...
-
-    def write(self, data: bytes) -> None: ...
-
-    def read(self, max_bytes: int, timeout: float) -> bytes:
-        """Lees 1..max_bytes bytes; leeg resultaat betekent: niets binnen `timeout` s."""
-        ...
-
-    def reset_input(self) -> None: ...
-
-    def describe(self) -> str: ...
-
-
-class UsbSerialTransport:
-    """pyserial-transport. Zonder expliciete poort wordt op VID:PID 0483:5740 gezocht."""
-
-    kind = "usb"
-    starts_in_rpc = False  # de poort start in de CLI (cli_vcp.c)
-
-    def __init__(self, port: str | None = None, baudrate: int = 115200) -> None:
-        self._port = port
-        self._baudrate = baudrate  # CDC negeert de baudrate; pyserial wil er wel een
-        self._ser: Any = None
-        self._opened_port: str | None = None
-
-    @staticmethod
-    def find_port() -> str:
-        found = sorted(
-            (p for p in list_ports.comports() if p.vid == FLIPPER_VID and p.pid == FLIPPER_PID),
-            key=lambda p: str(p.device),
-        )
-        if not found:
-            raise DeviceNotConnected(
-                "Geen Flipper gevonden op USB (VID:PID 0483:5740). Is hij aangesloten en "
-                "niet in gebruik door qFlipper of een andere terminal?"
-            )
-        if len(found) > 1:
-            log.warning("meerdere Flippers gevonden, eerste gekozen: %s", found[0].device)
-        return str(found[0].device)
-
-    @staticmethod
-    def is_present(port: str | None = None) -> bool:
-        """Zit er een Flipper op USB (VID:PID), of staat de opgegeven poort in de lijst?"""
-        try:
-            UsbSerialTransport.find_port()
-            return True
-        except (DeviceNotConnected, OSError):
-            pass
-        if port:
-            try:
-                return any(str(p.device) == port for p in list_ports.comports())
-            except OSError:
-                return False
-        return False
-
-    @property
-    def is_open(self) -> bool:
-        return self._ser is not None and bool(self._ser.is_open)
-
-    def open(self) -> None:
-        if self.is_open:
-            return
-        port = self._port or self.find_port()
-        try:
-            # DTR hoog bij openen = "verbonden" voor de firmware (cli_vcp.c).
-            self._ser = serial.Serial(port, self._baudrate, timeout=0.1, write_timeout=2.0)
-        except (serial.SerialException, OSError) as exc:
-            self._ser = None
-            raise DeviceNotConnected(
-                f"kan seriële poort {port} niet openen: {exc} (rechten? zit je in 'dialout'?)"
-            ) from exc
-        self._opened_port = port
-
-    def close(self) -> None:
-        ser, self._ser = self._ser, None
-        if ser is not None:
-            try:
-                ser.close()
-            except (serial.SerialException, OSError) as exc:
-                log.debug("fout bij sluiten van de poort: %s", exc)
-
-    def write(self, data: bytes) -> None:
-        if not self.is_open:
-            raise TransportError("seriële poort is niet open")
-        try:
-            self._ser.write(data)
-            self._ser.flush()
-        except (serial.SerialException, OSError) as exc:
-            raise TransportError(f"schrijffout op seriële poort: {exc}") from exc
-
-    def read(self, max_bytes: int, timeout: float) -> bytes:
-        if not self.is_open:
-            raise TransportError("seriële poort is niet open")
-        try:
-            self._ser.timeout = timeout
-            data: bytes = self._ser.read(1)
-            if data and max_bytes > 1:
-                waiting = int(self._ser.in_waiting)
-                if waiting:
-                    data += self._ser.read(min(waiting, max_bytes - 1))
-            return data
-        except (serial.SerialException, OSError) as exc:
-            raise TransportError(f"leesfout op seriële poort: {exc}") from exc
-
-    def reset_input(self) -> None:
-        if self.is_open:
-            try:
-                self._ser.reset_input_buffer()
-            except (serial.SerialException, OSError) as exc:
-                raise TransportError(f"kan invoerbuffer niet leegmaken: {exc}") from exc
-
-    def describe(self) -> str:
-        return f"usb-serieel {self._opened_port or self._port or '(auto)'}"
-
-
 def _auto_prefers_usb(settings: Settings) -> bool:
     """'auto': USB als er een Flipper op zit. Een expliciet ingestelde poort wint tenzij er ook
     een BLE-adres is ingesteld (dan is BLE het vangnet als de poort er niet is)."""
@@ -322,33 +176,6 @@ def make_transport(settings: Settings) -> ByteTransport:
         settings.flipper_ble_name_prefix,
         adapter=settings.flipper_ble_adapter,
     )
-
-
-@dataclass(frozen=True)
-class FlipperTiming:
-    """Wachttijden in seconden; tests verkleinen deze."""
-
-    prompt_timeout_s: float = 3.0
-    rpc_timeout_s: float = 5.0
-    probe_timeout_s: float = 1.5
-    settle_quiet_s: float = 0.15
-    settle_max_s: float = 1.0
-    read_slice_s: float = 0.05
-    stop_grace_s: float = 5.0  # extra tijd na Ctrl+C voordat de prompt terug moet zijn
-    command_timeout_s: float = 10.0
-    app_event_timeout_s: float = 3.0
-    app_exit_timeout_s: float = 3.0
-    probe_attempts: int = 3
-    # Na APP_CLOSED kan app_lock_status nog even `locked` geven (spike, test 2).
-    loader_free_wait_s: float = 1.5
-    loader_poll_s: float = 0.25
-
-
-@dataclass
-class _Attempt:
-    """Wordt waar zodra een actie met bijwerking is gestart; daarna geen automatische retry."""
-
-    committed: bool = False
 
 
 def _clean(raw: bytes | bytearray) -> str:
