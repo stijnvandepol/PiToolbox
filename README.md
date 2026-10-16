@@ -2,35 +2,67 @@
 
 Software voor een Raspberry Pi 4 of 5 (Kali Linux ARM64) die een **Flipper Zero** en een **Alfa AWUS036AXML** aanstuurt via een LLM, voor je eigen lab en apparaten.
 
-> **Status: fase 3.** Kern + MCP-server over stdio (lokaal) en streamable HTTP met OAuth 2.1 (remote, via een Cloudflare Tunnel naar de Claude-app). Flipper via USB of Bluetooth LE. De Flipper-app en de agent-loop komen in latere fases.
+Je praat met een model (Claude via de app, of een ander LLM via de agent in de terminal). Het model roept benoemde tools aan op de Pi: wifi scannen, een capture starten, Sub-GHz ontvangen, een IR-knop zenden. De Pi controleert elke aanroep tegen jouw scope en vraagt een mens om bevestiging voordat er iets zendt.
 
-## Ontwerp in het kort
+Deze README neemt je mee van een lege Pi tot een werkende installatie. Details staan in [docs/](docs/).
+
+## Inhoud
+
+- [Status](#status)
+- [Veiligheidsmodel](#veiligheidsmodel)
+- [Tools](#tools)
+- [Hardware](#hardware)
+- [Installatie van nul](#installatie-van-nul)
+- [Gebruik](#gebruik)
+- [Configuratie](#configuratie)
+- [Problemen oplossen](#problemen-oplossen)
+- [Ontwikkelen](#ontwikkelen)
+- [Hardware-testchecklists](#hardware-testchecklists)
+
+## Status
+
+Alle vijf fases zijn gebouwd en getest met nagebootste apparaten (`uv run pytest`). Op echte hardware is nog niet alles getest. Volledige stand: [docs/VOORTGANG.md](docs/VOORTGANG.md).
+
+| Onderdeel | Op hardware getest? |
+|---|---|
+| Flipper over USB (Momentum `mntm-012`) | ja: `system_info`, storage, `subghz_rx` op 433,92 en 290 MHz, `rfid_read` en `nfc_read` **zonder** tag, wisselen tussen RPC en CLI. Nog niet: een echte tag of afstandsbediening, `ir_send` |
+| Flipper over Bluetooth LE | ja: koppelen, `system_info`, storage, ping en doorvoer. Nog niet: `ir_send`, herverbinden, keepalive |
+| Alfa (wifi-tools) | **nee** (heeft root of capabilities nodig) |
+| Remote via de Claude-app (fase 2) | **nee** |
+| Agent en LLM-providers (fase 4) | **nee**, nog niet tegen de echte API's of Ollama |
+| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | **nee**: de app bouwt, de bridge is getest tegen een nagebootste app |
+| Systeemconfig voor onderweg (fase 5) | **nee**: alleen de bestanden, `--dry-run` en de controles zonder root |
+
+## Veiligheidsmodel
 
 ```
-frontend (MCP stdio, later HTTP / Flipper-bridge)
+frontend (MCP stdio of HTTP, pitoolbox-agent, Flipper-app)
         │  runner.call(frontend, tool, args)
         ▼
 ToolRunner ── valideren (pydantic, extra velden = fout)
         ├── Policy: allowlist → scope.yaml → risicoklasse
-        ├── transmit binnen scope → pending_id → confirm_action
+        ├── transmit binnen scope → pending_id → bevestigen door een mens
         ├── uitvoeren (FlipperDevice / AlfaAdapter / CaptureManager / SystemProbe)
         └── AuditLog: één JSON-regel per call
 ```
 
-- **Geen generieke shell, nergens.** Alleen benoemde tools met een vast argumentmodel. Subprocessen lopen via één runner met een allowlist (`iw`, `ip`, `airodump-ng`, `vcgencmd`), altijd argv-lijsten en nooit `shell=True`. De Flipper-CLI wordt alleen gebruikt met vaste sjablonen die uit gevalideerde getallen worden opgebouwd.
+- **Geen generieke shell, nergens.** Alleen benoemde tools met een vast argumentmodel. Subprocessen lopen via één runner met een allowlist (`iw`, `ip`, `airodump-ng`, `vcgencmd`), altijd als argv-lijst en nooit met `shell=True`. De Flipper-CLI wordt alleen gebruikt met vaste sjablonen die uit gevalideerde getallen worden opgebouwd.
+- **Scope.** `scope.yaml` (voorbeeld: [scope.example.yaml](scope.example.yaml)) noemt jouw eigen BSSID's (met kanaal) en IR-bestanden. Het bestand wordt live herladen. Is het ongeldig of ontbreekt het, dan geldt een lege scope (fail closed).
 - **Risicoklassen:**
 
   | Klasse | Betekenis | Regel |
   |---|---|---|
-  | `read` | scannen/lezen | toegestaan (met validatie zoals frequentiegrenzen) |
+  | `read` | scannen/lezen | toegestaan (met validatie, zoals frequentiegrenzen) |
   | `capture` | opslaan, adapter omzetten | alleen doelen uit `scope.yaml` |
-  | `transmit` | alles wat zendt | buiten scope altijd geweigerd; binnen scope eerst een `pending_id` en daarna expliciet `confirm_action` |
+  | `transmit` | alles wat zendt | buiten scope altijd geweigerd; binnen scope eerst een `pending_id`, daarna een expliciete bevestiging |
   | `control` | `emergency_stop`, `confirm_action` | altijd toegestaan |
 
-- **Bevestiging (transmit):** de tool voert niets uit maar geeft `confirmation_required`, een `pending_id` en een samenvatting terug. Pas `confirm_action(pending_id)` voert de actie uit. De bevestiging is eenmalig, verloopt na 60 s, is gebonden aan de frontend, en de scope wordt bij het bevestigen opnieuw gecontroleerd.
-- **Scope** (`~/.config/pitoolbox/scope.yaml`, voorbeeld: [scope.example.yaml](scope.example.yaml)) wordt live herladen bij wijziging. Is het bestand ongeldig of ontbreekt het, dan geldt een lege scope (fail closed).
+- **Bevestiging (transmit).** De tool voert niets uit. Hij geeft `confirmation_required`, een `pending_id` en een samenvatting terug. Pas `confirm_action(pending_id)` voert de actie uit. De bevestiging werkt één keer, verloopt na 60 s, is gebonden aan de frontend (bij HTTP: per OAuth-client), en bij het bevestigen wordt de scope opnieuw gecontroleerd.
+- **Flipper verplicht.** Zolang de Flipper-app verbonden is, bevestigt alleen OK op de Flipper een transmit, uit welke frontend die ook komt. Zie [Bediening op de Flipper](#bediening-op-de-flipper).
+- **Een model bevestigt nooit zelf.** In `pitoolbox-agent` ziet het model `confirm_action` niet en ook geen `pending_id`. Alleen jij typt `j`.
+- **Audit.** Elke toolcall komt als één JSON-regel in de audit-log, ook geweigerde calls, bevestigingen en het koppelen van de Flipper-app.
 
-## Tools (fase 1)
+## Tools
 
 | Tool | Klasse | Wat |
 |---|---|---|
@@ -42,7 +74,7 @@ ToolRunner ── valideren (pydantic, extra velden = fout)
 | `ir_send` | transmit | IR-knop uit een `.ir`-bestand van een apparaat in scope (RPC, Infrared-app) |
 | `alfa_set_mode` | capture | Alfa naar managed/monitor (nooit de uplink) |
 | `wifi_scan` | read | `iw scan` (managed) of `airodump-ng` (monitor), JSON met een `in_scope`-vlag per AP |
-| `capture_start` / `capture_stop` | capture | pcap van een BSSID uit scope, op het kanaal uit scope, naar `~/captures/<sessie>/` |
+| `capture_start` / `capture_stop` | capture | pcap van een BSSID uit scope, op het kanaal uit scope, naar `<captures>/<sessie>/` |
 | `status` | read | onderspanning (`vcgencmd get_throttled`), uplink, schijf, Flipper, adapter, captures |
 | `emergency_stop` | control | stopt alle captures, breekt Flipper-acties af, wist openstaande bevestigingen |
 | `confirm_action` | control | voert een `pending_id` uit, alleen na een expliciete "ja" van jou |
@@ -58,31 +90,178 @@ De officiële Flipper-RPC ([flipperzero-protobuf](https://github.com/flipperdevi
 
 Momentum heeft dezelfde CLI als official. Alleen accepteert de firmware een ruimer Sub-GHz-ontvangstbereik (281–361, 378–481 en 749–962 MHz, `furi_hal_subghz.c`). Het beleid van pitoolbox houdt `subghz_rx` bewust op het officiële bereik, zodat elk profiel hetzelfde toestaat. Het profiel wordt automatisch gekozen op basis van `firmware_origin_fork`. Bij een andere firmware weigeren de CLI-tools tot er een profiel is. Je kunt een profiel forceren met `PITOOLBOX_FLIPPER_CLI_PROFILE`.
 
-## Installatie (ontwikkelen / fase 1)
+> **Over Bluetooth is er geen CLI.** Over BLE opent de Flipper direct een RPC-sessie (`applications/services/bt/bt_service/bt.c`). Daarom werken over BLE alleen `system_info`, `storage_list`, `storage_read` en `ir_send`. `subghz_rx`, `nfc_read` en `rfid_read` hebben USB nodig: met `transport=auto` en een aangesloten kabel schakelt pitoolbox daar automatisch voor over, anders krijg je `unsupported_transport`.
+
+## Hardware
+
+| Onderdeel | Opmerkingen |
+|---|---|
+| Raspberry Pi 4 of 5 | Kali Linux ARM64. Getest op een Pi 4 Model B. De ingebouwde wifi is de uplink (`wlan0`), de ingebouwde Bluetooth praat met de Flipper. Gebruik een goede voeding: `status` meldt onderspanning. |
+| Flipper Zero | Met SD-kaart. Getest met Momentum `mntm-012`; voor de officiële firmware 1.5.x is er een profiel, alleen tegen de bron getest. Via USB-kabel (alle tools) of Bluetooth LE (alleen de RPC-tools). |
+| Alfa AWUS036AXML | Chip MT7921AUN, in-kerneldriver `mt7921u`, USB-id `0e8d:7961`. Wordt `wlan1`. De Alfa heeft ook een eigen Bluetooth-controller, maar die start op de test-Pi niet (`Opcode 0x0c03 failed` in `dmesg`). Gebruik voor de Flipper de ingebouwde Bluetooth. |
+
+Voor remote gebruik via de Claude-app heb je daarnaast nodig: een domein met de DNS bij Cloudflare, een authenticator-app (TOTP) en een Claude-account. Voor onderweg: een wifi-netwerk voor `wlan0`, bijvoorbeeld de hotspot van je telefoon.
+
+## Installatie van nul
+
+Er zijn twee plekken waar pitoolbox staat:
+
+- **je checkout** (bijv. `~/pitoolbox`): om te testen, te koppelen en lokaal te gebruiken met `uv run …`;
+- **de service** in `/opt/pitoolbox`, neergezet door `deploy/install.sh`. Die draait als gebruiker `pitoolbox` met `pitoolbox-mcp --transport http`, dus altijd remote, achter een Cloudflare Tunnel.
+
+Wil je alleen lokaal werken (stdio of de agent in de terminal), dan heb je stap 7 en 8 niet nodig.
+
+### 1. Kali en systeempakketten
+
+Installeer Kali Linux ARM64 voor de Raspberry Pi en log in met je eigen gebruiker. Daarna:
+
+```bash
+sudo apt update
+sudo apt install git curl iw iproute2 aircrack-ng bluez
+sudo systemctl enable --now bluetooth
+sudo usermod -aG dialout,video,bluetooth "$USER"   # daarna uit- en inloggen
+```
+
+- `dialout`: de Flipper via USB (`/dev/ttyACM0`). `video`: `vcgencmd`. `bluetooth`: koppelen en BLE via D-Bus.
+- `vcgencmd` (voor `status`): controleer met `command -v vcgencmd`. Op de test-Pi stond hij al in `/usr/local/bin`. De docs noemen het pakket `libraspberrypi-bin`; of dat op Kali zo heet, is niet gecontroleerd.
+
+### 2. uv en de repo
 
 Kali blokkeert systeem-pip, dus alles gaat via [uv](https://docs.astral.sh/uv/) in een venv:
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone <deze repo> ~/pitoolbox && cd ~/pitoolbox
+curl -LsSf https://astral.sh/uv/install.sh | sh   # daarna een nieuwe shell openen
+git clone https://github.com/stijnvandepol/PiToolbox ~/pitoolbox
+cd ~/pitoolbox
+git checkout fase-1        # het werk staat op deze branch
 uv sync
-mkdir -p ~/.config/pitoolbox && cp scope.example.yaml ~/.config/pitoolbox/scope.yaml
-# vul scope.yaml met je eigen BSSID's en IR-bestanden
+uv run pytest              # draait zonder hardware; alles hoort te slagen
 ```
 
-Systeempakketten op de Pi: `sudo apt install iw iproute2 aircrack-ng libraspberrypi-bin`. De gebruiker moet in de groepen `dialout` (Flipper-serial) en `video` (`vcgencmd`) zitten.
+Python 3.11 of nieuwer is nodig. Heeft het systeem een oudere versie, dan haalt uv er zelf een.
 
-Rechten voor wifi: `iw set type` en `airodump-ng` hebben `CAP_NET_ADMIN` en `CAP_NET_RAW` nodig. Voor handmatig testen kan dat met `sudo`. De systemd-unit ([deploy/systemd/pitoolbox-mcp.service](deploy/systemd/pitoolbox-mcp.service)) geeft de service die capabilities via `AmbientCapabilities`, zodat hij niet als root draait.
-
-### Testen en lint
+### 3. Scope
 
 ```bash
-uv run pytest
-uv run ruff check src tests
-uv run mypy
+mkdir -p ~/.config/pitoolbox
+cp scope.example.yaml ~/.config/pitoolbox/scope.yaml
 ```
 
-Alle tests draaien zonder hardware: de Flipper wordt gesimuleerd (CLI met echo/prompt, RPC-frames) en `iw`, `ip`, `airodump-ng` en `vcgencmd` krijgen opgenomen uitvoer.
+Vul je **eigen** apparaten in: BSSID en kanaal van je eigen access points, en de `.ir`-bestanden (pad op de Flipper-SD) met de knoppen die mogen. Alles wat er niet in staat, is buiten scope.
+
+### 4. Flipper via USB
+
+Sluit de Flipper met USB aan. Sluit qFlipper en andere programma's die de seriële poort gebruiken. Test met de [MCP Inspector](https://github.com/modelcontextprotocol/inspector) (heeft Node nodig):
+
+```bash
+npx @modelcontextprotocol/inspector uv --directory ~/pitoolbox run pitoolbox-mcp
+```
+
+Roep `system_info` aan. In het antwoord staat `firmware_origin_fork`, en daarop kiest pitoolbox het CLI-profiel. Probeer daarna `storage_list` op `/ext`.
+
+### 5. Alfa
+
+Steek de Alfa in een USB-poort en controleer de namen en drivers:
+
+```bash
+ip -br link
+for i in wlan0 wlan1; do echo "$i: $(basename "$(readlink -f /sys/class/net/$i/device/driver)")"; done
+# verwacht: wlan0: brcmfmac   wlan1: mt7921u
+```
+
+`alfa_set_mode` en `wifi_scan` met `airodump-ng` hebben `CAP_NET_ADMIN` en `CAP_NET_RAW` nodig. Voor handmatig testen kan dat met `sudo`. De service krijgt die capabilities via `AmbientCapabilities` en draait niet als root. Zolang NetworkManager de Alfa beheert, kan hij monitor mode terugzetten. Stap 7 (`--onderweg`) lost dat op.
+
+### 6. Flipper koppelen via Bluetooth
+
+Zet op de Flipper Bluetooth aan (Settings → Bluetooth → `Bluetooth: ON`) en zorg dat hij niet met een telefoon verbonden is. Dan:
+
+```bash
+uv run pitoolbox-flipper ble-scan                    # Flippers in de buurt, met adres
+uv run pitoolbox-flipper ble-pair AA:BB:CC:DD:EE:FF  # typ de 6-cijferige code van het Flipper-scherm
+uv run pitoolbox-flipper ble-test --address AA:BB:CC:DD:EE:FF --compare-usb
+```
+
+`ble-pair` drukt aan het eind de regel `PITOOLBOX_FLIPPER_BLE_ADDRESS=…` af. Zet die in je shell-omgeving en, na stap 7, in `/etc/pitoolbox/pitoolbox.env`. De koppeling zit in BlueZ en geldt voor het hele systeem, dus de service kan hem ook gebruiken.
+
+Heeft de Pi meer dan één Bluetooth-adapter (zoals met de Alfa), kies dan met `--adapter hci1` of `PITOOLBOX_FLIPPER_BLE_ADAPTER` de ingebouwde. `bluetoothctl list` toont de adapters.
+
+Koppelen gaat via een eigen BlueZ-agent over D-Bus (geen `bluetoothctl`, geen shell). Gemeten op een Pi 4: ~98 ms per RPC-frame en 1,2 KiB/s, tegenover 2 ms en 97 KiB/s over USB. Dat komt door het verbindingsinterval; sneller kan alleen met root. Stap voor stap, met alle commando's en troubleshooting: [docs/fase3-ble.md](docs/fase3-ble.md).
+
+### 7. De service installeren (`deploy/install.sh`)
+
+Kijk eerst wat de systeemconfig voor onderweg zou veranderen. Dit schrijft niets en heeft geen root nodig:
+
+```bash
+deploy/install.sh --dry-run --onderweg
+```
+
+Installeer dan de service en de systeemconfig in één keer:
+
+```bash
+sudo deploy/install.sh --onderweg
+```
+
+| Optie | Wat |
+|---|---|
+| (geen) | alleen de service: gebruikers `pitoolbox` en `cloudflared`, `/opt/pitoolbox`, `/etc/pitoolbox`, `/var/lib/pitoolbox`, uv, `uv sync --frozen --no-dev`, systemd-units |
+| `--onderweg` | ook: vaste interfacenamen (`wlan0` = ingebouwd, `wlan1` = Alfa, via systemd `.link` op driver en USB-id), NetworkManager laat de Alfa met rust, logrotate voor de audit-log, tmpfiles-regel voor de capture-map |
+| `--bluez-le` | ook: korter BLE-verbindingsinterval in `/etc/bluetooth/main.conf` (optioneel, **niet getest**) |
+| `--alleen-systeem` | sla de service over, doe alleen de gekozen `--onderweg`/`--bluez-le`-stappen |
+| `--dry-run` | niets schrijven, per bestand de diff tonen; impliceert `--alleen-systeem`, geen root nodig |
+| `-y`, `--ja` | niet om bevestiging vragen (anders vraagt het script per stap) |
+
+Het script is idempotent. Het overschrijft nooit je `/etc/pitoolbox/pitoolbox.env`, `/etc/pitoolbox/scope.yaml`, de auth-database, de audit-log of captures. Een systeembestand dat al bestaat en anders is, gaat eerst naar `/var/backups/pitoolbox/<tijdstempel>/`. Het script enablet of start niets, en installeert of configureert cloudflared niet. Met `PITOOLBOX_SKIP_UV_INSTALL=1` of `PITOOLBOX_UV_BIN=/pad/uv` regel je uv zelf.
+
+Vul daarna de config van de service in (als root; `pitoolbox.env` is 0600):
+
+```bash
+sudoedit /etc/pitoolbox/scope.yaml        # je eigen apparaten, zoals in stap 3
+sudoedit /etc/pitoolbox/pitoolbox.env     # PITOOLBOX_PUBLIC_URL, PITOOLBOX_FLIPPER_BLE_ADDRESS, ...
+```
+
+`pitoolbox.env` is een systemd-`EnvironmentFile`: `KEY=waarde`, geen `export`, geen `~` of `$HOME`.
+
+### 8. Remote: tunnel, login en connector
+
+Kort (alles staat in [docs/fase2-remote.md](docs/fase2-remote.md)):
+
+1. cloudflared installeren, tunnel aanmaken en DNS koppelen (`cloudflared tunnel login`, `create`, `route dns`);
+2. tunnelconfig en credentials in `/etc/cloudflared/` zetten;
+3. `PITOOLBOX_PUBLIC_URL=https://<jouw-hostnaam>` in `/etc/pitoolbox/pitoolbox.env`;
+4. wachtwoord en TOTP instellen, als gebruiker `pitoolbox`:
+
+   ```bash
+   sudo -u pitoolbox bash -c 'set -a; . /etc/pitoolbox/pitoolbox.env; set +a; exec /opt/pitoolbox/.venv/bin/pitoolbox-auth init'
+   ```
+
+5. starten en controleren:
+
+   ```bash
+   sudo systemctl enable --now pitoolbox-mcp
+   curl -i http://127.0.0.1:8765/mcp           # verwacht: 401
+   sudo systemctl enable --now cloudflared-pitoolbox
+   ```
+
+6. de connector toevoegen in Claude (zie [Remote via de Claude-app](#remote-via-de-claude-app)).
+
+In de docs en in `deploy/` staat overal de placeholder `toolbox.example.nl`. Vervang die door je eigen hostnaam.
+
+### 9. Klaar voor onderweg
+
+Na `--onderweg` (stap 7):
+
+1. Zorg dat `wlan0` een wifi-profiel heeft voor onderweg, bijvoorbeeld de hotspot van je telefoon: `nmcli device wifi connect <SSID> ifname wlan0 --ask`. Zonder dat profiel heb je zonder ethernet geen netwerk.
+2. Laat `PITOOLBOX_UPLINK_IFACE` niet op `eth0` staan (ook niet in je shell-profiel). Onderweg is de uplink `wlan0`, de standaard.
+3. `sudo reboot`.
+4. Controleer de namen, NetworkManager, logrotate en captures volgens [docs/fase5-onderweg.md §4](docs/fase5-onderweg.md#4-controleren-na-de-herstart).
+
+Daar staan ook de ontwerpkeuzes met bronnen, het terugdraaien en wat je doet als de namen toch verwisselen.
+
+### 10. De Flipper-app (optioneel)
+
+De app `pitoolbox_ui` bouw je met ufbt, tegen de SDK van exact de firmware op je Flipper, en zet je op de SD-kaart in `/ext/apps/Tools/pitoolbox_ui.fap`. Bouwen en installeren: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md). Daarna `PITOOLBOX_FLIPPER_UI=on` in `/etc/pitoolbox/pitoolbox.env` en `sudo systemctl restart pitoolbox-mcp`. Zie [Bediening op de Flipper](#bediening-op-de-flipper).
+
+## Gebruik
 
 ### Lokaal als MCP-server (stdio)
 
@@ -90,64 +269,79 @@ Alle tests draaien zonder hardware: de Flipper wordt gesimuleerd (CLI met echo/p
 uv run pitoolbox-mcp --scope ~/.config/pitoolbox/scope.yaml
 ```
 
-Testen met de [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
+Opties: `--transport stdio|http` (standaard `stdio`), `--scope <pad>` en `--audit-log <pad>`. Die laatste twee overschrijven `PITOOLBOX_SCOPE_FILE` en `PITOOLBOX_AUDIT_LOG`.
+
+Testen met de MCP Inspector:
 
 ```bash
 npx @modelcontextprotocol/inspector uv --directory ~/pitoolbox run pitoolbox-mcp
 ```
 
-De server werkt met elke MCP-client (Claude Desktop, Cursor, Open WebUI, ...). Pitoolbox is niet aan één LLM-provider gebonden. De agent-loop in fase 4 krijgt een provider-laag met OpenAI-compatibele endpoints (lokaal: Ollama, llama.cpp, LM Studio, vLLM; cloud: o.a. DeepSeek, Qwen, OpenAI) plus native adapters.
+De server werkt met elke MCP-client (Claude Desktop, Cursor, Open WebUI, ...). Pitoolbox is niet aan één LLM-provider gebonden.
 
-### Configuratie (omgevingsvariabelen)
+### Remote via de Claude-app
 
-| Variabele | Standaard |
-|---|---|
-| `PITOOLBOX_SCOPE_FILE` | `~/.config/pitoolbox/scope.yaml` |
-| `PITOOLBOX_AUDIT_LOG` | `~/.local/state/pitoolbox/audit.jsonl` |
-| `PITOOLBOX_CAPTURES_DIR` | `~/captures` |
-| `PITOOLBOX_FLIPPER_PORT` | automatisch (USB 0483:5740) |
-| `PITOOLBOX_FLIPPER_CLI_PROFILE` | `auto` (op basis van `firmware_origin_fork`) |
-| `PITOOLBOX_ALFA_IFACE` / `PITOOLBOX_UPLINK_IFACE` | `wlan1` / `wlan0` |
-| `PITOOLBOX_ALFA_DRIVER` | `mt7921u`: wifi-acties weigeren als de Alfa-interface een andere driver heeft (bescherming als namen verwisseld raken); leeg = uit |
-| `PITOOLBOX_CONFIRM_TTL_S` | `60` |
-| `PITOOLBOX_TOOL_ALLOWLIST` | leeg = alle tools |
-| `PITOOLBOX_PUBLIC_URL` | geen (verplicht voor `--transport http`), bijv. `https://toolbox.mijndomein.nl` |
-| `PITOOLBOX_HTTP_HOST` / `PITOOLBOX_HTTP_PORT` | `127.0.0.1` / `8765` (alleen loopback toegestaan) |
-| `PITOOLBOX_AUTH_DB` | `~/.local/state/pitoolbox/auth.sqlite` |
-| `PITOOLBOX_ACCESS_TOKEN_TTL_S` / `PITOOLBOX_REFRESH_TOKEN_TTL_S` | `900` / `604800` |
-| `PITOOLBOX_EXTRA_REDIRECT_URIS` | leeg (alleen tijdelijk voor de MCP Inspector) |
-| `PITOOLBOX_FLIPPER_TRANSPORT` | `auto` (eerst USB, anders BLE), of `usb` / `ble` |
-| `PITOOLBOX_FLIPPER_BLE_ADDRESS` | geen (dan zoeken op naamprefix); aanbevolen om vast te zetten |
-| `PITOOLBOX_FLIPPER_BLE_NAME_PREFIX` | `Flipper` |
-| `PITOOLBOX_FLIPPER_KEEPALIVE_S` | `20` (alleen BLE; `0` = uit) |
-| `PITOOLBOX_FLIPPER_BLE_ADAPTER` | leeg = standaardadapter van BlueZ (de eerste die aan staat), bijv. `hci1` |
-| `PITOOLBOX_LLM_PROVIDER` | **geen** (verplicht voor de agent): `openai-compatible`, `anthropic` of `openai` |
-| `PITOOLBOX_LLM_MODEL` | **geen** (verplicht voor de agent) |
-| `PITOOLBOX_LLM_BASE_URL` | verplicht bij `openai-compatible`; anders het officiële endpoint van de provider |
-| `PITOOLBOX_LLM_API_KEY` | geen; verplicht bij `anthropic`/`openai`, optioneel bij lokale servers |
-| `PITOOLBOX_LLM_TIMEOUT_S` / `PITOOLBOX_LLM_MAX_RETRIES` / `PITOOLBOX_LLM_MAX_TOKENS` | `60` / `2` / `4096` |
-| `PITOOLBOX_AGENT_MAX_STEPS` / `PITOOLBOX_AGENT_MAX_CALLS_PER_STEP` | `8` / `8`: tool-rondes per beurt, tool calls per modelantwoord |
-| `PITOOLBOX_AGENT_TURN_TIMEOUT_S` / `PITOOLBOX_AGENT_MAX_RESULT_CHARS` | `300` / `8000`: tijd per beurt (tussen stappen gecontroleerd), lengte van een tool-resultaat naar het model |
-| `PITOOLBOX_AGENT_MAX_HISTORY_CHARS` | `120000`: daarboven vallen de oudste hele beurten uit de geschiedenis (het model krijgt daar een melding van) |
-| `PITOOLBOX_FLIPPER_UI` | `off`; `on` = bridge naar de Flipper-app (in `pitoolbox-mcp` **of** `pitoolbox-agent`, nooit in beide) |
-| `PITOOLBOX_FLIPPER_UI_APP` | `/ext/apps/Tools/pitoolbox_ui.fap` (alleen een `.fap` onder `/ext/apps/`) |
-| `PITOOLBOX_FLIPPER_UI_PRESETS` | `~/.config/pitoolbox/flipper_presets.yaml`; ontbreekt het bestand, dan zijn er geen presets |
+```
+Claude-app (telefoon/web) ──HTTPS──▶ Cloudflare ──tunnel──▶ cloudflared op de Pi
+                                                              │
+                                              http://127.0.0.1:8765  (pitoolbox-mcp --transport http)
+                                                ├── /mcp                         MCP (streamable HTTP, Bearer vereist)
+                                                ├── /.well-known/oauth-*         discovery (RFC 9728 / RFC 8414)
+                                                ├── /register /authorize /token  OAuth 2.1 (DCR, PKCE S256, refresh-rotatie)
+                                                └── /login                       wachtwoord + TOTP
+```
 
-**LLM-provider (fase 4).** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. `openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
+- **Eén gebruiker.** Inloggen met wachtwoord (scrypt) en TOTP (RFC 6238). 5 mislukte pogingen geven 15 min lockout, en een TOTP-code werkt maar één keer.
+- **Alleen Claude als client.** Redirect-URI's moeten exact `https://claude.ai/api/mcp/auth_callback` of `https://claude.com/api/mcp/auth_callback` zijn ([bron](https://claude.com/docs/connectors/building/authentication)).
+- **Korte tokens.** Access 15 min, refresh 7 dagen met rotatie. Hergebruik van een oude refresh-token trekt de hele familie in. Tokens worden alleen als SHA-256-hash in SQLite bewaard en zijn gebonden aan de resource `<public_url>/mcp` (RFC 8707).
+- **Bevestigingen per OAuth-client.** Een `pending_id` van de ene client kan niet door een andere bevestigd worden.
+- **Alleen loopback.** De server weigert te binden op iets anders dan 127.0.0.1/::1 en controleert de Host-header (alleen de publieke hostnaam en loopback).
 
-## Agent in de terminal (fase 4)
+Connector toevoegen: op claude.ai via **Customize → Connectors → Add custom connector**, URL `https://<jouw-domein>/mcp`. Log daarna in op de pitoolbox-loginpagina en controleer dat er `claude.ai` als bestemming staat. Een connector die je op het web toevoegt, is ook beschikbaar in de mobiele app. Laat tools die zenden of capturen in Claude op **Needs approval** staan. Details en troubleshooting: [docs/fase2-remote.md](docs/fase2-remote.md).
+
+Beheer (in de checkout met `uv run`; voor de service als gebruiker `pitoolbox`, zoals in stap 8):
+
+```bash
+uv run pitoolbox-auth init        # wachtwoord + TOTP instellen (toont otpauth-URI voor je authenticator); --force vervangt
+uv run pitoolbox-auth status      # clients, actieve tokens, lockout
+uv run pitoolbox-auth revoke-all  # alle tokens en clients intrekken
+uv run pitoolbox-auth reset-totp
+```
+
+### Agent in de terminal
 
 ```bash
 uv run pitoolbox-agent            # chat met het ingestelde LLM (PITOOLBOX_LLM_*)
 ```
 
+Opties: `--scope <pad>`, `--audit-log <pad>`, `-v`/`--verbose`.
+
 Het model gebruikt dezelfde tools als de MCP-server, altijd via de ToolRunner (validatie, scope, policy, audit). **Een transmit voert het model nooit zelf uit.** `confirm_action` is voor het model onzichtbaar en wordt geweigerd als het hem toch aanroept, en het model ziet geen `pending_id`. Na de beurt toont de agent de samenvatting en vraagt `Bevestigen? [j/N]`. Alleen `j`/`ja` voert de actie uit, eenmalig en binnen 60 s. Prompt-injectie via tool-uitvoer (een SSID, bestandsinhoud) kan zo hooguit een bevestigingsvraag opleveren. Tools buiten `PITOOLBOX_TOOL_ALLOWLIST` krijgt het model niet te zien.
 
-Is de Flipper-app gekoppeld (zie hieronder), dan vraagt de agent niet zelf: de vraag staat dan op de Flipper.
+Is de Flipper-app gekoppeld, dan vraagt de agent niet zelf: de vraag staat dan op de Flipper.
 
 Commando's: `/stop` (noodstop), `/help`, `/exit`. Ctrl+C breekt alleen de lopende beurt af en is **geen** noodstop: captures lopen door, en een open bevestiging wordt afgewezen. Zonder geconfigureerde provider stopt `pitoolbox-agent` met exitcode 2. In de audit-log staat per beurt een `agent_turn_start`/`agent_turn_end` (model, tellingen, tokens), zonder berichtinhoud.
 
-## Bediening op de Flipper (fase 4)
+**LLM-provider.** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. Er zijn drie providers:
+
+| `PITOOLBOX_LLM_PROVIDER` | Endpoint | Sleutel |
+|---|---|---|
+| `openai-compatible` | verplicht via `PITOOLBOX_LLM_BASE_URL` | optioneel (lokale servers hebben er meestal geen) |
+| `anthropic` | officieel endpoint, tenzij `PITOOLBOX_LLM_BASE_URL` | verplicht |
+| `openai` | officieel endpoint, tenzij `PITOOLBOX_LLM_BASE_URL` | verplicht |
+
+`openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
+
+Voorbeeld met Ollama op de Pi of in je LAN:
+
+```bash
+export PITOOLBOX_LLM_PROVIDER=openai-compatible
+export PITOOLBOX_LLM_BASE_URL=http://127.0.0.1:11434/v1
+export PITOOLBOX_LLM_MODEL=<model>
+uv run pitoolbox-agent
+```
+
+### Bediening op de Flipper
 
 De Flipper-app `pitoolbox_ui` ([flipper_app/pitoolbox_ui](flipper_app/pitoolbox_ui/README.md)) toont bevestigingsvragen, snelle acties (status, wifi-scan, captures stoppen, noodstop), een statusscherm en presets. Op de Pi draait de bridge in het proces dat de Flipper bezit: zet `PITOOLBOX_FLIPPER_UI=on` in **één** proces (normaal de service `pitoolbox-mcp`). Twee processen met de Flipper verbreken elkaars BLE-link.
 
@@ -164,77 +358,111 @@ presets:
     prompt: "Doe een wifi-scan en vat samen welke netwerken in scope zijn."
 ```
 
-Een preset draait als agent-beurt en heeft dus een LLM-config nodig (`PITOOLBOX_LLM_*`). Ontwerp en protocol: [docs/fase4-protocol.md](docs/fase4-protocol.md).
+Een preset draait als agent-beurt en heeft dus een LLM-config nodig (`PITOOLBOX_LLM_*`). Voor de service: zet het bestand bijvoorbeeld in `/etc/pitoolbox/flipper_presets.yaml` (leesbaar voor de groep `pitoolbox`) en zet dat absolute pad in `PITOOLBOX_FLIPPER_UI_PRESETS`. De standaard `~/.config/…` wijst bij de service naar de home van de gebruiker `pitoolbox`. Ontwerp en protocol: [docs/fase4-protocol.md](docs/fase4-protocol.md).
 
-## Flipper draadloos via Bluetooth LE (fase 3)
+## Configuratie
 
-`FlipperDevice` heeft één interface met twee transports: USB (serial) en BLE ([bleak](https://github.com/hbldh/bleak) op BlueZ). Over BLE gebruikt pitoolbox de seriële GATT-service van de Flipper (UUID's uit de firmwarebron `targets/f7/ble_glue/services/serial_service_uuid.inc`), met de flow control van de firmware: de host schrijft nooit meer dan de door de Flipper gemelde buffercredit.
+Alles gaat via omgevingsvariabelen (`src/pitoolbox/config.py`). In je checkout zet je ze in je shell. De service leest `/etc/pitoolbox/pitoolbox.env`; het voorbeeld [deploy/pitoolbox.env.example](deploy/pitoolbox.env.example) zet de paden daar onder `/etc/pitoolbox` en `/var/lib/pitoolbox`. De standaardwaarden hieronder gelden als een variabele niet gezet is.
 
-> **Beperking:** over BLE opent de Flipper direct een RPC-sessie en is er **geen CLI** (`applications/services/bt/bt_service/bt.c`). Daarom werken over BLE alleen `system_info`, `storage_list`, `storage_read` en `ir_send`. `subghz_rx`, `nfc_read` en `rfid_read` hebben USB nodig: met `transport=auto` en een aangesloten kabel schakelt pitoolbox daar automatisch voor over, anders krijg je `unsupported_transport`.
+**Kern**
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `PITOOLBOX_SCOPE_FILE` | `~/.config/pitoolbox/scope.yaml` | scope; live herladen, ongeldig of weg = lege scope |
+| `PITOOLBOX_AUDIT_LOG` | `~/.local/state/pitoolbox/audit.jsonl` | één JSON-regel per toolcall |
+| `PITOOLBOX_CAPTURES_DIR` | `~/captures` | pcap's, per sessie een map |
+| `PITOOLBOX_CONFIRM_TTL_S` | `60` | geldigheid van een `pending_id` (s) |
+| `PITOOLBOX_TOOL_ALLOWLIST` | leeg = alle tools | kommagescheiden, bijv. `status,system_info,wifi_scan` |
+
+**Flipper**
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `PITOOLBOX_FLIPPER_TRANSPORT` | `auto` | `auto` (eerst USB, anders BLE), `usb` of `ble` |
+| `PITOOLBOX_FLIPPER_PORT` | automatisch (USB 0483:5740) | seriële poort, bijv. `/dev/ttyACM0` |
+| `PITOOLBOX_FLIPPER_CLI_PROFILE` | `auto` | op basis van `firmware_origin_fork`; of vast `official` / `momentum` |
+| `PITOOLBOX_FLIPPER_BLE_ADDRESS` | geen (dan zoeken op naamprefix) | aanbevolen om vast te zetten |
+| `PITOOLBOX_FLIPPER_BLE_NAME_PREFIX` | `Flipper` | naamprefix bij zoeken zonder adres |
+| `PITOOLBOX_FLIPPER_BLE_ADAPTER` | leeg = standaardadapter van BlueZ (de eerste die aan staat) | bijv. `hci1` |
+| `PITOOLBOX_FLIPPER_KEEPALIVE_S` | `20` | RPC-ping op een idle BLE-link; `0` = uit |
+
+**Wifi**
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `PITOOLBOX_ALFA_IFACE` | `wlan1` | de Alfa (monitor, scan, capture) |
+| `PITOOLBOX_UPLINK_IFACE` | `wlan0` | de uplink; wordt nooit omgezet |
+| `PITOOLBOX_ALFA_DRIVER` | `mt7921u` | wifi-acties weigeren als de Alfa-interface een andere driver heeft (bescherming als namen verwisseld raken); leeg = uit |
+
+**Remote (fase 2)**
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `PITOOLBOX_PUBLIC_URL` | geen | verplicht voor `--transport http`, zonder pad en zonder slash aan het eind, bijv. `https://toolbox.example.nl` |
+| `PITOOLBOX_HTTP_HOST` / `PITOOLBOX_HTTP_PORT` | `127.0.0.1` / `8765` | alleen loopback toegestaan |
+| `PITOOLBOX_AUTH_DB` | `~/.local/state/pitoolbox/auth.sqlite` | wachtwoord-hash, TOTP-geheim, clients, tokens |
+| `PITOOLBOX_ACCESS_TOKEN_TTL_S` / `PITOOLBOX_REFRESH_TOKEN_TTL_S` | `900` / `604800` | levensduur van tokens (s) |
+| `PITOOLBOX_EXTRA_REDIRECT_URIS` | leeg | kommagescheiden; alleen tijdelijk, voor de MCP Inspector |
+
+**LLM en agent (fase 4)**
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `PITOOLBOX_LLM_PROVIDER` | **geen** (verplicht voor de agent) | `openai-compatible`, `anthropic` of `openai` |
+| `PITOOLBOX_LLM_MODEL` | **geen** (verplicht voor de agent) | modelnaam bij de provider |
+| `PITOOLBOX_LLM_BASE_URL` | geen | verplicht bij `openai-compatible`; anders het officiële endpoint van de provider |
+| `PITOOLBOX_LLM_API_KEY` | geen | verplicht bij `anthropic`/`openai`, optioneel bij lokale servers |
+| `PITOOLBOX_LLM_TIMEOUT_S` / `PITOOLBOX_LLM_MAX_RETRIES` / `PITOOLBOX_LLM_MAX_TOKENS` | `60` / `2` / `4096` | per aanvraag; opnieuw alleen bij 429/5xx/time-out/verbindingsfout |
+| `PITOOLBOX_AGENT_MAX_STEPS` / `PITOOLBOX_AGENT_MAX_CALLS_PER_STEP` | `8` / `8` | tool-rondes per beurt, tool calls per modelantwoord |
+| `PITOOLBOX_AGENT_TURN_TIMEOUT_S` / `PITOOLBOX_AGENT_MAX_RESULT_CHARS` | `300` / `8000` | tijd per beurt (tussen stappen gecontroleerd), lengte van een tool-resultaat naar het model |
+| `PITOOLBOX_AGENT_MAX_HISTORY_CHARS` | `120000` | daarboven vallen de oudste hele beurten uit de geschiedenis (het model krijgt daar een melding van) |
+
+**Flipper-app (fase 4)**
+
+| Variabele | Standaard | Betekenis |
+|---|---|---|
+| `PITOOLBOX_FLIPPER_UI` | `off` | `on` = bridge naar de Flipper-app (in `pitoolbox-mcp` **of** `pitoolbox-agent`, nooit in beide) |
+| `PITOOLBOX_FLIPPER_UI_APP` | `/ext/apps/Tools/pitoolbox_ui.fap` | alleen een `.fap` onder `/ext/apps/` |
+| `PITOOLBOX_FLIPPER_UI_PRESETS` | `~/.config/pitoolbox/flipper_presets.yaml` | ontbreekt het bestand, dan zijn er geen presets |
+
+`deploy/install.sh` leest daarnaast `PITOOLBOX_SKIP_UV_INSTALL` en `PITOOLBOX_UV_BIN` (zie stap 7).
+
+## Problemen oplossen
+
+Begin met de logs: `journalctl -u pitoolbox-mcp -u cloudflared-pitoolbox -n 100 --no-pager` voor de service, en de audit-log voor wat er per toolcall gebeurde.
+
+| Symptoom | Waar kijken |
+|---|---|
+| Flipper niet gevonden via USB | gebruiker in `dialout` (`id`), `ls -l /dev/ttyACM*`, qFlipper of een terminal niet tegelijk open |
+| `unsupported_transport` | die tool heeft USB nodig (geen CLI over BLE): kabel aansluiten of `PITOOLBOX_FLIPPER_TRANSPORT=usb` |
+| `app_locked` | de Flipper-app is open; Sub-GHz/NFC/RFID via de CLI kan dan niet |
+| `confirm_on_flipper` | de Flipper-app is verbonden: bevestig met OK op de Flipper |
+| `ble-scan` vindt niets, koppelen mislukt, BLE traag | [docs/fase3-ble.md §8](docs/fase3-ble.md#8-problemen-oplossen) |
+| "Bluetooth-adapter hciN bestaat niet", Alfa-BT start niet | `bluetoothctl list`, kies de ingebouwde adapter met `PITOOLBOX_FLIPPER_BLE_ADAPTER` |
+| monitor mode springt terug naar managed | NetworkManager beheert de Alfa nog: `install.sh --onderweg` ([docs/fase5-onderweg.md](docs/fase5-onderweg.md)) |
+| `wlan0`/`wlan1` verwisseld | **gebruik pitoolbox dan niet**; [docs/fase5-onderweg.md §6](docs/fase5-onderweg.md#6-als-de-namen-toch-verwisselen) |
+| `iw`/`airodump-ng`: operation not permitted onder systemd | capabilities: [docs/fase2-remote.md §10](docs/fase2-remote.md#10-problemen-oplossen), "Wifi of Flipper werkt niet onder systemd" |
+| Claude kan de server niet bereiken, inloggen faalt, 421/403 | [docs/fase2-remote.md §10](docs/fase2-remote.md#10-problemen-oplossen) |
+| TOTP-code wordt afgewezen | klok van de Pi: `timedatectl` moet `System clock synchronized: yes` tonen |
+| agent start niet (exitcode 2) | `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` gezet? De foutmelding noemt de ontbrekende of ongeldige waarde |
+| Flipper-app bouwt niet of geeft "App Too Old/New" | SDK moet exact de firmware op de Flipper zijn: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md) |
+
+## Ontwikkelen
 
 ```bash
-uv run pitoolbox-flipper ble-scan              # Flippers in de buurt
-uv run pitoolbox-flipper ble-pair AA:BB:..:FF  # voer de 6-cijferige code van het Flipper-scherm in
-uv run pitoolbox-flipper ble-test --compare-usb  # system_info, storage_list, ping-latency, doorvoer
+uv run pytest
+uv run ruff check src tests
+uv run mypy
 ```
 
-Koppelen gaat via een eigen BlueZ-agent over D-Bus (geen `bluetoothctl`, geen shell). Daarna zet je `PITOOLBOX_FLIPPER_BLE_ADDRESS`. Een gebonden Flipper wordt daarna zonder scan verbonden. Gemeten op een Pi 4: ~98 ms per RPC-frame en 1,2 KiB/s, tegenover 2 ms en 97 KiB/s over USB. Dat komt door het verbindingsinterval; sneller kan alleen met root (zie fase3-ble.md). Bij `auto` en `ble` wordt na een verbroken verbinding opnieuw verbonden, en een keepalive-ping houdt een idle BLE-link levend. Stap voor stap, met troubleshooting: [docs/fase3-ble.md](docs/fase3-ble.md).
+Alle tests draaien zonder hardware: de Flipper wordt gesimuleerd (CLI met echo/prompt, RPC-frames, een nagebootste Flipper-app) en `iw`, `ip`, `airodump-ng` en `vcgencmd` krijgen opgenomen uitvoer. Python 3.11+, type hints met mypy strict, ruff. Protocoldetails komen uit officiële bronnen, met de bron in een comment. Werkafspraken: [docs/VOORTGANG.md](docs/VOORTGANG.md).
 
-## Remote via de Claude-app (fase 2)
-
-```
-Claude-app (telefoon/web) ──HTTPS──▶ Cloudflare ──tunnel──▶ cloudflared op de Pi
-                                                              │
-                                              http://127.0.0.1:8765  (pitoolbox-mcp --transport http)
-                                                ├── /mcp                         MCP (streamable HTTP, Bearer vereist)
-                                                ├── /.well-known/oauth-*         discovery (RFC 9728 / RFC 8414)
-                                                ├── /register /authorize /token  OAuth 2.1 (DCR, PKCE S256, refresh-rotatie)
-                                                └── /login                       wachtwoord + TOTP
-```
-
-- **Eén gebruiker.** Inloggen met wachtwoord (scrypt) en TOTP (RFC 6238); 5 mislukte pogingen geven 15 min lockout, en een TOTP-code werkt maar één keer.
-- **Alleen Claude als client.** Redirect-URI's moeten exact `https://claude.ai/api/mcp/auth_callback` of `https://claude.com/api/mcp/auth_callback` zijn ([bron](https://claude.com/docs/connectors/building/authentication)).
-- **Korte tokens.** Access 15 min, refresh 7 dagen met rotatie; hergebruik van een oude refresh-token trekt de hele familie in. Tokens worden alleen als SHA-256-hash in SQLite bewaard en zijn gebonden aan de resource `<public_url>/mcp` (RFC 8707).
-- **Bevestigingen per OAuth-client.** Een `pending_id` van de ene client kan niet door een andere bevestigd worden.
-- **Alleen loopback.** De server weigert te binden op iets anders dan 127.0.0.1/::1 en controleert de Host-header (alleen de publieke hostnaam en loopback).
-
-Beheer:
-
-```bash
-uv run pitoolbox-auth init        # wachtwoord + TOTP instellen (toont otpauth-URI voor je authenticator)
-uv run pitoolbox-auth status      # clients, actieve tokens, lockout
-uv run pitoolbox-auth revoke-all  # alle tokens en clients intrekken
-uv run pitoolbox-auth reset-totp
-```
-
-**Stap voor stap van Pi tot werkende connector (cloudflared, systemd, connector toevoegen, testen met de MCP Inspector, troubleshooting): [docs/fase2-remote.md](docs/fase2-remote.md).** Deploybestanden: [deploy/](deploy/).
-
-Connector toevoegen, kort: op claude.ai via **Customize → Connectors → Add custom connector**, URL `https://<jouw-domein>/mcp`. Log daarna in op de pitoolbox-loginpagina; controleer dat er `claude.ai` als bestemming staat. Een connector die je op het web toevoegt, is ook beschikbaar in de mobiele app.
-
-## Klaar voor onderweg (fase 5)
-
-`deploy/install.sh` installeert zonder opties alleen de service, net als in fase 2. Met `--onderweg` zet het ook de systeemconfig voor gebruik zonder ethernet neer:
-
-- vaste interfacenamen via systemd `.link`: ingebouwde wifi = `wlan0` (uplink), Alfa = `wlan1`, gematcht op driver en USB-id, niet op MAC;
-- NetworkManager beheert de Alfa niet meer (`unmanaged-devices+=driver:mt7921u`), zodat monitor mode blijft staan;
-- logrotate voor de audit-log (hernoemen, geen `copytruncate`, omdat de log per regel opnieuw wordt geopend);
-- een tmpfiles-regel voor de capture-map (standaard wordt er nooit iets opgeruimd).
-
-`--bluez-le` zet optioneel een korter BLE-verbindingsinterval in `/etc/bluetooth/main.conf` (niet getest). Kijk eerst met `--dry-run` wat er verandert. Bestanden die al bestaan en anders zijn, gaan eerst naar `/var/backups/pitoolbox/`.
-
-```bash
-deploy/install.sh --dry-run --onderweg                # niets schrijven, alleen tonen (geen root)
-sudo deploy/install.sh --alleen-systeem --onderweg   # alleen fase 5, daarna: sudo reboot
-```
-
-Ontwerpkeuzes met bronnen, controle na de herstart, terugdraaien en de hardware-checklist: [docs/fase5-onderweg.md](docs/fase5-onderweg.md).
-
-## Structuur
+### Structuur
 
 ```
 src/pitoolbox/
   app.py                      # bouwt ToolRunner uit Settings
-  config.py
+  config.py                   # alle PITOOLBOX_*-variabelen
   core/
     scope.py policy.py audit.py errors.py proc.py
     devices/flipper.py        # FlipperDevice: USB of BLE achter één interface
@@ -257,6 +485,7 @@ deploy/                       # install.sh, env-voorbeeld, en per doel een map:
   NetworkManager/             #   drop-in: Alfa unmanaged (fase 5)
   logrotate/ tmpfiles/        #   audit-log-rotatie, beleid capture-map (fase 5)
   bluetooth/                  #   optioneel BLE-interval voor main.conf (fase 5, niet getest)
+docs/VOORTGANG.md             # status per fase, besluiten, overdracht
 docs/fase2-remote.md          # installatie remote + troubleshooting
 docs/fase3-ble.md             # Flipper via Bluetooth: koppelen, testen, troubleshooting
 docs/fase4-spike.md           # onderzoek Flipper als bediening (DataExchange)
@@ -267,9 +496,19 @@ scripts/gen_proto.py          # protobuf opnieuw genereren
 tests/
 ```
 
-## Hardware-testchecklist fase 3
+Programma's (`[project.scripts]` in `pyproject.toml`): `pitoolbox-mcp`, `pitoolbox-auth`, `pitoolbox-flipper`, `pitoolbox-agent`.
 
-Volledige lijst in [docs/fase3-ble.md](docs/fase3-ble.md). In het kort:
+Bronnen en licenties: [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## Hardware-testchecklists
+
+Deze lijsten werk je af op de echte Pi. De checklists van fase 4 en 5 staan bij hun documenten:
+
+- fase 5: [docs/fase5-onderweg.md §7](docs/fase5-onderweg.md#7-hardware--en-testchecklist);
+- fase 4, Flipper-app: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md) ("Hardwaretest") en [docs/fase4-spike.md](docs/fase4-spike.md) (tests 6 en 7);
+- fase 3, volledig: [docs/fase3-ble.md §9](docs/fase3-ble.md#9-hardware-testlijst).
+
+### Fase 3
 
 - [ ] `ble-scan` vindt de Flipper; `ble-pair` vraagt de code van het Flipper-scherm en koppelt
 - [ ] `ble-test`: system_info en storage_list via BLE; noteer ping-latency en doorvoer (KiB/s) en vergelijk met `--compare-usb`
@@ -279,7 +518,7 @@ Volledige lijst in [docs/fase3-ble.md](docs/fase3-ble.md). In het kort:
 - [ ] Flipper buiten bereik en terug: de volgende call verbindt opnieuw; keepalive houdt een idle link levend
 - [ ] De service als gebruiker `pitoolbox` (groep `bluetooth`) kan BLE gebruiken zonder D-Bus-fouten
 
-## Hardware-testchecklist fase 2
+### Fase 2
 
 - [ ] `pitoolbox-auth init`: de otpauth-URI werkt in je authenticator-app, en `timedatectl` toont `System clock synchronized: yes`
 - [ ] `curl -si https://<domein>/mcp` → `401` met `resource_metadata` (van buiten je netwerk)
@@ -291,9 +530,9 @@ Volledige lijst in [docs/fase3-ble.md](docs/fase3-ble.md). In het kort:
 - [ ] Werkt `wifi_scan`/`alfa_set_mode` onder systemd (ambient caps, geen root)?
 - [ ] Langste tool (`subghz_rx` van 100 s) haalt de Cloudflare-timeout van 125 s
 
-## Hardware-testchecklist fase 1
+### Fase 1
 
-Alles hieronder is alleen getest tegen nagebootste apparaten. Op de Pi zelf controleren:
+Alles hieronder is alleen getest tegen nagebootste apparaten, behalve wat in [Status](#status) staat. Op de Pi zelf controleren:
 
 **Flipper (USB)**
 - [ ] `system_info` geeft `firmware_origin_fork`, en het juiste CLI-profiel wordt gekozen
@@ -315,5 +554,3 @@ Alles hieronder is alleen getest tegen nagebootste apparaten. Op de Pi zelf cont
 
 **Pi**
 - [ ] `status`: klopt `vcgencmd get_throttled` (gebruiker in de groep `video`), en worden uplink en schijf goed gerapporteerd?
-
-Bronnen en licenties: [THIRD_PARTY.md](THIRD_PARTY.md).
