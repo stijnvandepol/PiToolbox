@@ -743,3 +743,21 @@ def test_parse_nfc_variants() -> None:
     assert none.found is False
     with pytest.raises(DeviceError):
         cli.parse_nfc_scanner("niks\r\n")
+
+
+def test_client_event_queue_overflow_is_counted_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeFlipperTransport(start_in_rpc=True)
+    fake.open()
+    client = RpcClient(fake, read_slice_s=0.01, max_events=2)
+    for i in range(3):
+        event = flipper_pb2.Main()
+        event.command_id = 0
+        event.system_ping_response.data = bytes([i])
+        fake.queue_extra_frame(event)
+    with caplog.at_level("WARNING"):
+        client.request(ping(), 1.0)
+    assert client.dropped_events == 1
+    assert [e.system_ping_response.data for e in client.events] == [b"\x01", b"\x02"]
+    assert "eventqueue vol" in caplog.text

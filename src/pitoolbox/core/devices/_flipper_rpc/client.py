@@ -16,6 +16,7 @@ wordt afgedwongen), dus deze client is bewust niet voor gelijktijdige requests b
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from collections.abc import Callable
@@ -29,6 +30,8 @@ from pitoolbox.core.devices._flipper_rpc.framing import (
 )
 from pitoolbox.core.devices._flipper_rpc.pb import flipper_pb2
 from pitoolbox.core.errors import Aborted, DeviceError, DeviceTimeout
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from pitoolbox.core.devices.flipper import ByteTransport
@@ -91,7 +94,10 @@ class RpcClient:
         self._decoder = FrameDecoder(max_frame_size)
         self._read_slice_s = read_slice_s
         self._inbox: deque[Main] = deque()
+        # Begrensd tegen een apparaat dat blijft sturen; bij vol valt het oudste frame weg en
+        # telt `dropped_events` op (gemeten: een FAP kan ~10 DataExchange-frames/s sturen over BLE).
         self._events: deque[Main] = deque(maxlen=max_events)
+        self._dropped_events = 0
         self._next_id = 0
 
     # --- eventqueue -------------------------------------------------------------------
@@ -103,6 +109,23 @@ class RpcClient:
 
     def clear_events(self) -> None:
         self._events.clear()
+
+    @property
+    def dropped_events(self) -> int:
+        """Aantal ongevraagde frames dat wegviel omdat de eventqueue vol was."""
+        return self._dropped_events
+
+    def _queue_event(self, frame: Main) -> None:
+        if self._events.maxlen is not None and len(self._events) >= self._events.maxlen:
+            self._dropped_events += 1
+            # Eerste keer en daarna elke 100e: zichtbaar zonder de log te laten vollopen.
+            if self._dropped_events % 100 == 1:
+                log.warning(
+                    "RPC-eventqueue vol (%d); oudste ongevraagde frame weggegooid (totaal %d)",
+                    self._events.maxlen,
+                    self._dropped_events,
+                )
+        self._events.append(frame)
 
     # --- versturen en ontvangen -------------------------------------------------------
 
@@ -174,7 +197,7 @@ class RpcClient:
                     return responses
                 deadline = time.monotonic() + timeout
                 continue
-            self._events.append(frame)
+            self._queue_event(frame)
             if frame.command_id == 0 and frame.command_status != flipper_pb2.OK:
                 # Bijv. ERROR_DECODE: de firmware sluit de sessie hierna zelf.
                 raise RpcError(frame.command_status, kind)
@@ -201,4 +224,4 @@ class RpcClient:
                 return None
             if predicate(frame):
                 return frame
-            self._events.append(frame)
+            self._queue_event(frame)
