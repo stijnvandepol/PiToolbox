@@ -12,15 +12,25 @@ afgeleid van de officiële flipperzero-firmware (commit 3fb1d517):
 * `nfc` + `scanner -t`: applications/main/nfc/cli/nfc_cli.c en
   commands/nfc_cli_command_scanner.c; `exit` verlaat de subshell (cli_shell.c).
 
-Een andere firmware (Momentum, Unleashed, ...) krijgt pas een eigen profiel nadat de
-uitvoerformaten uit de broncode van die firmware zijn gecontroleerd.
+Profiel "momentum" is afgeleid van Next-Flip/Momentum-Firmware, tag mntm-012 (commit
+e1784e7418d8). Momentum heeft de CLI-herstructurering van de officiële firmware overgenomen;
+vergeleken met official 3fb1d517 zijn deze bestanden byte-voor-byte gelijk:
+lib/toolbox/cli/shell/cli_shell_line.c (prompt), lib/toolbox/cli/cli_command.c,
+applications/main/lfrfid/lfrfid_cli.c, applications/main/nfc/cli/nfc_cli.c,
+applications/main/nfc/cli/nfc_cli_command_processor.c,
+applications/main/nfc/cli/commands/nfc_cli_command_scanner.c en
+commands/helpers/nfc_cli_scanner.c. Prompts, commando's en alle parsers worden daarom gedeeld.
+Het enige verschil dat ertoe doet is het geldige Sub-GHz-bereik (zie MOMENTUM_SUBGHZ_RANGES_HZ).
+Kleinere verschillen zonder invloed op pitoolbox: andere protocolnamentabel in
+commands/helpers/nfc_cli_format.c (geen "Ntag4xx"/"Type 4 Tag"), een "did you mean"-suggestie
+bij onbekende commando's (cli_shell.c) en andere teksten bij TX-weigering (subghz_cli.c).
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from pitoolbox.core.errors import DeviceError, UnsupportedFirmware
 
@@ -70,24 +80,42 @@ def _after_marker(text: str, marker: str, what: str) -> str:
     return text[idx + len(marker) :]
 
 
-# --- parsers: officiële firmware ---------------------------------------------------------
+# --- parsers (gedeeld door official en momentum) -----------------------------------------
 
 _LISTENING_RE = re.compile(r"Listening at frequency: (\d+) device: (\d+)")
 _PACKETS_RE = re.compile(r"Packets received (\d+)")
-# Decoder-koppen zien er in de praktijk uit als "Princeton 24bit" (zonder dubbele punt);
-# de volgende regels zijn "Sleutel:waarde". Dit is een heuristiek (decoder-broncode zit niet
-# in de gecloonde sparse-checkout) en staat daarom op de hardware-testlijst.
-_PACKET_HEADER_RE = re.compile(r"^[^:]*\b\d+\s?bit\b[^:]*$", re.IGNORECASE)
+# `subghz rx` print per pakket alleen `subghz_protocol_decoder_base_get_string()`, zonder
+# scheidingsteken; splitsen is dus een heuristiek op de decoderformaten in lib/subghz/protocols
+# (gecontroleerd in Momentum mntm-012; de officiële firmware gebruikt dezelfde vormen):
+# * meestal "%s %dbit\r\n" (princeton.c, nice_flo.c) of "%s %db\r\n" (came_atomo.c,
+#   somfy_telis.c, marantec.c): de kop zonder dubbele punt eindigt op het aantal bits;
+# * soms "%s\r\n%dbit..." (ws_generic.c `ws_block_generic_get_string` voor weerstations,
+#   hormann.c, honeywell.c): de naam staat alleen op de regel vóór "<n>bit".
+# Niet te splitsen: een decoder die zonder "\r\n" eindigt (came_atomo.c, ws_generic.c) plakt
+# de kop van het volgende pakket aan zijn laatste regel. `packet_count` komt daarom altijd uit
+# de firmwareregel "Packets received", nooit uit deze splitsing.
+# Hoofdlettergevoelig: de formaten zijn kleine letters, hex-velden zijn "%lX" (dus "12B" is data).
+_PACKET_HEADER_RE = re.compile(r"^[^:]*\b\d+\s?(?:bit|b)\b[^:]*$")
+_BITS_FIRST_RE = re.compile(r"^\d+\s?bit\b")
 
 
 def _split_packets(body: str) -> list[str]:
     packets: list[list[str]] = []
     for raw in body.split("\n"):
-        # '.' wordt geprint bij elke reset van de ontvanger (subghz_cli_command_rx).
-        line = raw.lstrip(".").rstrip()
+        # '.' wordt geprint bij elke reset van de ontvanger (subghz_cli_command_rx), dus ook
+        # direct achter een pakket dat niet met een regeleinde eindigt.
+        line = raw.strip(".").rstrip()
         if not line.strip():
             continue
-        if _PACKET_HEADER_RE.match(line) or not packets:
+        if not packets:
+            packets.append([line])
+        elif _BITS_FIRST_RE.match(line) and ":" not in packets[-1][-1]:
+            # "<naam>\r\n<n>bit ...": de vorige regel is de kop van dit pakket.
+            if len(packets[-1]) > 1:
+                packets.append([packets[-1].pop(), line])
+            else:
+                packets[-1].append(line)
+        elif _PACKET_HEADER_RE.match(line):
             packets.append([line])
         else:
             packets[-1].append(line)
@@ -215,10 +243,34 @@ OFFICIAL = CliProfile(
     parse_nfc_scanner=parse_nfc_scanner,
 )
 
-PROFILES: dict[str, CliProfile] = {"official": OFFICIAL}
+# Momentum mntm-012: `subghz rx` controleert met `subghz_devices_is_frequency_valid()`
+# (applications/main/subghz/subghz_cli.c), dat voor de interne CC1101 naar
+# `furi_hal_subghz_is_frequency_valid()` gaat (lib/subghz/devices/cc1101_int/
+# cc1101_int_interconnect.c). In Momentum is dat het volledige "extended" bereik
+# (targets/f7/furi_hal/furi_hal_subghz.c); de instellingen extend_range/bypass_region beperken
+# alleen zenden (`furi_hal_subghz_check_tx`), niet ontvangen. De foutmelding print wel nog de
+# officiële SUBGHZ_FREQUENCY_RANGE_STR. Op hardware bevestigd: 290 MHz wordt geaccepteerd.
+MOMENTUM_SUBGHZ_RANGES_HZ: tuple[tuple[int, int], ...] = (
+    (281_000_000, 361_000_000),
+    (378_000_000, 481_000_000),
+    (749_000_000, 962_000_000),
+)
 
-# DeviceInfo `firmware_origin_fork` (kleine letters) -> profielnaam.
-_FORK_TO_PROFILE: dict[str, str] = {"official": "official"}
+# Alles behalve naam, beschrijving en Sub-GHz-bereik is gelijk aan official (zie de
+# moduledocstring voor de bestanden die byte-voor-byte vergeleken zijn).
+MOMENTUM = replace(
+    OFFICIAL,
+    name="momentum",
+    description="Momentum-firmware mntm-012 (Next-Flip/Momentum-Firmware, CLI als official)",
+    subghz_ranges=MOMENTUM_SUBGHZ_RANGES_HZ,
+)
+
+PROFILES: dict[str, CliProfile] = {"official": OFFICIAL, "momentum": MOMENTUM}
+
+# DeviceInfo `firmware_origin_fork` (kleine letters) -> profielnaam. Momentum zet
+# FIRMWARE_ORIGIN = "Momentum" in fbt_options.py (lib/toolbox/version.c, furi_hal_info.c);
+# op de hardware gelezen: firmware_origin_fork = "Momentum".
+_FORK_TO_PROFILE: dict[str, str] = {"official": "official", "momentum": "momentum"}
 
 
 def select_profile(setting: str, device_info: Mapping[str, str] | None) -> CliProfile:

@@ -139,7 +139,7 @@ def test_forced_profile_needs_no_rpc() -> None:
 
 
 def test_unknown_firmware_fork_is_unsupported_and_can_be_forced() -> None:
-    info = fixture_json("device_info.json") | {"firmware_origin_fork": "Momentum"}
+    info = fixture_json("device_info.json") | {"firmware_origin_fork": "Unleashed"}
     device, _ = make_device(FakeFlipperTransport(device_info=info))
     with pytest.raises(UnsupportedFirmware, match="PITOOLBOX_FLIPPER_CLI_PROFILE"):
         device.rfid_read(0.2)
@@ -148,7 +148,7 @@ def test_unknown_firmware_fork_is_unsupported_and_can_be_forced() -> None:
 
 
 def test_unknown_profile_name_is_unsupported() -> None:
-    device, _ = make_device(profile="momentum")
+    device, _ = make_device(profile="unleashed")
     with pytest.raises(UnsupportedFirmware, match="beschikbaar"):
         device.rfid_read(0.2)
 

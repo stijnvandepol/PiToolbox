@@ -10,7 +10,15 @@ Gedrag nagebootst uit de firmwarebronnen (flipperzero-firmware 3fb1d517):
   (infrared_scene_rpc.c).
 
 De uitvoer van subghz/rfid/nfc komt uit tests/fixtures/flipper/*.txt (zelf geschreven op basis
-van de printf-formaten; de decoder-tekst van Sub-GHz is synthetisch).
+van de printf-formaten; de decoder-tekst van Sub-GHz is synthetisch). De `*_momentum_*`-fixtures
+volgen Momentum mntm-012 (e1784e74): kop en slot van `subghz rx` zoals op de echte Flipper
+opgenomen, pakketten in de formaten van lib/subghz/protocols (princeton.c, came_atomo.c,
+ws_generic.c) met verzonnen waarden. ANSI-kleuren (bijv. rond "OK" bij Load_keystore) zijn
+weggelaten; die haalt FlipperDevice er toch uit.
+
+Momentum gebruikt dezelfde CLI als official; alleen het geldige Sub-GHz-bereik verschilt
+(`subghz_ranges`, zie `_flipper_cli.MOMENTUM_SUBGHZ_RANGES_HZ`). De foutmelding noemt in beide
+firmwares SUBGHZ_FREQUENCY_RANGE_STR (op hardware bevestigd voor Momentum).
 """
 
 from __future__ import annotations
@@ -31,6 +39,11 @@ ETX_MARKER = "---ETX---"
 MAIN_PROMPT = "\r\n>: "
 NFC_PROMPT = "\r\n[\x1b[32mnfc\x1b[0m]>: "
 FREQ_RANGE_STR = "299999755...348000000 or 386999938...464000000 or 778999847...928000000"
+OFFICIAL_RANGES = (
+    (299_999_755, 348_000_000),
+    (386_999_938, 464_000_000),
+    (778_999_847, 928_000_000),
+)
 
 # Korte wachttijden zodat de tests snel blijven.
 FAST_TIMING = FlipperTiming(
@@ -82,6 +95,7 @@ class FakeFlipperTransport:
         subghz_script: str = "subghz_rx_session.txt",
         rfid_script: str = "rfid_read_tag.txt",
         nfc_script: str = "nfc_scanner_tag.txt",
+        subghz_ranges: tuple[tuple[int, int], ...] = OFFICIAL_RANGES,
         start_in_rpc: bool = False,
         kind: str = "usb",
     ) -> None:
@@ -97,6 +111,7 @@ class FakeFlipperTransport:
         self.subghz_script = subghz_script
         self.rfid_script = rfid_script
         self.nfc_script = nfc_script
+        self.subghz_ranges = subghz_ranges
         self.start_in_rpc = start_in_rpc
         # --- schakelaars voor tests ---
         self.responsive = True
@@ -287,12 +302,7 @@ class FakeFlipperTransport:
         match = re.fullmatch(r"subghz rx (\d+) (\d+)", line)
         if match:
             freq = int(match.group(1))
-            ranges = (
-                (299_999_755, 348_000_000),
-                (386_999_938, 464_000_000),
-                (778_999_847, 928_000_000),
-            )
-            if not any(lo <= freq <= hi for lo, hi in ranges):
+            if not any(lo <= freq <= hi for lo, hi in self.subghz_ranges):
                 self._emit(f"Frequency must be in {FREQ_RANGE_STR} range, not {freq}\r\n")
                 self._emit(self._prompt())
                 return

@@ -1,0 +1,16 @@
+Load_keystore keeloq_mfcodes OK
+Load_keystore keeloq_mfcodes_user Absent
+Listening at frequency: 433919830 device: 0. Press CTRL+C to stop
+..Princeton 24bit
+Key:0x00ABCDE4
+Yek:0x0027B3D5
+Sn:0x0ABCDE Btn:4 (4b)
+Te:390us  GT:Te*31
+.CAME Atomo 62b
+Key:1A2B3C4D5E6F7A8B
+Sn:0x0123ABCD       Btn:2
+Cnt:0042
+Btn_Cnt:0x05...
+---ETX---
+
+Packets received 2

@@ -1,0 +1,6 @@
+Load_keystore keeloq_mfcodes OK
+Load_keystore keeloq_mfcodes_user Absent
+Listening at frequency: 433919830 device: 0. Press CTRL+C to stop
+---ETX---
+
+Packets received 0
