@@ -18,8 +18,8 @@ Kort:
   hier, voordat de bridge iets doet.
 
 Dit module bevat alleen de codec en kleine bouwstenen voor de bridge (volgnummers,
-rate limiting, reassembly, bevestigings-handles). Er wordt nog niets aan de runner of de
-agent-loop gekoppeld.
+rate limiting, reassembly, bevestigings-handles). De koppeling aan de runner en de agent-loop
+staat in `bridge.py`.
 """
 
 from __future__ import annotations
@@ -991,7 +991,7 @@ class ConfirmHandles(Generic[T]):
 
 @dataclass(frozen=True)
 class QuickActionPlan:
-    """Wat de bridge voor een snelle actie via de ToolRunner aanroept (frontend `flipper_ui`).
+    """Wat de bridge voor een snelle actie via de ToolRunner aanroept (frontend `flipper-ui`).
 
     `per_active_capture`: roep `tool` aan voor elke capture uit `status.captures`, met
     `{"capture_id": <id>}` (de ids komen van de Pi zelf, nooit van de FAP).

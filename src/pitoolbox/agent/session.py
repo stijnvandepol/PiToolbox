@@ -15,9 +15,11 @@ Ontwerpkeuzes:
   krijgt de samenvatting, maar niet de `pending_id`. Alleen de frontend roept na een
   expliciet "ja" van de mens `confirm()` aan. Die gebruikt dezelfde frontend-id als de
   call die de pending maakte, dus de binding, de TTL en het eenmalig gebruik van
-  `PendingStore` blijven gelden. De uitkomst gaat als `[PiToolbox-melding]` mee in het
-  volgende gebruikersbericht (niet als los bericht: sommige chat-templates eisen dat
-  user en assistant elkaar afwisselen).
+  `PendingStore` blijven gelden. Is de Flipper-app verbonden ("Flipper verplicht"), dan
+  weigert de runner dat (`ConfirmStatus.ON_FLIPPER`) en bevestigt de mens op de Flipper; de
+  bridge meldt de uitkomst dan via `external_outcome`. De uitkomst gaat als
+  `[PiToolbox-melding]` mee in het volgende gebruikersbericht (niet als los bericht: sommige
+  chat-templates eisen dat user en assistant elkaar afwisselen).
 - `emergency_stop` mag het model wel: hij stopt alleen (captures, Flipper-actie, open
   bevestigingen) en kan niets zenden. Het ergste wat het model ermee kan, is een open
   bevestiging wissen.
@@ -53,7 +55,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pitoolbox.agent.prompt import NOTE_PREFIX, SYSTEM_PROMPT
 from pitoolbox.agent.text import strip_think
 from pitoolbox.core.tools.base import Risk
-from pitoolbox.core.tools.runner import CONFIRM_TOOL
+from pitoolbox.core.tools.runner import CONFIRM_ON_FLIPPER, CONFIRM_TOOL
 from pitoolbox.llm._common import replay_name
 from pitoolbox.llm.errors import LLMError
 from pitoolbox.llm.types import (
@@ -135,7 +137,7 @@ class TurnStop(StrEnum):
     # het model wilde verder terwijl een mens nog moet bevestigen
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     LLM_ERROR = "llm_error"  # de provider gaf een fout
-    INTERRUPTED = "interrupted"  # Ctrl+C
+    INTERRUPTED = "interrupted"  # Ctrl+C of cancel() van de frontend
 
 
 _MODEL_STOPS = {
@@ -210,6 +212,9 @@ class ConfirmStatus(StrEnum):
     DENIED = "denied"  # bevestigd, maar de policy weigerde (scope intussen gewijzigd)
     EXPIRED = "expired"  # verlopen, al gebruikt, of onbekend
     REJECTED = "rejected"  # de mens zei nee
+    # Niet uitgevoerd: de Flipper-app is verbonden, dus alleen OK op de Flipper bevestigt. De
+    # bevestiging blijft openstaan (na loskoppelen kan deze frontend het opnieuw proberen).
+    ON_FLIPPER = "on_flipper"
 
 
 @dataclass(frozen=True)
@@ -222,6 +227,7 @@ class ConfirmOutcome:
 @dataclass
 class _Turn:
     deadline: float
+    cancel: Callable[[], bool] | None = None
     steps: int = 0
     tool_calls: int = 0
     executed: int = 0
@@ -328,11 +334,19 @@ class AgentSession:
 
     # --- een beurt ------------------------------------------------------------------------
 
-    def run_turn(self, text: str, on_event: EventSink | None = None) -> TurnResult:
+    def run_turn(
+        self,
+        text: str,
+        on_event: EventSink | None = None,
+        *,
+        cancel: Callable[[], bool] | None = None,
+    ) -> TurnResult:
+        """Eén gebruikersbeurt. `cancel()` waar: stoppen bij de volgende stap of tool-call
+        (`TurnStop.INTERRUPTED`); een lopende modelcall of tool wordt niet onderbroken."""
         emit: EventSink = on_event or (lambda _e: None)
         self._turns += 1
         t0 = self._clock()
-        turn = _Turn(deadline=t0 + self.limits.turn_timeout_s)
+        turn = _Turn(deadline=t0 + self.limits.turn_timeout_s, cancel=cancel)
         self._trim_history()
         start_len = len(self._history)
         notes, self._notes = self._notes, []
@@ -342,7 +356,7 @@ class AgentSession:
         error: str | None = None
         try:
             stop = self._loop(turn, emit)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, _Cancelled):
             stop = TurnStop.INTERRUPTED
         except LLMError as exc:
             stop = TurnStop.LLM_ERROR
@@ -386,6 +400,7 @@ class AgentSession:
 
     def _loop(self, turn: _Turn, emit: EventSink) -> TurnStop:
         for step in range(self.limits.max_steps + 1):
+            _check_cancel(turn)
             if self._clock() >= turn.deadline:
                 return TurnStop.TIMEOUT
             completion = self.provider.complete(
@@ -444,6 +459,7 @@ class AgentSession:
                     _error("turn_timeout", "niet uitgevoerd: tijdslimiet van de beurt bereikt"),
                 )
             else:
+                _check_cancel(turn)
                 self._execute(call, turn, emit)
 
     def _execute(self, call: ToolCall, turn: _Turn, emit: EventSink) -> None:
@@ -603,20 +619,40 @@ class AgentSession:
             outcome = self._reject(known)
         else:
             raw = self.runner.call(self.frontend, CONFIRM_TOOL, {"pending_id": known.pending_id})
-            if raw.get("ok"):
-                status = ConfirmStatus.EXECUTED
-            elif raw.get("error") == "unknown_pending":
-                status = ConfirmStatus.EXPIRED
-            elif raw.get("error") == "denied":
-                status = ConfirmStatus.DENIED
-            else:
-                status = ConfirmStatus.FAILED
-            outcome = ConfirmOutcome(status, known, raw)
+            if raw.get("error") == CONFIRM_ON_FLIPPER:
+                # Niets gebeurd: de pending staat nog (de mens bevestigt op de Flipper).
+                self._surfaced[known.pending_id] = known
+                return ConfirmOutcome(ConfirmStatus.ON_FLIPPER, known, raw)
+            outcome = ConfirmOutcome(_confirm_status(raw), known, raw)
+        self._notes.append(self._confirm_note(outcome))
+        return outcome
+
+    def external_outcome(
+        self, pending_id: str, *, approved: bool, result: dict[str, Any] | None
+    ) -> ConfirmOutcome | None:
+        """Een pending van deze sessie is buiten de sessie afgehandeld (OK/Back op de Flipper).
+
+        Werkt alleen de eigen administratie bij en geeft het model in de volgende beurt een
+        melding, net als `confirm`. None als deze sessie de pending niet (meer) kent.
+        """
+        known = self._surfaced.pop(pending_id, None)
+        if known is None:
+            return None
+        if not approved:
+            status = (
+                ConfirmStatus.REJECTED
+                if result is not None and result.get("ok")
+                else ConfirmStatus.EXPIRED
+            )
+            outcome = ConfirmOutcome(status, known, None)
+        else:
+            outcome = ConfirmOutcome(_confirm_status(result or {}), known, result)
         self._notes.append(self._confirm_note(outcome))
         return outcome
 
     def _reject(self, pending: PendingConfirmation) -> ConfirmOutcome:
-        action = self.runner.ctx.pending.take(pending.pending_id, self.frontend)
+        # discard, niet claim: afwijzen zendt niets en mag dus ook met een verbonden Flipper.
+        action = self.runner.ctx.pending.discard(pending.pending_id, self.frontend)
         if action is None:
             return ConfirmOutcome(ConfirmStatus.EXPIRED, pending)
         self.runner.audit.write(
@@ -671,6 +707,25 @@ class AgentSession:
         except OSError:
             log.exception("audit-regel %s kon niet worden geschreven", event)
         log.info("%s turn=%d %s", event, self._turns, fields)
+
+
+class _Cancelled(Exception):
+    """Interne stop: de frontend vroeg via `cancel()` om af te breken."""
+
+
+def _check_cancel(turn: _Turn) -> None:
+    if turn.cancel is not None and turn.cancel():
+        raise _Cancelled
+
+
+def _confirm_status(raw: dict[str, Any]) -> ConfirmStatus:
+    if raw.get("ok"):
+        return ConfirmStatus.EXECUTED
+    if raw.get("error") == "unknown_pending":
+        return ConfirmStatus.EXPIRED
+    if raw.get("error") == "denied":
+        return ConfirmStatus.DENIED
+    return ConfirmStatus.FAILED
 
 
 def _error(code: str, message: str) -> dict[str, Any]:

@@ -208,3 +208,43 @@ def test_eof_and_unknown_command(cli: Any, capsys: pytest.CaptureFixture[str]) -
     assert c.run() == 0  # daarna EOF
     out = capsys.readouterr().out
     assert "Onbekend commando: /foo" in out and "/stop" in out
+
+
+def test_flipper_attached_means_confirm_on_flipper(
+    cli: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    c = cli(
+        [use(tool_call("ir_send", IR_POWER)), reply("Bevestig je?")],
+        ["zet de tv aan", "/exit"],
+    )
+    c.runner.attach_physical_confirmer("flipper-ui")
+    assert c.run() == 0
+    out = capsys.readouterr().out
+    assert agent_cli.CONFIRM_PROMPT not in c.inputs.prompts  # hier vragen heeft geen zin
+    assert "bevestig daar" in out
+    c.ctx.flipper.ir_send.assert_not_called()
+    # Niet afgewezen: hij bleef open voor OK op de Flipper (tot /exit alles opruimt).
+    audit = (c.ctx.settings.audit_log).read_text(encoding="utf-8")
+    assert '"rejected"' not in audit and "confirm_on_flipper" not in audit
+
+
+def test_flipper_ui_on_starts_bridge_in_agent_process(
+    cli: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pitoolbox.frontends.flipper_ui import bridge as bridge_mod
+
+    c = cli([], ["/exit"])
+    started: list[Any] = []
+
+    class FakeBridge:
+        def stop(self) -> None:
+            started.append("stop")
+
+    def fake_start(runner: Any, settings: Any) -> Any:
+        started.append((runner, settings.flipper_ui))
+        return FakeBridge() if settings.flipper_ui == "on" else None
+
+    monkeypatch.setattr(bridge_mod, "start_from_settings", fake_start)
+    monkeypatch.setenv("PITOOLBOX_FLIPPER_UI", "on")
+    assert c.run() == 0
+    assert started == [(c.runner, "on"), "stop"]

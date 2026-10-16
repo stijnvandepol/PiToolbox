@@ -1,5 +1,6 @@
-"""Flipper als bediening (fase 4): protocol tussen de FAP `pitoolbox_ui` en de Pi.
+"""Flipper als bediening (fase 4): de FAP `pitoolbox_ui` en de Pi.
 
-Alleen de codec staat er nu (`protocol`). De bridge (RPC-lezer, koppeling aan de
-ToolRunner en de agent-loop) volgt; het ontwerp staat in docs/fase4-protocol.md.
+`protocol`: codec en bouwstenen (docs/fase4-protocol.md). `bridge`: de Pi-kant die FAP-
+berichten via de ToolRunner en de agent-loop afhandelt (`PITOOLBOX_FLIPPER_UI=on`).
+`presets`: vaste prompts uit de Pi-config.
 """

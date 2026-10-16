@@ -7,7 +7,8 @@ Bevestigen: vraagt het model een transmit-actie binnen scope aan, dan toont deze
 na de beurt de samenvatting en vraagt ``Bevestigen? [j/N]``. Alleen ``j`` of ``ja`` telt als
 ja; al het andere (ook leeg, Ctrl+C of Ctrl+D) is nee. Een "ja" in een gewoon chatbericht
 bevestigt niets: alleen deze prompt roept ``confirm_action`` aan, met frontend-id
-``agent-cli``.
+``agent-cli``. Is de PiToolbox-app op de Flipper verbonden (in dit proces, zie
+``PITOOLBOX_FLIPPER_UI``), dan vraagt deze frontend niets en bevestig je op de Flipper.
 
 Commando's: ``/stop`` (noodstop: captures stoppen, Flipper-actie afbreken, bevestigingen
 wissen), ``/help`` en ``/exit``.
@@ -89,7 +90,14 @@ _CONFIRM_MESSAGES = {
     ConfirmStatus.DENIED: "Alsnog geweigerd door de policy (scope gewijzigd?). Niets verzonden.",
     ConfirmStatus.EXPIRED: "Bevestiging verlopen of al gebruikt. Niets verzonden.",
     ConfirmStatus.REJECTED: "Afgewezen. Niets verzonden.",
+    ConfirmStatus.ON_FLIPPER: (
+        "Niet uitgevoerd: de PiToolbox-app op de Flipper is verbonden. "
+        "Bevestig daar (OK = ja, Back = nee)."
+    ),
 }
+ON_FLIPPER_NOTICE = (
+    "  De PiToolbox-app op de Flipper is verbonden: bevestig daar (OK = ja, Back = nee)."
+)
 
 
 def _out(text: str = "") -> None:
@@ -145,6 +153,10 @@ def handle_confirmations(session: AgentSession, result: TurnResult) -> list[Conf
         _out(f"Actie: {for_terminal(pending.tool)}")
         _out(f"  {for_terminal(pending.summary)}")
         _out(f"  (verloopt over ongeveer {remaining} s)")
+        if session.runner.ctx.pending.physical_confirmer is not None:
+            # "Flipper verplicht": hier vragen heeft geen zin, de runner zou weigeren.
+            _out(ON_FLIPPER_NOTICE)
+            continue
         approved = ask_yes_no(CONFIRM_PROMPT)
         outcome = session.confirm(pending, approved=approved)
         outcomes.append(outcome)
@@ -234,16 +246,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         _err(f"Fout: {exc}")
         return 2
 
+    from pitoolbox.frontends.flipper_ui.bridge import start_from_settings
+
     runner: ToolRunner | None = None
+    bridge = None
     try:
         runner = build_runner(settings)
         session = AgentSession(provider, runner, frontend=FRONTEND, limits=limits)
+        # PITOOLBOX_FLIPPER_UI=on: de Flipper-app wordt in dit proces bediend. Draai de bridge
+        # nooit ook nog in pitoolbox-mcp: maar één proces mag de Flipper bezitten.
+        bridge = start_from_settings(runner, settings)
         _out(
             f"PiToolbox-agent: model {for_terminal(provider.model)}, "
             f"{len(session.tools)} tools. /help voor commando's, /exit om te stoppen."
         )
         return repl(session)
     finally:
+        if bridge is not None:
+            bridge.stop()
         provider.close()
         if runner is not None:
             runner.shutdown()

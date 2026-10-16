@@ -69,8 +69,10 @@ INSTRUCTIONS = (
     "Een transmit-tool voert niets direct uit maar geeft een pending_id terug: toon de "
     "samenvatting aan de gebruiker en roep confirm_action ALLEEN aan nadat de gebruiker "
     "daar in het gesprek expliciet 'ja' op heeft gezegd; nooit uit eigen beweging en nooit "
-    "met een pending_id van een eerder gesprek. emergency_stop is altijd beschikbaar en "
-    "breekt alle lopende acties af."
+    "met een pending_id van een eerder gesprek. Geeft confirm_action de fout "
+    "confirm_on_flipper, dan is de PiToolbox-app op de Flipper verbonden en bevestigt de "
+    "gebruiker daar (OK); roep confirm_action dan niet opnieuw aan. emergency_stop is altijd "
+    "beschikbaar en breekt alle lopende acties af."
 )
 
 
@@ -276,9 +278,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         settings = settings.model_copy(update=updates)
 
     from pitoolbox.app import build_runner
+    from pitoolbox.frontends.flipper_ui.bridge import start_from_settings
 
     runner = build_runner(settings)
     log.info("pitoolbox-mcp start: %d tools, transport=%s", len(runner.specs()), args.transport)
+    # PITOOLBOX_FLIPPER_UI=on: de bediening via de Flipper-app draait in dit proces (dat de
+    # Flipper bezit). Zolang die app verbonden is, bevestigt alleen OK op de Flipper.
+    bridge = start_from_settings(runner, settings)
     try:
         if args.transport == "http":
             _run_http(runner, settings)
@@ -287,6 +293,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     except KeyboardInterrupt:
         log.info("pitoolbox-mcp gestopt")
     finally:
+        if bridge is not None:
+            bridge.stop()
         runner.shutdown()
 
 

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal, cast
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from pitoolbox.core.devices._ble_pairing import normalize_adapter
+
+_FAP_PATH_RE = re.compile(r"^/ext/apps/(?:[A-Za-z0-9_-]+/)+[A-Za-z0-9_-]+\.fap$")
 
 
 def _env_path(name: str, default: str) -> Path:
@@ -87,6 +90,26 @@ class Settings(BaseModel):
     agent_max_result_chars: int = 8000  # tool-resultaat naar het model, daarna ingekort
     agent_max_history_chars: int = 120_000  # daarboven vallen de oudste hele beurten weg
 
+    # --- fase 4: bediening via de Flipper-app (bridge, `frontends/flipper_ui/bridge.py`) ---
+    # "on": het proces dat de Flipper bezit (pitoolbox-mcp of pitoolbox-agent) draait de bridge.
+    # Nooit in twee processen tegelijk: beide zouden de Flipper willen bezitten.
+    flipper_ui: Literal["off", "on"] = "off"
+    # Waar de FAP op de SD-kaart staat; de Pi start alleen deze app (met args "RPC").
+    flipper_ui_app: str = "/ext/apps/Tools/pitoolbox_ui.fap"
+    # YAML met presets ({id, label, prompt}); ontbreekt het bestand, dan zijn er geen presets.
+    flipper_ui_presets: Path = Field(
+        default_factory=lambda: Path("~/.config/pitoolbox/flipper_presets.yaml").expanduser()
+    )
+
+    @field_validator("flipper_ui_app")
+    @classmethod
+    def _check_ui_app(cls, value: str) -> str:
+        if not _FAP_PATH_RE.fullmatch(value) or ".." in value:
+            raise ValueError(
+                f"PITOOLBOX_FLIPPER_UI_APP moet een .fap onder /ext/apps/ zijn, niet {value!r}"
+            )
+        return value
+
     @field_validator("flipper_ble_adapter")
     @classmethod
     def _check_ble_adapter(cls, value: str | None) -> str | None:
@@ -140,5 +163,15 @@ class Settings(BaseModel):
             agent_max_result_chars=int(os.environ.get("PITOOLBOX_AGENT_MAX_RESULT_CHARS", "8000")),
             agent_max_history_chars=int(
                 os.environ.get("PITOOLBOX_AGENT_MAX_HISTORY_CHARS", "120000")
+            ),
+            flipper_ui=cast(
+                Literal["off", "on"],
+                os.environ.get("PITOOLBOX_FLIPPER_UI", "off").strip().lower() or "off",
+            ),
+            flipper_ui_app=os.environ.get(
+                "PITOOLBOX_FLIPPER_UI_APP", "/ext/apps/Tools/pitoolbox_ui.fap"
+            ),
+            flipper_ui_presets=_env_path(
+                "PITOOLBOX_FLIPPER_UI_PRESETS", "~/.config/pitoolbox/flipper_presets.yaml"
             ),
         )

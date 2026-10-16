@@ -471,6 +471,67 @@ def test_confirm_unknown_pending_is_expired(lab: Lab) -> None:
     assert lab.tool_audit() == []
 
 
+# --- "Flipper verplicht": bevestigen op de Flipper ---------------------------------------------
+
+
+def test_confirm_while_flipper_attached_is_on_flipper_and_stays_open(lab: Lab) -> None:
+    pending = _start_transmit(lab)
+    lease = lab.runner.attach_physical_confirmer("flipper-ui")
+    outcome = lab.session.confirm(pending, approved=True)
+    assert outcome.status is ConfirmStatus.ON_FLIPPER
+    lab.ctx.flipper.ir_send.assert_not_called()
+    assert lab.session.open_confirmations == (pending,)
+    assert [p.id for p in lab.ctx.pending.list()] == [pending.pending_id]
+    # Na loskoppelen kan de chat weer bevestigen (oude regel).
+    lab.runner.detach_physical_confirmer(lease, "app dicht")
+    assert lab.session.confirm(pending, approved=True).status is ConfirmStatus.EXECUTED
+    lab.ctx.flipper.ir_send.assert_called_once()
+
+
+def test_reject_in_chat_allowed_while_flipper_attached(lab: Lab) -> None:
+    pending = _start_transmit(lab)
+    lab.runner.attach_physical_confirmer("flipper-ui")
+    assert lab.session.confirm(pending, approved=False).status is ConfirmStatus.REJECTED
+    assert lab.ctx.pending.list() == []
+
+
+def test_external_outcome_tells_the_model(lab: Lab) -> None:
+    pending = _start_transmit(lab)
+    lease = lab.runner.attach_physical_confirmer("flipper-ui")
+    raw = lab.runner.confirm_physical(lease, pending.pending_id)
+    outcome = lab.session.external_outcome(pending.pending_id, approved=True, result=raw)
+    assert outcome is not None and outcome.status is ConfirmStatus.EXECUTED
+    assert lab.session.open_confirmations == ()
+    assert lab.session.external_outcome(pending.pending_id, approved=True, result=raw) is None
+    lab.provider.add(reply("Mooi."))
+    lab.turn("en?")
+    text = lab.provider.requests[-1].messages[-1].text  # type: ignore[union-attr]
+    assert "bevestigd en het is uitgevoerd" in text
+
+
+def test_external_rejection_tells_the_model(lab: Lab) -> None:
+    pending = _start_transmit(lab)
+    lease = lab.runner.attach_physical_confirmer("flipper-ui")
+    raw = lab.runner.reject_physical(lease, pending.pending_id)
+    outcome = lab.session.external_outcome(pending.pending_id, approved=False, result=raw)
+    assert outcome is not None and outcome.status is ConfirmStatus.REJECTED
+
+
+def test_cancel_stops_turn_between_steps(lab: Lab) -> None:
+    stop = {"now": False}
+
+    def first(_messages: Sequence[Message]) -> Any:
+        stop["now"] = True  # de frontend breekt af terwijl het model nog denkt
+        return use(tool_call("status"))
+
+    lab.provider.add(first)
+    result = lab.session.run_turn("status", cancel=lambda: stop["now"])
+    assert result.stop is TurnStop.INTERRUPTED
+    assert result.executed == 0
+    assert_valid_history(lab.session.history)
+    assert _content(lab.results()[-1])["error"] == "not_executed"
+
+
 # --- fouten en afbreken ----------------------------------------------------------------
 
 

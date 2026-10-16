@@ -6,6 +6,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import anyio
 import pytest
@@ -345,3 +346,32 @@ async def test_transmit_out_of_scope_never_reaches_confirmation(harness: Harness
     assert _structured(result)["error"] == "denied"
     assert "pending_id" not in _structured(result)
     assert harness.runner.ctx.pending.list() == []
+
+
+def test_main_starts_and_stops_flipper_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """PITOOLBOX_FLIPPER_UI=on: de bridge draait in het MCP-proces en stopt vóór shutdown."""
+    import pitoolbox.app
+    from pitoolbox.frontends import mcp_server
+    from pitoolbox.frontends.flipper_ui import bridge as bridge_mod
+
+    order: list[str] = []
+    runner = MagicMock()
+    runner.specs.return_value = []
+    runner.shutdown.side_effect = lambda: order.append("shutdown")
+
+    class FakeBridge:
+        def stop(self) -> None:
+            order.append("bridge.stop")
+
+    def fake_start(r: Any, settings: Any) -> Any:
+        order.append(f"bridge.start:{settings.flipper_ui}")
+        return FakeBridge()
+
+    server = MagicMock()
+    server.run.side_effect = lambda _t: order.append("serve")
+    monkeypatch.setenv("PITOOLBOX_FLIPPER_UI", "on")
+    monkeypatch.setattr(pitoolbox.app, "build_runner", lambda _s: runner)
+    monkeypatch.setattr(bridge_mod, "start_from_settings", fake_start)
+    monkeypatch.setattr(mcp_server, "build_server", lambda _r: server)
+    mcp_server.main([])
+    assert order == ["bridge.start:on", "serve", "bridge.stop", "shutdown"]
