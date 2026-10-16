@@ -210,18 +210,37 @@ def test_eof_and_unknown_command(cli: Any, capsys: pytest.CaptureFixture[str]) -
     assert "Onbekend commando: /foo" in out and "/stop" in out
 
 
+def _sleeper(monkeypatch: pytest.MonkeyPatch, *steps: Callable[[], None]) -> list[int]:
+    """Vervangt `agent_cli._sleep` (wachten op de Flipper): elke aanroep voert de volgende
+    stap uit (de laatste blijft herhalen)."""
+    calls = [0]
+
+    def fake_sleep(_seconds: float) -> None:
+        step = steps[min(calls[0], len(steps) - 1)]
+        calls[0] += 1
+        step()
+
+    monkeypatch.setattr(agent_cli, "_sleep", fake_sleep)
+    return calls
+
+
+def _ctrl_c() -> None:
+    raise KeyboardInterrupt
+
+
 def test_flipper_attached_means_confirm_on_flipper(
-    cli: Any, capsys: pytest.CaptureFixture[str]
+    cli: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     c = cli(
         [use(tool_call("ir_send", IR_POWER)), reply("Bevestig je?")],
         ["zet de tv aan", "/exit"],
     )
     c.runner.attach_physical_confirmer("flipper-ui")
+    _sleeper(monkeypatch, _ctrl_c)  # niet blijven wachten
     assert c.run() == 0
     out = capsys.readouterr().out
     assert agent_cli.CONFIRM_PROMPT not in c.inputs.prompts  # hier vragen heeft geen zin
-    assert "bevestig daar" in out
+    assert "bevestig daar" in out and agent_cli.NO_WAIT_NOTICE in out
     c.ctx.flipper.ir_send.assert_not_called()
     # Niet afgewezen: hij bleef open voor OK op de Flipper (tot /exit alles opruimt).
     audit = (c.ctx.settings.audit_log).read_text(encoding="utf-8")
@@ -248,3 +267,88 @@ def test_flipper_ui_on_starts_bridge_in_agent_process(
     monkeypatch.setenv("PITOOLBOX_FLIPPER_UI", "on")
     assert c.run() == 0
     assert started == [(c.runner, "on"), "stop"]
+
+
+def _pending_id(c: Cli) -> str:
+    (action,) = c.ctx.pending.list()
+    return action.id
+
+
+def test_flipper_ok_is_shown_and_model_hears_it(
+    cli: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cli(
+        [use(tool_call("ir_send", IR_POWER)), reply("Bevestig op de Flipper."), reply("Mooi.")],
+        ["zet de tv aan", "en nu?", "/exit"],
+    )
+    lease = c.runner.attach_physical_confirmer("flipper-ui")
+    calls = _sleeper(monkeypatch, lambda: c.runner.confirm_physical(lease, _pending_id(c)) and None)
+    assert c.run() == 0
+    out = capsys.readouterr().out
+    assert calls[0] == 1
+    assert "Bevestiging ir_send: Uitgevoerd." in out
+    assert agent_cli.CONFIRM_PROMPT not in c.inputs.prompts
+    c.ctx.flipper.ir_send.assert_called_once_with("/ext/infrared/tv.ir", "Power")
+    text = getattr(c.provider.requests[-1].messages[-1], "text", "")
+    assert "bevestigd en het is uitgevoerd" in text and text.endswith("en nu?")
+
+
+def test_flipper_back_is_shown(
+    cli: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cli([use(tool_call("ir_send", IR_POWER)), reply("?")], ["tv aan", "/exit"])
+    lease = c.runner.attach_physical_confirmer("flipper-ui")
+    _sleeper(monkeypatch, lambda: c.runner.reject_physical(lease, _pending_id(c)) and None)
+    assert c.run() == 0
+    assert "Bevestiging ir_send: Afgewezen. Niets verzonden." in capsys.readouterr().out
+    c.ctx.flipper.ir_send.assert_not_called()
+
+
+def test_app_gone_while_waiting_asks_here(
+    cli: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cli([use(tool_call("ir_send", IR_POWER)), reply("?")], ["tv aan", "j", "/exit"])
+    lease = c.runner.attach_physical_confirmer("flipper-ui")
+    _sleeper(monkeypatch, lambda: c.runner.detach_physical_confirmer(lease, "app dicht"))
+    assert c.run() == 0
+    out = capsys.readouterr().out
+    assert agent_cli.DETACHED_NOTICE in out and "Uitgevoerd." in out
+    assert c.inputs.prompts.count(agent_cli.CONFIRM_PROMPT) == 1
+    c.ctx.flipper.ir_send.assert_called_once()
+
+
+def test_stopped_waiting_then_app_gone_asks_at_next_prompt(
+    cli: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cli([use(tool_call("ir_send", IR_POWER)), reply("?")], [])
+    lease = c.runner.attach_physical_confirmer("flipper-ui")
+    _sleeper(monkeypatch, _ctrl_c)
+    script: list[Callable[[], str]] = [
+        lambda: "tv aan",
+        lambda: (c.runner.detach_physical_confirmer(lease, "app dicht"), "")[1],
+        lambda: "n",  # het oude [j/N]-vraagje, nu de app weg is
+        lambda: "/exit",
+    ]
+    prompts: list[str] = []
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return script.pop(0)()
+
+    monkeypatch.setattr(agent_cli, "_input", fake_input)
+    assert c.run() == 0
+    out = capsys.readouterr().out
+    assert prompts == [agent_cli.PROMPT, agent_cli.PROMPT, agent_cli.CONFIRM_PROMPT, "> "]
+    assert "Afgewezen. Niets verzonden." in out
+    assert c.ctx.pending.list() == []
+    c.ctx.flipper.ir_send.assert_not_called()
+
+
+def test_remote_emergency_stop_while_waiting(
+    cli: Any, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = cli([use(tool_call("ir_send", IR_POWER)), reply("?")], ["tv aan", "/exit"])
+    c.runner.attach_physical_confirmer("flipper-ui")
+    _sleeper(monkeypatch, lambda: c.runner.call("mcp", "emergency_stop", {}) and None)
+    assert c.run() == 0
+    assert "Bevestiging ir_send: Gewist door een noodstop." in capsys.readouterr().out

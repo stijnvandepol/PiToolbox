@@ -634,3 +634,80 @@ def test_limits_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PITOOLBOX_AGENT_MAX_RESULT_CHARS", "1000")
     settings = Settings.from_env()
     assert settings.agent_max_steps == 4 and settings.agent_max_result_chars == 1000
+
+
+# --- uitkomst van buitenaf (subscribe_resolutions) ---------------------------------------------
+
+
+def test_flipper_ok_reaches_session_without_bridge(lab: Lab) -> None:
+    """Elke AgentSession hoort de uitkomst van haar eigen pending, ook als de Flipper hem
+    afhandelde (niet alleen de preset-sessie van de bridge)."""
+    pending = _start_transmit(lab)
+    lease = lab.runner.attach_physical_confirmer("flipper-ui")
+    assert lab.session.confirm(pending, approved=True).status is ConfirmStatus.ON_FLIPPER
+    lab.runner.confirm_physical(lease, pending.pending_id)
+    (outcome,) = lab.session.take_external()
+    assert outcome.status is ConfirmStatus.EXECUTED and outcome.pending == pending
+    assert outcome.result is not None and outcome.result["ok"] is True
+    assert lab.session.open_confirmations == ()
+    assert lab.session.take_external() == []
+    lab.provider.add(reply("Mooi."))
+    lab.turn("en?")
+    text = lab.provider.requests[-1].messages[-1].text  # type: ignore[union-attr]
+    assert text.count("bevestigd en het is uitgevoerd") == 1
+
+
+def test_external_rejection_expiry_and_remote_stop(
+    tmp_path: Path, make_ctx: Callable[..., ToolContext], fixed_scope: Scope
+) -> None:
+    clock = Clock()
+    lab = Lab(tmp_path, make_ctx(tmp_path, fixed_scope, ttl_s=60.0, clock=clock), clock=clock)
+    rejected = _start_transmit(lab)
+    lab.events.clear()
+    expired = _start_transmit(lab)
+    lab.events.clear()
+    lease = lab.runner.attach_physical_confirmer("flipper-ui")
+    lab.runner.reject_physical(lease, rejected.pending_id)
+    clock.now += 61  # TTL voorbij; take_external schoont de store eerst op
+    outcomes = {o.pending.pending_id: o.status for o in lab.session.take_external()}
+    assert outcomes == {
+        rejected.pending_id: ConfirmStatus.REJECTED,
+        expired.pending_id: ConfirmStatus.EXPIRED,
+    }
+    cleared = _start_transmit(lab)
+    lab.runner.call("mcp", "emergency_stop", {})  # noodstop vanuit een andere frontend
+    (outcome,) = lab.session.take_external()
+    assert outcome.pending == cleared and outcome.status is ConfirmStatus.CLEARED
+    assert lab.session.open_confirmations == ()
+    # De melding over afwijzen en verlopen ging mee met de beurt die `cleared` aanmaakte.
+    first = lab.provider.requests[-2].messages[-1].text  # type: ignore[union-attr]
+    assert "afgewezen" in first and "verlopen" in first
+    lab.provider.add(reply("Ok."))
+    lab.turn("en?")
+    text = lab.provider.requests[-1].messages[-1].text  # type: ignore[union-attr]
+    assert "gewist door een noodstop" in text
+
+
+def test_own_confirm_is_not_reported_twice_and_close_unsubscribes(lab: Lab) -> None:
+    pending = _start_transmit(lab)
+    assert lab.session.confirm(pending, approved=True).status is ConfirmStatus.EXECUTED
+    assert lab.session.take_external() == []
+    lab.session.close()
+    lab.session.close()  # idempotent
+    lab.events.clear()
+    lab.ctx.flipper.ir_send.reset_mock()
+    other = _start_transmit(lab)
+    lease = lab.runner.attach_physical_confirmer("flipper-ui")
+    lab.runner.confirm_physical(lease, other.pending_id)
+    assert lab.session.take_external() == []  # afgemeld: hoort niets meer
+
+
+def test_model_still_cannot_confirm_after_external_events(lab: Lab) -> None:
+    pending = _start_transmit(lab)
+    lab.runner.attach_physical_confirmer("flipper-ui")
+    lab.provider.add(
+        use(tool_call(CONFIRM_TOOL, {"pending_id": pending.pending_id})), reply("Kan niet.")
+    )
+    lab.turn("bevestig maar")
+    lab.ctx.flipper.ir_send.assert_not_called()
+    assert [p.id for p in lab.ctx.pending.list()] == [pending.pending_id]

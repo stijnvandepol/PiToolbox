@@ -12,12 +12,23 @@ Resultaatvorm (altijd een dict):
 Bevestigen: `confirm_action` met de pending_id, vanuit dezelfde frontend. Zolang de
 Flipper-app verbonden is (fysieke bevestiger gekoppeld, zie `PendingStore`), weigert dat voor
 elke frontend met `confirm_on_flipper` en bevestigt alleen de bridge via `confirm_physical`.
+
+Uitkomst van een pending (`subscribe_resolutions`): elke frontend kan horen hoe een pending
+afliep, ook als een ander hem afhandelde (OK/Back op de Flipper, een noodstop, de TTL). Zo
+hoort bijv. een `AgentSession` van `pitoolbox-agent` het resultaat van een OK op de Flipper.
+`CONFIRMED` (met de ruwe uitkomst) meldt de runner na het uitvoeren; `REJECTED`, `EXPIRED` en
+`CLEARED` komen rechtstreeks van de `PendingStore` (onder zijn lock). Luisteraars mogen dus
+niet blokkeren en de store of runner niet aanroepen: alleen iets in een eigen wachtrij zetten.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from pydantic import Field, ValidationError
@@ -27,6 +38,8 @@ from pitoolbox.core.errors import ToolboxError
 from pitoolbox.core.policy import (
     ClaimRefusal,
     PendingAction,
+    PendingChange,
+    PendingEvent,
     PhysicalConfirmer,
     Policy,
     Verdict,
@@ -45,6 +58,34 @@ CONFIRM_ON_FLIPPER_MESSAGE = (
 )
 # Waarde van `confirmed_on` in de audit bij een bevestiging met de fysieke lease.
 PHYSICAL_SOURCE = "flipper"
+
+
+class Resolution(StrEnum):
+    """Hoe een pending afliep (zie `PendingResolved`)."""
+
+    CONFIRMED = "confirmed"  # bevestigd; `result` is de uitkomst (ok, fout of policy-deny)
+    REJECTED = "rejected"  # afgewezen door een mens (chat of Back op de Flipper)
+    EXPIRED = "expired"  # TTL verstreken
+    CLEARED = "cleared"  # gewist (noodstop of afsluiten)
+
+
+@dataclass(frozen=True)
+class PendingResolved:
+    pending_id: str
+    tool: str
+    created_by: str  # frontend die de pending maakte
+    resolution: Resolution
+    result: dict[str, Any] | None = None  # alleen bij CONFIRMED: ruwe uitkomst van de runner
+    confirmed_on: str | None = None  # "flipper" bij OK op de Flipper
+
+
+ResolutionListener = Callable[[PendingResolved], None]
+
+_STORE_RESOLUTIONS = {
+    PendingChange.REJECTED: Resolution.REJECTED,
+    PendingChange.EXPIRED: Resolution.EXPIRED,
+    PendingChange.CLEARED: Resolution.CLEARED,
+}
 
 
 def _physical_refusal(refusal: ClaimRefusal | None) -> dict[str, Any]:
@@ -83,6 +124,9 @@ class ToolRunner:
         self.ctx = ctx
         self.policy = policy
         self.audit = audit
+        self._res_lock = threading.Lock()
+        self._res_listeners: list[ResolutionListener] = []
+        ctx.pending.subscribe(self._on_pending_event)
 
     def specs(self) -> list[ToolSpec]:
         return self.registry.all()
@@ -98,6 +142,40 @@ class ToolRunner:
                 fn()
             except Exception:
                 log.exception("shutdown-stap %s faalde", name)
+
+    # --- uitkomst van pendings -------------------------------------------------------------
+
+    def subscribe_resolutions(self, listener: ResolutionListener) -> Callable[[], None]:
+        """Luister naar de uitkomst van elke pending; geeft een functie om af te melden.
+
+        `listener` wordt aangeroepen in de thread die de pending afhandelde, soms onder de lock
+        van de `PendingStore`: niet blokkeren, de store/runner niet aanroepen.
+        """
+        with self._res_lock:
+            self._res_listeners.append(listener)
+
+        def unsubscribe() -> None:
+            with self._res_lock:
+                if listener in self._res_listeners:
+                    self._res_listeners.remove(listener)
+
+        return unsubscribe
+
+    def _resolved(self, event: PendingResolved) -> None:
+        with self._res_lock:
+            listeners = list(self._res_listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                log.exception("luisteraar voor pending-uitkomsten faalde")
+
+    def _on_pending_event(self, event: PendingEvent) -> None:
+        # Onder de lock van de PendingStore. CONFIRMED meldt _run_confirmed zelf (met resultaat).
+        resolution = _STORE_RESOLUTIONS.get(event.change)
+        if resolution is not None:
+            action = event.action
+            self._resolved(PendingResolved(action.id, action.tool, action.frontend, resolution))
 
     def call(self, frontend: str, name: str, raw_args: dict[str, Any] | None) -> dict[str, Any]:
         t0 = time.monotonic()
@@ -209,6 +287,23 @@ class ToolRunner:
         return self._run_confirmed(t0, frontend, claim.action)
 
     def _run_confirmed(
+        self, t0: float, frontend: str, pending: PendingAction, **extra: Any
+    ) -> dict[str, Any]:
+        result = self._run_confirmed_inner(t0, frontend, pending, **extra)
+        confirmed_on = extra.get("confirmed_on")
+        self._resolved(
+            PendingResolved(
+                pending.id,
+                pending.tool,
+                pending.frontend,
+                Resolution.CONFIRMED,
+                result,
+                confirmed_on if isinstance(confirmed_on, str) else None,
+            )
+        )
+        return result
+
+    def _run_confirmed_inner(
         self, t0: float, frontend: str, pending: PendingAction, **extra: Any
     ) -> dict[str, Any]:
         spec = self.registry.get(pending.tool)

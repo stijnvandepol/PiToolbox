@@ -26,6 +26,8 @@ from pitoolbox.core.tools.runner import (
     CONFIRM_ON_FLIPPER,
     CONFIRM_SPEC,
     CONFIRM_TOOL,
+    PendingResolved,
+    Resolution,
     ToolRunner,
 )
 
@@ -501,3 +503,56 @@ def test_detach_with_foreign_lease_is_noop(fx: Fixture) -> None:
     fx.runner.detach_physical_confirmer(lease, "nog eens")  # idempotent, geen tweede regel
     events = [r for r in fx.audit() if r.get("event") == "physical_confirmer"]
     assert [e["attached"] for e in events] == [True, False]
+
+
+# --- uitkomst van pendings (subscribe_resolutions) ---------------------------------------------
+
+
+def test_resolutions_confirmed_rejected_cleared(fx: Fixture) -> None:
+    seen: list[PendingResolved] = []
+    unsubscribe = fx.runner.subscribe_resolutions(seen.append)
+    a = fx.runner.call("agent-cli", "transmit_tool", {"bssid": IN_SCOPE})["pending_id"]
+    b = fx.runner.call("agent-cli", "transmit_tool", {"bssid": IN_SCOPE})["pending_id"]
+    c = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})["pending_id"]
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    done = fx.runner.confirm_physical(lease, a)
+    fx.runner.reject_physical(lease, b)
+    fx.ctx.pending.clear()
+    assert [(e.pending_id, e.resolution) for e in seen] == [
+        (a, Resolution.CONFIRMED),
+        (b, Resolution.REJECTED),
+        (c, Resolution.CLEARED),
+    ]
+    assert seen[0].result == done and seen[0].confirmed_on == "flipper"
+    assert seen[0].created_by == "agent-cli" and seen[0].tool == "transmit_tool"
+    assert seen[1].result is None and seen[2].created_by == "mcp"
+    unsubscribe()
+    fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})
+    fx.ctx.pending.clear()
+    assert len(seen) == 3
+
+
+def test_resolution_expired_and_chat_confirm(tmp_path: Path, make_ctx: Any) -> None:
+    now = [100.0]
+    scope = Scope.model_validate({"wifi": [{"bssid": IN_SCOPE, "channel": 6}]})
+    fx = Fixture(tmp_path, make_ctx(tmp_path, scope, ttl_s=10.0, clock=lambda: now[0]))
+    seen: list[PendingResolved] = []
+    fx.runner.subscribe_resolutions(seen.append)
+    old = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})["pending_id"]
+    now[0] += 11
+    new = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})["pending_id"]  # purge
+    fx.runner.call("mcp", CONFIRM_TOOL, {"pending_id": new})
+    assert [(e.pending_id, e.resolution) for e in seen] == [
+        (old, Resolution.EXPIRED),
+        (new, Resolution.CONFIRMED),
+    ]
+    assert seen[1].confirmed_on is None and seen[1].result is not None and seen[1].result["ok"]
+
+
+def test_failing_resolution_listener_does_not_break_runner(fx: Fixture) -> None:
+    def boom(_event: PendingResolved) -> None:
+        raise RuntimeError("kapot")
+
+    fx.runner.subscribe_resolutions(boom)
+    first = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})
+    assert fx.runner.call("mcp", CONFIRM_TOOL, {"pending_id": first["pending_id"]})["ok"]

@@ -16,8 +16,11 @@ Ontwerpkeuzes:
   expliciet "ja" van de mens `confirm()` aan. Die gebruikt dezelfde frontend-id als de
   call die de pending maakte, dus de binding, de TTL en het eenmalig gebruik van
   `PendingStore` blijven gelden. Is de Flipper-app verbonden ("Flipper verplicht"), dan
-  weigert de runner dat (`ConfirmStatus.ON_FLIPPER`) en bevestigt de mens op de Flipper; de
-  bridge meldt de uitkomst dan via `external_outcome`. De uitkomst gaat als
+  weigert de runner dat (`ConfirmStatus.ON_FLIPPER`) en bevestigt de mens op de Flipper. De
+  sessie luistert naar de uitkomsten van de runner (`subscribe_resolutions`) en hoort zo ook
+  wat er buiten haar om met haar eigen pendings gebeurde (OK/Back op de Flipper, een noodstop
+  elders, de TTL); `take_external()` verwerkt die (ook aan het begin van elke beurt). Het model
+  kan daarmee nog steeds niets bevestigen: het hoort alleen de uitkomst. De uitkomst gaat als
   `[PiToolbox-melding]` mee in het volgende gebruikersbericht (niet als los bericht: sommige
   chat-templates eisen dat user en assistant elkaar afwisselen).
 - `emergency_stop` mag het model wel: hij stopt alleen (captures, Flipper-actie, open
@@ -44,6 +47,7 @@ import copy
 import json
 import logging
 import secrets
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -55,7 +59,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pitoolbox.agent.prompt import NOTE_PREFIX, SYSTEM_PROMPT
 from pitoolbox.agent.text import strip_think
 from pitoolbox.core.tools.base import Risk
-from pitoolbox.core.tools.runner import CONFIRM_ON_FLIPPER, CONFIRM_TOOL
+from pitoolbox.core.tools.runner import (
+    CONFIRM_ON_FLIPPER,
+    CONFIRM_TOOL,
+    PendingResolved,
+    Resolution,
+)
 from pitoolbox.llm._common import replay_name
 from pitoolbox.llm.errors import LLMError
 from pitoolbox.llm.types import (
@@ -215,6 +224,7 @@ class ConfirmStatus(StrEnum):
     # Niet uitgevoerd: de Flipper-app is verbonden, dus alleen OK op de Flipper bevestigt. De
     # bevestiging blijft openstaan (na loskoppelen kan deze frontend het opnieuw proberen).
     ON_FLIPPER = "on_flipper"
+    CLEARED = "cleared"  # gewist door een noodstop (elders); niets uitgevoerd
 
 
 @dataclass(frozen=True)
@@ -289,8 +299,9 @@ def note(text: str) -> str:
 class AgentSession:
     """Eén gesprek: geschiedenis, provider, runner en de bevestigingen die nog openstaan.
 
-    Niet thread-safe: één frontend roept `run_turn`, `confirm` en `emergency_stop` na
-    elkaar aan.
+    Niet thread-safe: één frontend roept `run_turn`, `confirm`, `take_external` en
+    `emergency_stop` na elkaar aan. Alleen de luisteraar voor uitkomsten (`_on_resolved`)
+    draait in andere threads; die zet alleen iets in een eigen wachtrij. `close()` meldt hem af.
     """
 
     def __init__(
@@ -319,6 +330,19 @@ class AgentSession:
         self._surfaced: dict[str, PendingConfirmation] = {}
         self._session_id = secrets.token_hex(4)
         self._turns = 0
+        # Uitkomsten van buitenaf (andere threads): alleen voor pendings in `_watch`.
+        self._ext_lock = threading.Lock()
+        self._watch: set[str] = set()
+        self._external: list[PendingResolved] = []
+        self._unsubscribe: Callable[[], None] | None = runner.subscribe_resolutions(
+            self._on_resolved
+        )
+
+    def close(self) -> None:
+        """Meldt de luisteraar voor uitkomsten af (bij het weggooien van de sessie)."""
+        unsubscribe, self._unsubscribe = self._unsubscribe, None
+        if unsubscribe is not None:
+            unsubscribe()
 
     @property
     def history(self) -> tuple[Message, ...]:
@@ -344,6 +368,7 @@ class AgentSession:
         """Eén gebruikersbeurt. `cancel()` waar: stoppen bij de volgende stap of tool-call
         (`TurnStop.INTERRUPTED`); een lopende modelcall of tool wordt niet onderbroken."""
         emit: EventSink = on_event or (lambda _e: None)
+        self.take_external()  # wat er intussen buiten deze sessie gebeurde, hoort het model nu
         self._turns += 1
         t0 = self._clock()
         turn = _Turn(deadline=t0 + self.limits.turn_timeout_s, cancel=cancel)
@@ -502,6 +527,8 @@ class AgentSession:
             created=self._clock(),
         )
         self._surfaced[pending_id] = pending
+        with self._ext_lock:
+            self._watch.add(pending_id)
         turn.pending.append(pending)
         emit(pending)
         # Bewust zonder pending_id: het model kan en hoeft niets te bevestigen.
@@ -613,6 +640,7 @@ class AgentSession:
         de call die de pending maakte, dus binding, TTL en eenmalig gebruik blijven gelden.
         """
         known = self._surfaced.pop(pending.pending_id, None)
+        self._unwatch(pending.pending_id)
         if known is None:
             outcome = ConfirmOutcome(ConfirmStatus.EXPIRED, pending)
         elif not approved:
@@ -622,8 +650,56 @@ class AgentSession:
             if raw.get("error") == CONFIRM_ON_FLIPPER:
                 # Niets gebeurd: de pending staat nog (de mens bevestigt op de Flipper).
                 self._surfaced[known.pending_id] = known
+                with self._ext_lock:
+                    self._watch.add(known.pending_id)
                 return ConfirmOutcome(ConfirmStatus.ON_FLIPPER, known, raw)
             outcome = ConfirmOutcome(_confirm_status(raw), known, raw)
+        self._notes.append(self._confirm_note(outcome))
+        return outcome
+
+    def take_external(self) -> list[ConfirmOutcome]:
+        """Verwerk wat er buiten deze sessie met haar open bevestigingen gebeurde.
+
+        Uitgevoerd of afgewezen op de Flipper, gewist door een noodstop elders, of verlopen. Per
+        stuk een melding voor het model (zoals bij `confirm`); de frontend kan de uitkomsten
+        tonen. Eerst wordt de `PendingStore` opgeschoond, zodat een verlopen TTL ook meetelt.
+        """
+        if self._surfaced:
+            self.runner.ctx.pending.list()  # verlopen pendings melden (lui opgeschoond)
+        with self._ext_lock:
+            events, self._external = self._external, []
+        outcomes: list[ConfirmOutcome] = []
+        for event in events:
+            outcome = self._apply_resolution(event)
+            if outcome is not None:
+                outcomes.append(outcome)
+        return outcomes
+
+    def _on_resolved(self, event: PendingResolved) -> None:
+        # Willekeurige thread, soms onder de lock van de PendingStore: alleen bewaren.
+        with self._ext_lock:
+            if event.pending_id in self._watch:
+                self._watch.discard(event.pending_id)
+                self._external.append(event)
+
+    def _unwatch(self, pending_id: str) -> None:
+        with self._ext_lock:
+            self._watch.discard(pending_id)
+
+    def _apply_resolution(self, event: PendingResolved) -> ConfirmOutcome | None:
+        if event.resolution is Resolution.CONFIRMED:
+            return self.external_outcome(event.pending_id, approved=True, result=event.result)
+        if event.resolution is Resolution.REJECTED:
+            return self.external_outcome(event.pending_id, approved=False, result={"ok": True})
+        known = self._surfaced.pop(event.pending_id, None)
+        if known is None:
+            return None
+        status = (
+            ConfirmStatus.CLEARED
+            if event.resolution is Resolution.CLEARED
+            else ConfirmStatus.EXPIRED
+        )
+        outcome = ConfirmOutcome(status, known, None)
         self._notes.append(self._confirm_note(outcome))
         return outcome
 
@@ -636,6 +712,7 @@ class AgentSession:
         melding, net als `confirm`. None als deze sessie de pending niet (meer) kent.
         """
         known = self._surfaced.pop(pending_id, None)
+        self._unwatch(pending_id)
         if known is None:
             return None
         if not approved:
@@ -676,6 +753,8 @@ class AgentSession:
             return note(f"De gebruiker heeft afgewezen ({what}). Er is niets uitgevoerd.")
         if outcome.status is ConfirmStatus.EXPIRED:
             return note(f"Bevestiging verlopen of al gebruikt ({what}). Er is niets uitgevoerd.")
+        if outcome.status is ConfirmStatus.CLEARED:
+            return note(f"Bevestiging gewist door een noodstop ({what}). Er is niets uitgevoerd.")
         result = self._serialize(outcome.result or {})
         if outcome.status is ConfirmStatus.DENIED:
             return note(f"Bevestigd, maar alsnog geweigerd door de policy ({what}): {result}")
@@ -687,6 +766,9 @@ class AgentSession:
         """Noodstop op verzoek van de mens (`/stop`); het model hoort het in de volgende beurt."""
         raw = self.runner.call(self.frontend, EMERGENCY_STOP_TOOL, {})
         self._surfaced.clear()  # PendingStore is gewist; deze id's zijn waardeloos
+        with self._ext_lock:
+            self._watch.clear()
+            self._external.clear()
         self._notes.append(
             note(f"De gebruiker heeft een noodstop uitgevoerd: {self._serialize(raw)}")
         )
