@@ -16,6 +16,7 @@ Bronnen voor de uitvoerformaten:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from pitoolbox.core.scope import normalize_mac
@@ -69,100 +70,125 @@ def parse_iw_dev_info(text: str) -> dict[str, Any]:
                 break  # alleen het eerste interface-blok
             seen_iface = True
             info["iface"] = m.group(1)
-        elif m := re.match(r"^type (\S+)$", s):
-            info["mode"] = m.group(1)
-        elif m := re.match(r"^addr (\S+)$", s):
-            info["addr"] = m.group(1).upper()
-        elif m := re.match(r"^channel (\d+) \((\d+)(?:\.\d+)? MHz\)", s):
-            info["channel"] = int(m.group(1))
-            info["freq_mhz"] = int(m.group(2))
+        else:
+            _apply_iface_field(info, s)
     return info
+
+
+def _apply_iface_field(info: dict[str, Any], s: str) -> None:
+    """Eén (gestripte) regel binnen een interface-blok van `iw dev <if> info`."""
+    if m := re.match(r"^type (\S+)$", s):
+        info["mode"] = m.group(1)
+    elif m := re.match(r"^addr (\S+)$", s):
+        info["addr"] = m.group(1).upper()
+    elif m := re.match(r"^channel (\d+) \((\d+)(?:\.\d+)? MHz\)", s):
+        info["channel"] = int(m.group(1))
+        info["freq_mhz"] = int(m.group(2))
 
 
 _BSS_RE = re.compile(r"^BSS ([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
 
 
-def _security_from_ie(
-    has_rsn: bool, has_wpa: bool, privacy: bool, rsn_suites: str, wpa_suites: str
-) -> str:
-    if has_rsn:
-        if "802.1X" in rsn_suites:
+@dataclass
+class _BssFields:
+    """Wat `_parse_bss_block` uit de regels van één BSS-blok verzamelt."""
+
+    freq: int | None = None
+    signal: float | None = None
+    ssid: str = ""
+    ds_channel: int | None = None
+    ht_primary: int | None = None
+    privacy: bool = False
+    has_rsn: bool = False
+    has_wpa: bool = False
+    rsn_suites: str = ""
+    wpa_suites: str = ""
+
+
+def _security_from_ie(bss: _BssFields) -> str:
+    if bss.has_rsn:
+        if "802.1X" in bss.rsn_suites:
             return "wpa2-enterprise"
-        has_sae = "SAE" in rsn_suites
-        has_psk = "PSK" in rsn_suites
+        has_sae = "SAE" in bss.rsn_suites
+        has_psk = "PSK" in bss.rsn_suites
         if has_sae and has_psk:
             return "wpa2/wpa3"
         if has_sae:
             return "wpa3"
-        if "OWE" in rsn_suites:
+        if "OWE" in bss.rsn_suites:
             return "owe"
-        if has_wpa:
+        if bss.has_wpa:
             return "wpa/wpa2"
         return "wpa2"
-    if has_wpa:
-        return "wpa-enterprise" if "802.1X" in wpa_suites else "wpa"
-    return "wep" if privacy else "open"
+    if bss.has_wpa:
+        return "wpa-enterprise" if "802.1X" in bss.wpa_suites else "wpa"
+    return "wep" if bss.privacy else "open"
+
+
+def _apply_bss_field(bss: _BssFields, key: str, rest: str) -> None:
+    """Eén regel op het hoogste niveau van een BSS-blok: `\\t<key>: <rest>`."""
+    match key:
+        case "freq":
+            if m := re.match(r"^(\d+)(?:\.\d+)?$", rest):
+                bss.freq = int(m.group(1))
+        case "signal":
+            if m := re.match(r"^(-?\d+(?:\.\d+)?)\s*dBm$", rest):
+                bss.signal = float(m.group(1))
+        case "SSID":
+            bss.ssid = _unescape_ssid(rest)
+        case "DS Parameter set":
+            if m := re.match(r"^channel (\d+)$", rest):
+                bss.ds_channel = int(m.group(1))
+        case "capability":
+            bss.privacy = "Privacy" in rest.split("(")[0].split()
+        case "RSN":
+            bss.has_rsn = True
+        case "WPA":
+            bss.has_wpa = True
+
+
+def _apply_bss_section_line(bss: _BssFields, section: str, s: str) -> None:
+    """Eén regel binnen de sectie `section` (zonder inspringing en opsommingsteken)."""
+    if section == "HT operation" and (m := re.match(r"^primary channel: (\d+)$", s)):
+        bss.ht_primary = int(m.group(1))
+        return
+    if not s.startswith("Authentication suites:"):
+        return
+    suites = s.partition(":")[2]
+    if section == "RSN":
+        bss.rsn_suites = suites
+    elif section == "WPA":
+        bss.wpa_suites = suites
 
 
 def _parse_bss_block(bssid: str, associated: bool, lines: list[str]) -> dict[str, Any]:
-    freq: int | None = None
-    signal: float | None = None
-    ssid = ""
-    ds_channel: int | None = None
-    ht_primary: int | None = None
-    privacy = False
-    has_rsn = has_wpa = False
-    rsn_suites = wpa_suites = ""
+    bss = _BssFields()
     section = ""
-
     for line in lines:
         if not line.strip():
             continue
         top_level = line.startswith("\t") and not line.startswith(("\t\t", "\t "))
         if top_level:
             key, _, rest = line[1:].partition(":")
-            key = key.strip()
-            rest = rest.strip()
-            section = key
-            if key == "freq":
-                if m := re.match(r"^(\d+)(?:\.\d+)?$", rest):
-                    freq = int(m.group(1))
-            elif key == "signal":
-                if m := re.match(r"^(-?\d+(?:\.\d+)?)\s*dBm$", rest):
-                    signal = float(m.group(1))
-            elif key == "SSID":
-                ssid = _unescape_ssid(rest)
-            elif key == "DS Parameter set":
-                if m := re.match(r"^channel (\d+)$", rest):
-                    ds_channel = int(m.group(1))
-            elif key == "capability":
-                privacy = "Privacy" in rest.split("(")[0].split()
-            elif key == "RSN":
-                has_rsn = True
-            elif key == "WPA":
-                has_wpa = True
+            section = key.strip()
+            _apply_bss_field(bss, section, rest.strip())
             continue
         # Regel van een geneste sectie (begint met twee tabs of tab+spatie).
-        s = line.strip().lstrip("*").strip()
-        if section == "HT operation" and (m := re.match(r"^primary channel: (\d+)$", s)):
-            ht_primary = int(m.group(1))
-        elif s.startswith("Authentication suites:"):
-            suites = s.partition(":")[2]
-            if section == "RSN":
-                rsn_suites = suites
-            elif section == "WPA":
-                wpa_suites = suites
+        _apply_bss_section_line(bss, section, line.strip().lstrip("*").strip())
 
-    hidden = not ssid or all(c == "\x00" for c in ssid)
-    channel = ds_channel or ht_primary or (freq_to_channel(freq) if freq is not None else None)
+    freq = bss.freq
+    hidden = not bss.ssid or all(c == "\x00" for c in bss.ssid)
+    channel = (
+        bss.ds_channel or bss.ht_primary or (freq_to_channel(freq) if freq is not None else None)
+    )
     return {
         "bssid": bssid,
-        "ssid": "" if hidden else ssid,
+        "ssid": "" if hidden else bss.ssid,
         "hidden": hidden,
         "freq_mhz": freq,
         "channel": channel,
-        "signal_dbm": signal,
-        "security": _security_from_ie(has_rsn, has_wpa, privacy, rsn_suites, wpa_suites),
+        "signal_dbm": bss.signal,
+        "security": _security_from_ie(bss),
         "associated": associated,
     }
 
