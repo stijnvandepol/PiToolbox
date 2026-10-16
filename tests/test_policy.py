@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
 from pydantic import Field
 
-from pitoolbox.core.policy import Decision, PendingStore, Policy, Verdict
+from pitoolbox.core.policy import (
+    ClaimRefusal,
+    Decision,
+    PendingChange,
+    PendingEvent,
+    PendingStore,
+    PhysicalConfirmer,
+    Policy,
+    Verdict,
+)
 from pitoolbox.core.scope import Scope, ScopeStore
 from pitoolbox.core.tools.base import Risk, ScopeCheck, ToolArgs, ToolSpec
 
@@ -268,3 +278,146 @@ def test_allows_tool_follows_allowlist(fixed_scope: Scope) -> None:
     policy = Policy(ScopeStore.fixed(fixed_scope), allowlist=["status"])
     assert policy.allows_tool("status")
     assert not policy.allows_tool("ir_send")
+
+
+# --- fysieke bevestiger ("Flipper verplicht") ---------------------------------------------
+
+
+def test_physical_confirmer_blocks_chat_confirm_without_consuming() -> None:
+    store, _ = _store()
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    lease = store.attach_physical_confirmer("flipper-ui")
+    assert store.physical_confirmer == "flipper-ui"
+    claim = store.claim(pending.id, "mcp")
+    assert claim.action is None and claim.refusal is ClaimRefusal.PHYSICAL_REQUIRED
+    assert store.take(pending.id, "mcp") is None
+    # Ook de bridge-frontend zelf komt er zonder lease niet door.
+    assert store.claim(pending.id, "flipper-ui").refusal is ClaimRefusal.UNKNOWN
+    assert [p.id for p in store.list()] == [pending.id]
+    # Met de lease: een pending van een andere frontend, één keer.
+    taken = store.claim(pending.id, "flipper-ui", physical=lease)
+    assert taken.action is not None and taken.action.frontend == "mcp"
+    assert store.claim(pending.id, "flipper-ui", physical=lease).refusal is ClaimRefusal.UNKNOWN
+
+
+def test_other_frontend_still_sees_unknown_while_attached() -> None:
+    store, _ = _store()
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    store.attach_physical_confirmer("flipper-ui")
+    # Geen lek: een vreemde frontend hoort niet dat de pending bestaat.
+    assert store.claim(pending.id, "agent-cli").refusal is ClaimRefusal.UNKNOWN
+
+
+def test_detached_lease_is_stale_and_old_rule_returns() -> None:
+    store, _ = _store()
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    lease = store.attach_physical_confirmer("flipper-ui")
+    assert store.detach_physical_confirmer(lease) is True
+    assert store.detach_physical_confirmer(lease) is False
+    assert store.physical_confirmer is None
+    stale = store.claim(pending.id, "flipper-ui", physical=lease)
+    assert stale.action is None and stale.refusal is ClaimRefusal.STALE_CONFIRMER
+    assert store.discard(pending.id, "flipper-ui", physical=lease) is None
+    assert store.take(pending.id, "mcp") is not None
+
+
+def test_only_one_physical_confirmer_and_only_holder_detaches() -> None:
+    store, _ = _store()
+    lease = store.attach_physical_confirmer("flipper-ui")
+    with pytest.raises(RuntimeError):
+        store.attach_physical_confirmer("iemand-anders")
+    impostor = PhysicalConfirmer("flipper-ui")
+    assert store.detach_physical_confirmer(impostor) is False
+    assert store.physical_confirmer == "flipper-ui"
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    assert store.claim(pending.id, "x", physical=impostor).refusal is (ClaimRefusal.STALE_CONFIRMER)
+    assert store.detach_physical_confirmer(lease) is True
+
+
+def test_ttl_applies_to_physical_confirm() -> None:
+    store, clock = _store(ttl=60.0)
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    lease = store.attach_physical_confirmer("flipper-ui")
+    clock.now += 60.0
+    assert store.claim(pending.id, "flipper-ui", physical=lease).action is None
+
+
+def test_discard_by_creator_allowed_while_attached() -> None:
+    store, _ = _store()
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    store.attach_physical_confirmer("flipper-ui")
+    assert store.discard(pending.id, "agent-cli") is None  # niet van hem
+    assert store.discard(pending.id, "mcp") is not None  # afwijzen zendt niets
+    assert store.list() == []
+
+
+def test_listeners_see_every_change_in_order() -> None:
+    store, clock = _store(ttl=10.0)
+    events: list[tuple[PendingChange, str]] = []
+    unsubscribe = store.subscribe(lambda e: events.append((e.change, e.action.summary)))
+    a = store.create("tx", TargetArgs(), "mcp", "a")
+    b = store.create("tx", TargetArgs(), "mcp", "b")
+    c = store.create("tx", TargetArgs(), "mcp", "c")
+    store.take(a.id, "mcp")
+    store.discard(b.id, "mcp")
+    clock.now += 11
+    store.list()
+    store.create("tx", TargetArgs(), "mcp", "d")
+    store.clear()
+    unsubscribe()
+    store.create("tx", TargetArgs(), "mcp", "e")
+    assert events == [
+        (PendingChange.CREATED, "a"),
+        (PendingChange.CREATED, "b"),
+        (PendingChange.CREATED, "c"),
+        (PendingChange.CONFIRMED, "a"),
+        (PendingChange.REJECTED, "b"),
+        (PendingChange.EXPIRED, "c"),
+        (PendingChange.CREATED, "d"),
+        (PendingChange.CLEARED, "d"),
+    ]
+    assert c.id
+
+
+def test_failing_listener_does_not_break_store() -> None:
+    store, _ = _store()
+
+    def boom(event: PendingEvent) -> None:
+        raise RuntimeError("kapot")
+
+    store.subscribe(boom)
+    pending = store.create("tx", TargetArgs(), "mcp", "s")
+    assert store.take(pending.id, "mcp") is not None
+
+
+def test_race_chat_confirm_never_succeeds_while_attached() -> None:
+    """Stresstest: koppelen/loskoppelen en chat-bevestigingen door elkaar.
+
+    De luisteraar draait onder de store-lock, dus `physical_confirmer` is daar precies de
+    toestand op het moment van ophalen. Een chat-bevestiging mag alleen slagen zonder lease.
+    """
+    store = PendingStore(ttl_s=60.0)
+    seen: list[str | None] = []
+
+    def listener(event: PendingEvent) -> None:
+        if event.change is PendingChange.CONFIRMED:
+            seen.append(store.physical_confirmer)
+
+    store.subscribe(listener)
+    ids = [store.create("tx", TargetArgs(), "mcp", str(i)).id for i in range(400)]
+    stop = threading.Event()
+
+    def toggler() -> None:
+        while not stop.is_set():
+            lease = store.attach_physical_confirmer("flipper-ui")
+            store.detach_physical_confirmer(lease)
+
+    thread = threading.Thread(target=toggler)
+    thread.start()
+    try:
+        succeeded = sum(store.take(pid, "mcp") is not None for pid in ids for _ in range(3))
+    finally:
+        stop.set()
+        thread.join()
+    assert len(seen) == succeeded
+    assert all(state is None for state in seen)

@@ -12,7 +12,7 @@ from pydantic import Field
 
 from pitoolbox.core.audit import AuditLog
 from pitoolbox.core.errors import Aborted, DeviceNotConnected
-from pitoolbox.core.policy import Policy
+from pitoolbox.core.policy import PhysicalConfirmer, Policy
 from pitoolbox.core.scope import Scope, ScopeStore
 from pitoolbox.core.tools.base import (
     Registry,
@@ -22,7 +22,12 @@ from pitoolbox.core.tools.base import (
     ToolContext,
     ToolSpec,
 )
-from pitoolbox.core.tools.runner import CONFIRM_SPEC, CONFIRM_TOOL, ToolRunner
+from pitoolbox.core.tools.runner import (
+    CONFIRM_ON_FLIPPER,
+    CONFIRM_SPEC,
+    CONFIRM_TOOL,
+    ToolRunner,
+)
 
 IN_SCOPE = "AA:BB:CC:DD:EE:01"
 OUT_OF_SCOPE = "11:22:33:44:55:66"
@@ -414,3 +419,85 @@ def test_exactly_one_audit_line_per_call(fx: Fixture) -> None:
     recs = fx.audit()[before:]
     assert [r["decision"] for r in recs] == expected
     assert len(recs) == len(calls)
+
+
+# --- fysieke bevestiger ("Flipper verplicht") -----------------------------------------------
+
+
+def test_confirm_action_refused_while_flipper_attached(fx: Fixture) -> None:
+    first = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    refused = fx.runner.call("mcp", CONFIRM_TOOL, {"pending_id": first["pending_id"]})
+    assert refused["ok"] is False and refused["error"] == CONFIRM_ON_FLIPPER
+    assert "Flipper" in refused["message"]
+    assert fx.calls == []
+    assert [p.id for p in fx.ctx.pending.list()] == [first["pending_id"]]  # blijft staan
+    fx.runner.detach_physical_confirmer(lease, "test")
+    assert fx.runner.call("mcp", CONFIRM_TOOL, {"pending_id": first["pending_id"]})["ok"]
+    recs = fx.audit()
+    assert [r.get("event") or r["decision"] for r in recs] == [
+        "confirm",
+        "physical_confirmer",
+        "deny",
+        "physical_confirmer",
+        "confirmed",
+    ]
+    assert recs[2]["error"] == CONFIRM_ON_FLIPPER and recs[2]["pending_id"] == first["pending_id"]
+    assert [recs[1]["attached"], recs[3]["attached"]] == [True, False]
+
+
+def test_confirm_physical_executes_pending_of_any_frontend_once(fx: Fixture) -> None:
+    first = fx.runner.call("mcp-http:client", "transmit_tool", {"bssid": IN_SCOPE})
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    done = fx.runner.confirm_physical(lease, first["pending_id"])
+    assert done["ok"] is True and [c[0] for c in fx.calls] == ["transmit_tool"]
+    again = fx.runner.confirm_physical(lease, first["pending_id"])
+    assert again["error"] == "unknown_pending" and len(fx.calls) == 1
+    rec = next(r for r in fx.audit() if r.get("decision") == "confirmed")
+    assert rec["frontend"] == "flipper-ui" and rec["created_by"] == "mcp-http:client"
+    assert rec["confirmed_on"] == "flipper" and rec["confirmed"] is True
+
+
+def test_confirm_physical_rechecks_scope(tmp_path: Path, make_ctx: Any) -> None:
+    scope = Scope.model_validate({"wifi": [{"bssid": IN_SCOPE, "channel": 6}]})
+    ctx = make_ctx(tmp_path, scope)
+    fx = Fixture(tmp_path, ctx)
+    first = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})
+    ctx.scope_store = ScopeStore.fixed(Scope())
+    fx.runner.ctx.scope_store = ctx.scope_store
+    fx.runner.policy = Policy(ctx.scope_store)
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    denied = fx.runner.confirm_physical(lease, first["pending_id"])
+    assert denied["error"] == "denied" and fx.calls == []
+
+
+def test_confirm_physical_with_stale_lease_does_nothing(fx: Fixture) -> None:
+    """Een OK die nog onderweg was toen de app wegviel: niets uitvoeren, pending blijft."""
+    first = fx.runner.call("mcp", "transmit_tool", {"bssid": IN_SCOPE})
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    fx.runner.detach_physical_confirmer(lease, "link weg")
+    late = fx.runner.confirm_physical(lease, first["pending_id"])
+    assert late["error"] == "unknown_pending" and "gekoppeld" in late["message"]
+    assert fx.calls == [] and len(fx.ctx.pending.list()) == 1
+    assert fx.runner.reject_physical(lease, first["pending_id"])["error"] == "unknown_pending"
+    assert len(fx.ctx.pending.list()) == 1
+
+
+def test_reject_physical(fx: Fixture) -> None:
+    first = fx.runner.call("agent-cli", "transmit_tool", {"bssid": IN_SCOPE})
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    rejected = fx.runner.reject_physical(lease, first["pending_id"])
+    assert rejected["ok"] is True and rejected["result"]["rejected"] is True
+    assert fx.calls == [] and fx.ctx.pending.list() == []
+    rec = next(r for r in fx.audit() if r.get("decision") == "rejected")
+    assert rec["created_by"] == "agent-cli" and rec["confirmed_on"] == "flipper"
+
+
+def test_detach_with_foreign_lease_is_noop(fx: Fixture) -> None:
+    lease = fx.runner.attach_physical_confirmer("flipper-ui")
+    fx.runner.detach_physical_confirmer(PhysicalConfirmer("flipper-ui"), "nep")
+    assert fx.ctx.pending.physical_confirmer == "flipper-ui"
+    fx.runner.detach_physical_confirmer(lease, "echt")
+    fx.runner.detach_physical_confirmer(lease, "nog eens")  # idempotent, geen tweede regel
+    events = [r for r in fx.audit() if r.get("event") == "physical_confirmer"]
+    assert [e["attached"] for e in events] == [True, False]

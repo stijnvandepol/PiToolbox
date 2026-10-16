@@ -8,6 +8,10 @@ Resultaatvorm (altijd een dict):
     {"ok": false, "error": "<code>", "message": "..."}
     {"ok": false, "error": "confirmation_required", "pending_id": "...", "summary": "...",
      "expires_in_s": 60}
+
+Bevestigen: `confirm_action` met de pending_id, vanuit dezelfde frontend. Zolang de
+Flipper-app verbonden is (fysieke bevestiger gekoppeld, zie `PendingStore`), weigert dat voor
+elke frontend met `confirm_on_flipper` en bevestigt alleen de bridge via `confirm_physical`.
 """
 
 from __future__ import annotations
@@ -20,12 +24,35 @@ from pydantic import Field, ValidationError
 
 from pitoolbox.core.audit import AuditLog
 from pitoolbox.core.errors import ToolboxError
-from pitoolbox.core.policy import Policy, Verdict
+from pitoolbox.core.policy import (
+    ClaimRefusal,
+    PendingAction,
+    PhysicalConfirmer,
+    Policy,
+    Verdict,
+)
 from pitoolbox.core.tools.base import Registry, Risk, ToolArgs, ToolContext, ToolSpec
 
 log = logging.getLogger(__name__)
 
 CONFIRM_TOOL = "confirm_action"
+# Foutcode zolang de Flipper-app verbonden is ("Flipper verplicht"): de pending blijft staan.
+CONFIRM_ON_FLIPPER = "confirm_on_flipper"
+CONFIRM_ON_FLIPPER_MESSAGE = (
+    "Bevestig op de Flipper: zolang de PiToolbox-app op de Flipper verbonden is, kan een "
+    "transmit alleen met OK op de Flipper bevestigd worden (Back = nee). De actie staat nog "
+    "open tot de TTL verloopt."
+)
+# Waarde van `confirmed_on` in de audit bij een bevestiging met de fysieke lease.
+PHYSICAL_SOURCE = "flipper"
+
+
+def _physical_refusal(refusal: ClaimRefusal | None) -> dict[str, Any]:
+    if refusal is ClaimRefusal.STALE_CONFIRMER:
+        message = "de Flipper-app is niet (meer) als bevestiger gekoppeld"
+    else:
+        message = "pending onbekend, verlopen of al afgehandeld"
+    return {"ok": False, "error": "unknown_pending", "message": message}
 
 
 class ConfirmArgs(ToolArgs):
@@ -148,8 +175,24 @@ class ToolRunner:
         )
 
     def _confirm(self, t0: float, frontend: str, args: ConfirmArgs) -> dict[str, Any]:
-        pending = self.ctx.pending.take(args.pending_id, frontend)
-        if pending is None:
+        claim = self.ctx.pending.claim(args.pending_id, frontend)
+        if claim.action is None:
+            if claim.refusal is ClaimRefusal.PHYSICAL_REQUIRED:
+                # De pending blijft staan: de mens kan nog OK drukken op de Flipper.
+                return self._finish(
+                    t0,
+                    frontend,
+                    CONFIRM_TOOL,
+                    Risk.CONTROL,
+                    args.model_dump(),
+                    "deny",
+                    {
+                        "ok": False,
+                        "error": CONFIRM_ON_FLIPPER,
+                        "message": CONFIRM_ON_FLIPPER_MESSAGE,
+                    },
+                    pending_id=args.pending_id,
+                )
             return self._finish(
                 t0,
                 frontend,
@@ -163,6 +206,11 @@ class ToolRunner:
                     "message": "pending_id onbekend, verlopen of van een andere frontend",
                 },
             )
+        return self._run_confirmed(t0, frontend, claim.action)
+
+    def _run_confirmed(
+        self, t0: float, frontend: str, pending: PendingAction, **extra: Any
+    ) -> dict[str, Any]:
         spec = self.registry.get(pending.tool)
         if spec is None:  # registry is onveranderlijk na start; puur defensief
             raise RuntimeError(f"pending tool {pending.tool} niet meer geregistreerd")
@@ -180,6 +228,7 @@ class ToolRunner:
                 {"ok": False, "error": "denied", "message": decision.reason},
                 pending_id=pending.id,
                 confirmed=True,
+                **extra,
             )
         return self._finish(
             t0,
@@ -191,7 +240,91 @@ class ToolRunner:
             self._execute(spec, pending.args),
             pending_id=pending.id,
             confirmed=True,
+            **extra,
         )
+
+    # --- fysieke bevestiger (alleen voor de Flipper-bridge) -------------------------------
+
+    def attach_physical_confirmer(self, frontend: str) -> PhysicalConfirmer:
+        """Koppel de fysieke bevestiger (de Flipper-app is verbonden). Geaudit.
+
+        Vanaf nu weigert `confirm_action` uit elke frontend (`confirm_on_flipper`); alleen
+        `confirm_physical` met deze lease bevestigt nog.
+        """
+        lease = self.ctx.pending.attach_physical_confirmer(frontend)
+        self._audit_confirmer(lease.frontend, attached=True, reason="app verbonden")
+        return lease
+
+    def detach_physical_confirmer(self, lease: PhysicalConfirmer, reason: str) -> None:
+        """Loskoppelen (app weg, link weg, afsluiten). Geaudit; idempotent."""
+        if self.ctx.pending.detach_physical_confirmer(lease):
+            self._audit_confirmer(lease.frontend, attached=False, reason=reason)
+
+    def confirm_physical(self, lease: PhysicalConfirmer, pending_id: str) -> dict[str, Any]:
+        """Voer een pending uit na OK op de Flipper. Alleen de bridge roept dit aan, en alleen
+        op een geldig CONFIRM_ANSWER (handle van deze bridge, deze app-instance, eenmalig, TTL).
+
+        Werkt voor een pending van elke frontend; TTL, eenmalig gebruik en de nieuwe
+        scope-check gelden zoals altijd.
+        """
+        t0 = time.monotonic()
+        claim = self.ctx.pending.claim(pending_id, lease.frontend, physical=lease)
+        if claim.action is None:
+            return self._finish(
+                t0,
+                lease.frontend,
+                CONFIRM_TOOL,
+                Risk.CONTROL,
+                {"pending_id": pending_id},
+                "deny",
+                _physical_refusal(claim.refusal),
+                confirmed_on=PHYSICAL_SOURCE,
+            )
+        return self._run_confirmed(
+            t0,
+            lease.frontend,
+            claim.action,
+            confirmed_on=PHYSICAL_SOURCE,
+            created_by=claim.action.frontend,
+        )
+
+    def reject_physical(self, lease: PhysicalConfirmer, pending_id: str) -> dict[str, Any]:
+        """Back op de Flipper: de pending vervalt zonder iets uit te voeren. Geaudit."""
+        t0 = time.monotonic()
+        action = self.ctx.pending.discard(pending_id, lease.frontend, physical=lease)
+        if action is None:
+            return self._finish(
+                t0,
+                lease.frontend,
+                CONFIRM_TOOL,
+                Risk.CONTROL,
+                {"pending_id": pending_id},
+                "deny",
+                _physical_refusal(ClaimRefusal.UNKNOWN),
+                confirmed_on=PHYSICAL_SOURCE,
+            )
+        spec = self.registry.get(action.tool)
+        return self._finish(
+            t0,
+            lease.frontend,
+            action.tool,
+            spec.risk if spec else None,
+            action.args.model_dump(mode="json"),
+            "rejected",
+            {"ok": True, "result": {"rejected": True, "tool": action.tool}},
+            pending_id=action.id,
+            confirmed_on=PHYSICAL_SOURCE,
+            created_by=action.frontend,
+        )
+
+    def _audit_confirmer(self, frontend: str, *, attached: bool, reason: str) -> None:
+        try:
+            self.audit.write(
+                event="physical_confirmer", frontend=frontend, attached=attached, reason=reason
+            )
+        except OSError:
+            log.exception("audit-regel physical_confirmer kon niet worden geschreven")
+        log.info("fysieke bevestiger %s: %s (%s)", frontend, "aan" if attached else "uit", reason)
 
     def _execute(self, spec: ToolSpec, args: ToolArgs) -> dict[str, Any]:
         try:
