@@ -468,6 +468,12 @@ src/pitoolbox/
     devices/flipper.py        # FlipperDevice: USB of BLE achter één interface
     devices/_flipper_transport.py  # ByteTransport-protocol en USB-transport (pyserial)
     devices/_flipper_types.py # fouttypes, AppEvent en FlipperTiming
+    devices/_flipper_link.py  # FlipperDevice-basis: toestand, lock/abort, reconnect, keepalive
+    devices/_flipper_modes.py # CLI/RPC-modewissel
+    devices/_flipper_cli_actions.py  # Sub-GHz/NFC/RFID via de CLI
+    devices/_flipper_app_channel.py  # kanaal naar de RPC-gekoppelde PiToolbox-app
+    devices/_flipper_install.py      # FAP installeren (ui-install)
+    devices/_flipper_ir.py    # ir_send met handoff van de gekoppelde app
     devices/_flipper_ble.py   # BLE-transport (bleak), serial-service-UUID's, flow control
     devices/_ble_pairing.py   # BlueZ-agent (D-Bus) voor koppelen met PIN
     devices/_flipper_rpc/     # framing, RPC-client, gegenereerde protobuf (pb/)
