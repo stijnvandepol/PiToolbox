@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from pitoolbox.core.devices._ble_pairing import normalize_adapter
 
@@ -65,6 +65,21 @@ class Settings(BaseModel):
     # http://127.0.0.1:6274/oauth/callback) extra exacte redirect-URI's toestaan.
     extra_redirect_uris: list[str] = Field(default_factory=list)
 
+    # --- fase 4: LLM-provider voor de agent-loop ---
+    # Bewust GEEN standaardprovider of -model: zonder deze twee weigert de agent te starten.
+    # Validatie gebeurt in `pitoolbox.llm.config.LLMConfig.from_settings`, niet hier, zodat
+    # een fout in de LLM-instellingen de MCP-server niet raakt.
+    llm_provider: str | None = None  # "openai-compatible" | "anthropic" | "openai"
+    llm_model: str | None = None
+    # Verplicht voor openai-compatible (bijv. http://127.0.0.1:11434/v1); voor anthropic en
+    # openai standaard het officiële endpoint van die provider.
+    llm_base_url: str | None = None
+    # SecretStr: verschijnt als '**********' in repr/logs; alleen de HTTP-laag leest hem uit.
+    llm_api_key: SecretStr | None = None
+    llm_timeout_s: float = 60.0
+    llm_max_retries: int = 2  # alleen bij 429/5xx/time-out/verbindingsfout
+    llm_max_tokens: int = 4096
+
     @field_validator("flipper_ble_adapter")
     @classmethod
     def _check_ble_adapter(cls, value: str | None) -> str | None:
@@ -103,4 +118,13 @@ class Settings(BaseModel):
                 for u in os.environ.get("PITOOLBOX_EXTRA_REDIRECT_URIS", "").split(",")
                 if u.strip()
             ],
+            llm_provider=os.environ.get("PITOOLBOX_LLM_PROVIDER") or None,
+            llm_model=os.environ.get("PITOOLBOX_LLM_MODEL") or None,
+            llm_base_url=os.environ.get("PITOOLBOX_LLM_BASE_URL") or None,
+            llm_api_key=(
+                SecretStr(key) if (key := os.environ.get("PITOOLBOX_LLM_API_KEY")) else None
+            ),
+            llm_timeout_s=float(os.environ.get("PITOOLBOX_LLM_TIMEOUT_S", "60")),
+            llm_max_retries=int(os.environ.get("PITOOLBOX_LLM_MAX_RETRIES", "2")),
+            llm_max_tokens=int(os.environ.get("PITOOLBOX_LLM_MAX_TOKENS", "4096")),
         )
