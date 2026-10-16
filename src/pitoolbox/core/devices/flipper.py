@@ -19,10 +19,22 @@ via USB; in "auto"-modus schakelt het device daarvoor over naar USB als er een F
 Eén lock rond alle device-I/O. `status()` en `abort()` nemen die lock nooit blokkerend.
 `abort()` verhoogt een generatieteller; lopende CLI-lussen en RPC-wachttijden controleren die
 elke ~50 ms, sturen Ctrl+C (0x03, `cli_is_pipe_broken_or_is_etx_next_char`) en geven `Aborted`.
+
+**RPC-gekoppelde app (fase 4, de PiToolbox-FAP).** `start_rpc_app` start een FAP met
+`args:"RPC"` (nooit als de loader bezet is: een app van de gebruiker wordt nooit gesloten).
+Daarna leest elke RPC-lezer (een tool-request, `wait_event` of `poll_app_events`) ongevraagde
+frames via een event-hook: DataExchange-frames van die app en zijn `APP_CLOSED` gaan meteen
+naar de `AppEvent`-sink (de bridge), niet naar de begrensde eventqueue. `app_send` stuurt één
+DataExchange en wacht op de bevestiging (stop-and-wait). `poll_app_events` leest alleen als
+niemand anders op de lock wacht, zodat tool-calls voorgaan. `ir_send` heeft de loader nodig:
+staat de app open, dan sluit het device hem eerst en start hem daarna opnieuw (handoff; de app
+groet dan met een nieuwe instance). CLI-acties weigeren zolang de app open is (`loader_lock`
+en het verlaten van de RPC-sessie zouden hem sluiten).
 """
 
 from __future__ import annotations
 
+import calendar
 import logging
 import re
 import threading
@@ -31,7 +43,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 import serial
 from serial.tools import list_ports
@@ -69,6 +81,54 @@ class TransportError(DeviceError):
     """I/O-fout op de transportlaag (kabel eruit, poort weg). Reden voor één reconnect."""
 
     code = "transport_error"
+
+
+class DeviceBusy(DeviceError):
+    """Niet-blokkerende operatie: het device is bezet of iemand wacht er al op."""
+
+    code = "device_busy"
+
+
+class AppLocked(DeviceError):
+    """De loader is bezet (er is een app open); de Pi sluit nooit een app van de gebruiker."""
+
+    code = "app_locked"
+
+
+class AppNotRunning(DeviceError):
+    """De RPC-gekoppelde app draait niet (meer)."""
+
+    code = "app_not_running"
+
+
+class AppRejected(DeviceError):
+    """De app weigerde een DataExchange (`ERROR_APP_CMD_ERROR`: ongeldig of wachtrij vol)."""
+
+    code = "app_rejected"
+
+
+@dataclass(frozen=True)
+class AppEvent:
+    """Ongevraagd bericht van de RPC-gekoppelde app, voor de sink (de Flipper-bridge).
+
+    `data`: één DataExchange-payload. `closed`: de app sloot zelf (gebruiker of crash).
+    `lost`: de sessie of de link viel weg (de app sluit dan zelf; opnieuw starten kan).
+    """
+
+    kind: Literal["data", "closed", "lost"]
+    data: bytes = b""
+    reason: str = ""
+
+
+AppEventSink = Callable[[AppEvent], None]
+
+# Alleen een FAP op de SD-kaart onder /ext/apps, zonder "..": nooit een willekeurige app.
+_APP_PATH_RE = re.compile(r"^/ext/apps/(?:[A-Za-z0-9_-]+/)+[A-Za-z0-9_-]+\.fap$")
+_CLI_BLOCKED_BY_APP = (
+    "De PiToolbox-app is open op de Flipper; Sub-GHz/NFC/RFID via de CLI kunnen niet tegelijk "
+    "(de Flipper laat geen CLI-actie toe naast een open app). Sluit de app op de Flipper "
+    "(Back in het hoofdmenu) en probeer het opnieuw."
+)
 
 
 _CLI_NEEDS_USB = (
@@ -248,6 +308,9 @@ class FlipperTiming:
     app_event_timeout_s: float = 3.0
     app_exit_timeout_s: float = 3.0
     probe_attempts: int = 3
+    # Na APP_CLOSED kan app_lock_status nog even `locked` geven (spike, test 2).
+    loader_free_wait_s: float = 1.5
+    loader_poll_s: float = 0.25
 
 
 @dataclass
@@ -306,6 +369,12 @@ class FlipperDevice:
         self._lock = threading.Lock()  # alle device-I/O
         self._gen_lock = threading.Lock()
         self._abort_gen = 0
+        self._waiters = 0  # threads die op `_lock` wachten (onder `_gen_lock` geteld)
+        # RPC-gekoppelde app (PiToolbox-FAP): "off" | "active" | "suspended" (handoff in ir_send).
+        self._rpc_app_state: Literal["off", "active", "suspended"] = "off"
+        self._rpc_app_path: str | None = None
+        self._rpc_app_closing = False  # wij sluiten hem zelf: APP_CLOSED is voor wait_event
+        self._app_sink: AppEventSink | None = None
         # Onderstaande toestand wordt alleen onder `_lock` gewijzigd; status() leest ze zonder.
         self._transport: ByteTransport | None = None
         self._mode = "unknown"  # "cli" | "rpc" | "unknown"
@@ -348,6 +417,7 @@ class FlipperDevice:
             "busy": self._busy_op is not None,
             "operation": self._busy_op,
             "profile": profile.name if profile is not None else None,
+            "ui_app": self._rpc_app_state,
         }
 
     def connect(self) -> None:
@@ -569,30 +639,346 @@ class FlipperDevice:
             client = self._ensure_rpc(gen)
             cancel = self._cancel(gen)
             timeout = self._timing.rpc_timeout_s
+            # De Infrared-app heeft de loader nodig: de PiToolbox-app eerst sluiten (handoff).
+            handoff = self._suspend_rpc_app(client)
             try:
-                start = flipper_pb2.Main()
-                start.app_start_request.name = "Infrared"
-                start.app_start_request.args = "RPC"  # rpc_app.c vervangt dit door de context
-                client.request(start, timeout, cancel=cancel)
-                self._app_active = True
-                started = client.wait_event(
-                    lambda m: _is_app_state(m, application_pb2.APP_STARTED),
-                    self._timing.app_event_timeout_s,
-                    cancel=cancel,
-                )
-                if started is None:
-                    raise DeviceTimeout("Infrared-app meldde niet dat ze gestart is")
-                load = flipper_pb2.Main()
-                load.app_load_file_request.path = file
-                self._request_app_cmd(client, load, timeout, cancel, f"bestand {file} laden")
-                attempt.committed = True
-                self._press_button(client, button, timeout, cancel)
+                try:
+                    start = flipper_pb2.Main()
+                    start.app_start_request.name = "Infrared"
+                    start.app_start_request.args = "RPC"  # rpc_app.c vervangt dit door de context
+                    client.request(start, timeout, cancel=cancel)
+                    self._app_active = True
+                    started = client.wait_event(
+                        lambda m: _is_app_state(m, application_pb2.APP_STARTED),
+                        self._timing.app_event_timeout_s,
+                        cancel=cancel,
+                    )
+                    if started is None:
+                        raise DeviceTimeout("Infrared-app meldde niet dat ze gestart is")
+                    load = flipper_pb2.Main()
+                    load.app_load_file_request.path = file
+                    self._request_app_cmd(client, load, timeout, cancel, f"bestand {file} laden")
+                    attempt.committed = True
+                    self._press_button(client, button, timeout, cancel)
+                finally:
+                    if self._app_active:
+                        self._exit_app(client, timeout=self._timing.app_exit_timeout_s)
             finally:
-                if self._app_active:
-                    self._exit_app(client, timeout=self._timing.app_exit_timeout_s)
+                if handoff is not None:
+                    self._resume_rpc_app(client, handoff)
             return {"file": file, "button": button, "sent": True}
 
         return self._run("ir_send", op)
+
+    # --- RPC-gekoppelde app (PiToolbox-FAP, fase 4) -----------------------------------
+
+    def set_app_sink(self, sink: AppEventSink | None) -> None:
+        """Ontvanger van `AppEvent`s (de bridge). Wordt aangeroepen in de thread die het device
+        leest, met de device-lock vast: alleen iets in een eigen wachtrij zetten."""
+        self._app_sink = sink
+
+    @property
+    def rpc_app_state(self) -> str:
+        """'off', 'active' of 'suspended' (tijdelijk dicht voor ir_send). Zonder lock."""
+        return self._rpc_app_state
+
+    def app_lock_status(self, *, idle_only: bool = False) -> bool:
+        """Is de loader bezet (er is een app open)? `idle_only`: `DeviceBusy` als het device
+        bezet is, in plaats van te wachten. Verbindt zo nodig."""
+
+        def op(gen: int, attempt: _Attempt) -> bool:
+            return self._loader_locked(self._ensure_rpc(None))
+
+        return self._run_maybe_idle("app_lock_status", op, idle_only)
+
+    def start_rpc_app(self, path: str, *, lock_wait_s: float | None = None) -> None:
+        """Start de FAP op `path` met `args:"RPC"` en wacht op `APP_STARTED`.
+
+        Alleen als de loader vrij is (hoogstens `lock_wait_s`, standaard `loader_free_wait_s`,
+        wachten op een app die net sluit). Een open app van de gebruiker wordt nooit gesloten:
+        dan `AppLocked`.
+        """
+        if not _APP_PATH_RE.fullmatch(path) or ".." in path:
+            raise ValueError(f"ongeldig app-pad: {path!r}")
+
+        def op(gen: int, attempt: _Attempt) -> None:
+            if self._rpc_app_state != "off":
+                return
+            client = self._ensure_rpc(None)
+            if not self._wait_loader_free(client, lock_wait_s):
+                raise AppLocked("er is een andere app open op de Flipper; die sluit de Pi niet")
+            self._start_rpc_app(client, path)
+
+        self._run("start_rpc_app", op)
+
+    def exit_rpc_app(self) -> None:
+        """Sluit de gekoppelde app (bij afsluiten van de bridge). Best effort, nooit een fout."""
+        if self._rpc_app_state == "off":
+            return
+        try:
+            self._run_linked("exit_rpc_app", self._exit_rpc_app_locked)
+        except DeviceError as exc:
+            log.debug("app afsluiten: %s", exc)
+        finally:
+            with self._lock:
+                # "closed", niet "lost": bewust gesloten, dus niet opnieuw starten.
+                self._rpc_app_lost("afgesloten door de Pi", kind="closed")
+
+    def app_send(self, data: bytes, timeout_s: float = 3.0) -> None:
+        """Eén DataExchange naar de gekoppelde app; terug zodra de app hem bevestigt.
+
+        Raises:
+            AppRejected: de app weigerde (ongeldig of wachtrij vol); later opnieuw proberen.
+            AppNotRunning: de app draait niet (meer).
+            DeviceTimeout: geen bevestiging binnen `timeout_s`: de sessie geldt als dood.
+            DeviceError: verbinding weg.
+        """
+        if not 1 <= len(data) <= 512:
+            raise ValueError("DataExchange van 1..512 bytes")
+
+        def op() -> None:
+            client = self._client
+            if self._rpc_app_state != "active" or self._mode != "rpc" or client is None:
+                raise AppNotRunning("de PiToolbox-app draait niet")
+            main = flipper_pb2.Main()
+            main.app_data_exchange_request.data = data
+            try:
+                client.request(main, timeout_s)
+            except RpcError as exc:
+                if exc.status_name == "ERROR_APP_CMD_ERROR":
+                    raise AppRejected("de PiToolbox-app weigerde het bericht") from exc
+                if exc.status_name == "ERROR_APP_NOT_RUNNING":
+                    self._rpc_app_lost("app draait niet meer")
+                    raise AppNotRunning("de PiToolbox-app draait niet meer") from exc
+                raise
+
+        self._run_linked("app_send", op)
+
+    def poll_app_events(self, max_wait_s: float) -> bool:
+        """Lees ongevraagde frames (bridge-lezer). Alleen als niemand anders het device nodig
+        heeft: wacht er iemand op de lock, dan stopt het lezen binnen één leesslice.
+
+        Geeft False als er niets te lezen viel (geen RPC-sessie, of bezet): de aanroeper
+        wacht dan even voordat hij het opnieuw probeert.
+        """
+
+        def op() -> bool:
+            client = self._client
+            if self._mode != "rpc" or client is None:
+                return False
+            client.pump(max_wait_s, stop=lambda: self._waiters > 0)
+            return True
+
+        try:
+            return self._run_linked("poll_app_events", op, blocking=False, touch_io=False)
+        except DeviceBusy:
+            return False
+        except DeviceError as exc:
+            log.debug("poll_app_events: %s", exc)
+            return False
+
+    def take_small_file(
+        self, path: str, max_bytes: int, *, idle_only: bool = False
+    ) -> bytes | None:
+        """Lees een klein bestand en wis het meteen (verzoekbestand van de FAP, §8).
+
+        None als het niet bestaat of een map is. Groter dan `max_bytes`: gewist en None.
+        """
+
+        def op(gen: int, attempt: _Attempt) -> bytes | None:
+            client = self._ensure_rpc(None)
+            timeout = self._timing.rpc_timeout_s
+            stat = flipper_pb2.Main()
+            stat.storage_stat_request.path = path
+            try:
+                frames = client.request(stat, timeout)
+            except RpcError as exc:
+                if exc.status_name == "ERROR_STORAGE_NOT_EXIST":
+                    return None
+                raise
+            info = frames[0].storage_stat_response.file
+            if info.type == storage_pb2.File.DIR:
+                return None
+            data: bytes | None = None
+            if info.size <= max_bytes:
+                read = flipper_pb2.Main()
+                read.storage_read_request.path = path
+                chunks = client.request(read, timeout)
+                data = b"".join(
+                    bytes(c.storage_read_response.file.data)
+                    for c in chunks
+                    if c.WhichOneof("content") == "storage_read_response"
+                )[: max_bytes + 1]
+            delete = flipper_pb2.Main()
+            delete.storage_delete_request.path = path
+            client.request(delete, timeout)
+            return data if data is not None and len(data) <= max_bytes else None
+
+        return self._run_maybe_idle("take_small_file", op, idle_only)
+
+    def rtc_timestamp(self) -> int:
+        """Klok van de Flipper als Unix-tijd, zoals `datetime_datetime_to_timestamp` rekent
+        (de RTC is "UTC" zonder zones; calendar.timegm doet hetzelfde)."""
+
+        def op(gen: int, attempt: _Attempt) -> int:
+            client = self._ensure_rpc(None)
+            main = flipper_pb2.Main()
+            main.system_get_datetime_request.SetInParent()
+            frames = client.request(main, self._timing.rpc_timeout_s)
+            dt = frames[0].system_get_datetime_response.datetime
+            return calendar.timegm(
+                (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, 0, 0, 0)
+            )
+
+        return self._run("rtc_timestamp", op)
+
+    def _run_maybe_idle(self, name: str, op: Callable[[int, _Attempt], T], idle_only: bool) -> T:
+        if not idle_only:
+            return self._run(name, op)
+        # Eerst kijken zonder te wachten; daarna gewoon via _run (de lock is dan net vrij).
+        if self._waiters or self._busy_op is not None:
+            raise DeviceBusy(f"Flipper is bezet; {name} overgeslagen")
+        return self._run(name, op)
+
+    # --- intern: gekoppelde app ---------------------------------------------------------
+
+    def _emit_app(self, event: AppEvent) -> None:
+        sink = self._app_sink
+        if sink is None:
+            return
+        try:
+            sink(event)
+        except Exception:
+            log.exception("app-sink faalde")
+
+    def _rpc_app_lost(self, reason: str, kind: Literal["closed", "lost"] = "lost") -> None:
+        """De gekoppelde app is weg (ook als hij voor een handoff dicht was)."""
+        if self._rpc_app_state == "off":
+            return
+        self._rpc_app_state = "off"
+        self._rpc_app_closing = False
+        log.info("PiToolbox-app %s: %s", "gesloten" if kind == "closed" else "kwijt", reason)
+        self._emit_app(AppEvent(kind, reason=reason))
+
+    def _on_unsolicited(self, frame: Main) -> bool:
+        """Event-hook van de RpcClient (draait in de lezende thread, met de lock)."""
+        content = frame.WhichOneof("content")
+        if content == "app_data_exchange_request" and frame.command_id == 0:
+            if self._rpc_app_state == "active":
+                self._emit_app(AppEvent("data", data=bytes(frame.app_data_exchange_request.data)))
+            else:
+                log.debug("DataExchange zonder gekoppelde app genegeerd")
+            return True
+        if (
+            content == "app_state_response"
+            and frame.app_state_response.state == application_pb2.APP_CLOSED
+            and self._rpc_app_state == "active"
+            and not self._rpc_app_closing
+            and not self._app_active
+        ):
+            self._rpc_app_lost("de app sloot zichzelf", kind="closed")
+            return True
+        return False
+
+    def _loader_locked(self, client: RpcClient) -> bool:
+        main = flipper_pb2.Main()
+        main.app_lock_status_request.SetInParent()
+        frames = client.request(main, self._timing.rpc_timeout_s)
+        return bool(frames[0].app_lock_status_response.locked)
+
+    def _wait_loader_free(self, client: RpcClient, wait_s: float | None = None) -> bool:
+        wait = self._timing.loader_free_wait_s if wait_s is None else wait_s
+        deadline = time.monotonic() + wait
+        while self._loader_locked(client):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._timing.loader_poll_s)
+        return True
+
+    def _start_rpc_app(self, client: RpcClient, path: str) -> None:
+        """Onder de lock, loader vrij. Zet de toestand vóór de start op "active", zodat een
+        HELLO die direct na APP_STARTED binnenkomt al bij de sink terechtkomt."""
+        self._rpc_app_path = path
+        self._rpc_app_state = "active"
+        self._rpc_app_closing = False
+        try:
+            start = flipper_pb2.Main()
+            start.app_start_request.name = path
+            start.app_start_request.args = "RPC"  # rpc_app.c vervangt dit door "RPC %08lX"
+            try:
+                client.request(start, self._timing.rpc_timeout_s)
+            except RpcError as exc:
+                if exc.status_name == "ERROR_APP_SYSTEM_LOCKED":
+                    raise AppLocked("de gebruiker opende net een andere app") from exc
+                raise
+            started = client.wait_event(
+                lambda m: _is_app_state(m, application_pb2.APP_STARTED),
+                self._timing.app_event_timeout_s,
+            )
+            if started is None:
+                # Wij startten hem met "RPC", dus mogen we hem ook weer sluiten (anders blijft de
+                # loader bezet door een app die niemand bedient). Geen DeviceTimeout: dat zou bij
+                # BLE de hele link sluiten.
+                self._rpc_app_state = "off"
+                self._exit_app(client, timeout=self._timing.app_exit_timeout_s)
+                raise DeviceError("PiToolbox-app meldde niet dat ze gestart is")
+        except BaseException:
+            self._rpc_app_state = "off"
+            raise
+
+    def _exit_rpc_app_locked(self) -> None:
+        client = self._client
+        if self._rpc_app_state != "active" or client is None:
+            return
+        self._rpc_app_closing = True
+        try:
+            main = flipper_pb2.Main()
+            main.app_exit_request.SetInParent()
+            client.request(main, self._timing.app_exit_timeout_s)
+            client.wait_event(
+                lambda m: _is_app_state(m, application_pb2.APP_CLOSED),
+                self._timing.app_exit_timeout_s,
+            )
+        finally:
+            self._rpc_app_closing = False
+
+    def _suspend_rpc_app(self, client: RpcClient) -> str | None:
+        """Handoff vóór ir_send: sluit de gekoppelde app en wacht tot de loader vrij is.
+
+        Geeft het pad terug om hem daarna opnieuw te starten (of None als er geen app open
+        was). De sink hoort hier niets van; mislukt de herstart, dan volgt `lost`.
+        """
+        path = self._rpc_app_path
+        if self._rpc_app_state != "active" or path is None:
+            return None
+        log.info("PiToolbox-app tijdelijk sluiten voor ir_send (handoff)")
+        try:
+            self._exit_rpc_app_locked()
+        except RpcError as exc:
+            if exc.status_name != "ERROR_APP_NOT_RUNNING":
+                self._rpc_app_lost("sluiten voor ir_send mislukte")
+                raise DeviceError(
+                    f"PiToolbox-app sluit niet; ir_send niet uitgevoerd: {exc}"
+                ) from exc
+        self._rpc_app_state = "suspended"
+        if not self._wait_loader_free(client):
+            self._rpc_app_lost("loader bleef bezet na sluiten")
+            raise DeviceError("de Flipper-loader bleef bezet; ir_send niet uitgevoerd")
+        return path
+
+    def _resume_rpc_app(self, client: RpcClient, path: str) -> None:
+        """Na ir_send: de app opnieuw starten. Nooit een fout; mislukt het, dan `lost`."""
+        if self._rpc_app_state != "suspended" or self._client is not client:
+            self._rpc_app_lost("verbinding wisselde tijdens ir_send")
+            return
+        try:
+            if not self._wait_loader_free(client):
+                self._rpc_app_lost("loader bezet na ir_send; app niet opnieuw gestart")
+                return
+            self._start_rpc_app(client, path)
+        except DeviceError as exc:
+            self._rpc_app_state = "suspended"  # zodat _rpc_app_lost hem echt meldt
+            self._rpc_app_lost(f"opnieuw starten na ir_send mislukte: {exc}")
 
     # --- operatiekader ----------------------------------------------------------------
 
@@ -604,19 +990,68 @@ class FlipperDevice:
         return lambda: self._abort_gen != gen
 
     @contextmanager
-    def _operation(self, name: str) -> Iterator[int]:
+    def _operation(
+        self,
+        name: str,
+        *,
+        abortable: bool = True,
+        blocking: bool = True,
+        touch_io: bool = True,
+    ) -> Iterator[int]:
+        """`abortable=False`: een abort() (noodstop) breekt deze operatie niet af (berichten
+        van de bridge). `blocking=False`: alleen als niemand de lock heeft of erop wacht, anders
+        `DeviceBusy`. `touch_io=False`: telt niet als verkeer voor de keepalive (alleen lezen)."""
         # De generatie wordt vóór het wachten op de lock vastgelegd: een abort() terwijl deze
         # call nog in de rij staat, breekt hem dus ook af.
         gen = self._abort_gen
-        with self._lock:
+        if blocking:
+            with self._gen_lock:
+                self._waiters += 1
+            try:
+                self._lock.acquire()
+            finally:
+                with self._gen_lock:
+                    self._waiters -= 1
+        elif self._waiters or not self._lock.acquire(blocking=False):
+            raise DeviceBusy(f"Flipper is bezet; {name} overgeslagen")
+        try:
             self._busy_op = name
             try:
-                if self._abort_gen != gen:
+                if abortable and self._abort_gen != gen:
                     raise Aborted("afgebroken voordat de Flipper-actie begon")
                 yield gen
             finally:
                 self._busy_op = None
-                self._last_io = time.monotonic()
+                if touch_io:
+                    self._last_io = time.monotonic()
+        finally:
+            self._lock.release()
+
+    def _run_linked(
+        self,
+        name: str,
+        op: Callable[[], T],
+        *,
+        blocking: bool = True,
+        touch_io: bool = True,
+    ) -> T:
+        """Voor de RPC-gekoppelde app: niet afbreekbaar, geen (her)verbinding. Valt de link weg,
+        dan is de app-sessie toch voorbij (de Flipper sluit de app)."""
+        with self._operation(name, abortable=False, blocking=blocking, touch_io=touch_io):
+            transport = self._transport
+            if transport is None or not transport.is_open:
+                self._rpc_app_lost("verbinding met de Flipper weg")
+                raise DeviceNotConnected("Flipper is niet verbonden")
+            try:
+                return op()
+            except TransportError as exc:
+                self._drop_connection()
+                raise DeviceError(
+                    f"verbinding met de Flipper viel weg tijdens {name}: {exc}"
+                ) from exc
+            except (FrameError, DeviceTimeout):
+                self._protocol_failure()
+                raise
 
     def _run(self, name: str, op: Callable[[int, _Attempt], T]) -> T:
         """Voer `op` uit onder de lock, met één reconnect bij een transportfout."""
@@ -662,6 +1097,8 @@ class FlipperDevice:
         self._mode = "unknown"
         self._client = None
         self._app_active = False
+        # Zonder RPC-sessie is de gekoppelde app ook weg (de firmware stuurt hem SessionClose).
+        self._rpc_app_lost("RPC-sessie met de Flipper weg")
 
     def _tx(self) -> ByteTransport:
         if self._transport is None:
@@ -841,6 +1278,8 @@ class FlipperDevice:
 
     def _require_cli_transport(self) -> None:
         """CLI-acties: op een transport zonder CLI (BLE) eerst naar USB wisselen of weigeren."""
+        if self._rpc_app_state != "off":
+            raise AppLocked(_CLI_BLOCKED_BY_APP)
         if not self._tx().starts_in_rpc:
             return
         if self._usb_probe is not None and self._usb_probe():
@@ -851,10 +1290,15 @@ class FlipperDevice:
                 return
         raise UnsupportedTransport(_CLI_NEEDS_USB)
 
+    def _new_client(self, transport: ByteTransport) -> RpcClient:
+        return RpcClient(
+            transport, read_slice_s=self._timing.read_slice_s, event_hook=self._on_unsolicited
+        )
+
     def _enter_native_rpc(self) -> RpcClient:
         """Transport zonder CLI: de RPC-sessie loopt al, er is alleen een client nodig."""
         transport = self._tx()
-        client = RpcClient(transport, read_slice_s=self._timing.read_slice_s)
+        client = self._new_client(transport)
         self._client = client
         self._mode = "rpc"
         self._maybe_rpc = False
@@ -864,6 +1308,8 @@ class FlipperDevice:
     def _ensure_cli(self, gen: int | None) -> None:
         if self._tx().starts_in_rpc:
             raise UnsupportedTransport(_CLI_NEEDS_USB)
+        if self._rpc_app_state != "off":
+            raise AppLocked(_CLI_BLOCKED_BY_APP)
         if self._mode == "cli":
             return
         if self._mode == "rpc" and self._client is not None and self._leave_rpc(gen):
@@ -915,7 +1361,7 @@ class FlipperDevice:
         transport.reset_input()
         timing = self._timing
         for _ in range(timing.probe_attempts):
-            client = RpcClient(transport, read_slice_s=timing.read_slice_s)
+            client = self._new_client(transport)
             ping = flipper_pb2.Main()
             ping.system_ping_request.data = b"pitoolbox"
             try:

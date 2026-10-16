@@ -33,6 +33,7 @@ from typing import Any
 from pitoolbox.core.devices._flipper_rpc.framing import FrameDecoder, encode_frame
 from pitoolbox.core.devices._flipper_rpc.pb import application_pb2, flipper_pb2, storage_pb2
 from pitoolbox.core.devices.flipper import FlipperTiming, TransportError
+from pitoolbox.frontends.flipper_ui import protocol as proto
 
 FIXTURES = Path(__file__).parent / "fixtures" / "flipper"
 ETX_MARKER = "---ETX---"
@@ -113,6 +114,12 @@ class FakeFlipperTransport:
         self.nfc_script = nfc_script
         self.subghz_ranges = subghz_ranges
         self.start_in_rpc = start_in_rpc
+        # --- PiToolbox-FAP (fase 4) ---
+        self.fap_path = "/ext/apps/Tools/pitoolbox_ui.fap"
+        self.fap: FakeFap | None = None  # geïnstalleerde app (attach_fap)
+        self.user_app_open = False  # een app van de gebruiker houdt de loader bezet
+        self.rtc_epoch: int | None = None  # None = time.time()
+        self.app_starts: list[str] = []
         # --- schakelaars voor tests ---
         self.responsive = True
         self.nfc_app_running = False
@@ -124,6 +131,7 @@ class FakeFlipperTransport:
         self.ignore_etx = False  # lopend CLI-commando negeert Ctrl+C
         self.fail_on_rpc_kind: str | None = None  # TransportError bij dit RPC-berichttype (1x)
         self.extra_frames: list[Any] = []  # komen vóór het eerstvolgende antwoord
+        self.drop_app_started = False  # app start wel, maar meldt APP_STARTED niet
         # --- waarnemingen ---
         self.opens = 0
         self.closes = 0
@@ -143,6 +151,7 @@ class FakeFlipperTransport:
         self._running: tuple[str, str] | None = None  # (commando, uitvoer na Ctrl+C)
         self._decoder = FrameDecoder()
         self._app_running = False
+        self._running_app: str | None = None  # "Infrared" of het FAP-pad
         self._loaded_file: str | None = None
         self._error_text = ""
 
@@ -171,6 +180,7 @@ class FakeFlipperTransport:
             if self._open:
                 self.closes += 1
             self._open = False
+            self._session_closed()
 
     def write(self, data: bytes) -> None:
         with self._cond:
@@ -233,6 +243,50 @@ class FakeFlipperTransport:
     def queue_extra_frame(self, main: Any) -> None:
         self.extra_frames.append(main)
 
+    # --- PiToolbox-FAP ----------------------------------------------------------------
+
+    def attach_fap(self, fap: FakeFap) -> FakeFap:
+        """Installeer de nagebootste FAP op `fap_path`."""
+        fap.transport = self
+        self.fap = fap
+        return fap
+
+    @property
+    def fap_running(self) -> bool:
+        return self._running_app == self.fap_path and self._app_running
+
+    def inject_app_data(self, data: bytes) -> None:
+        """De FAP stuurt een DataExchange naar de Pi (ongevraagd frame, command_id 0)."""
+        with self._cond:
+            if not self._open or not self.fap_running:
+                return
+            frame = flipper_pb2.Main()
+            frame.command_id = 0
+            frame.app_data_exchange_request.data = data
+            self._emit(self._frame(frame))
+
+    def fap_exits(self) -> None:
+        """De gebruiker sluit de FAP zelf (Back in het hoofdmenu): APP_CLOSED, loader vrij."""
+        with self._cond:
+            if not self.fap_running:
+                return
+            self._stop_app()
+            if self._open:
+                self._emit(self._frame(self._state_event(application_pb2.APP_CLOSED)))
+
+    def _stop_app(self) -> None:
+        was_fap = self.fap_running
+        self._app_running = False
+        self._running_app = None
+        self._loaded_file = None
+        if was_fap and self.fap is not None:
+            self.fap.on_stopped()
+
+    def _session_closed(self) -> None:
+        # SessionClose: een RPC-gekoppelde app sluit zichzelf (pitoolbox_ui.c).
+        if self._running_app is not None:
+            self._stop_app()
+
     # --- intern -----------------------------------------------------------------------
 
     def _reset_session(self) -> None:
@@ -242,6 +296,7 @@ class FakeFlipperTransport:
         self._line.clear()
         self._running = None
         self._decoder = FrameDecoder()
+        self._session_closed()
         self._app_running = False
         self._loaded_file = None
 
@@ -478,18 +533,59 @@ class FakeFlipperTransport:
 
     def _rpc_app_start_request(self, request: Any) -> None:
         name = request.app_start_request.name
-        if self._app_running:
+        self.app_starts.append(name)
+        is_fap = self.fap is not None and name == self.fap_path
+        if self._app_running or self.user_app_open:
             self._send(request, self._error(request, flipper_pb2.ERROR_APP_SYSTEM_LOCKED))
-        elif name != "Infrared" or request.app_start_request.args != "RPC":
+        elif (name != "Infrared" and not is_fap) or request.app_start_request.args != "RPC":
             self._send(request, self._error(request, flipper_pb2.ERROR_INVALID_PARAMETERS))
         else:
             self._app_running = True
+            self._running_app = name
             self._loaded_file = None
             event = self._state_event(application_pb2.APP_STARTED)
-            if self.event_before_response:
+            if self.drop_app_started:
+                self._send(request, self._ok(request))
+            elif self.event_before_response:
                 self._send(request, event, self._ok(request))
             else:
                 self._send(request, self._ok(request), event)
+            if is_fap and self.fap is not None:
+                self.fap.on_started()  # stuurt HELLO (pitoolbox_ui.c: na send_started)
+
+    def _rpc_app_lock_status_request(self, request: Any) -> None:
+        reply = self._reply(request)
+        reply.app_lock_status_response.locked = self._app_running or self.user_app_open
+        self._send(request, reply)
+
+    def _rpc_app_data_exchange_request(self, request: Any) -> None:
+        if not self.fap_running or self.fap is None:
+            self._send(request, self._error(request, flipper_pb2.ERROR_APP_NOT_RUNNING))
+            return
+        verdict = self.fap.on_data(bytes(request.app_data_exchange_request.data))
+        if verdict == "hang":
+            return  # nooit een confirm: de Pi krijgt een time-out
+        if verdict == "ok":
+            self._send(request, self._ok(request))
+        else:
+            self._send(request, self._error(request, flipper_pb2.ERROR_APP_CMD_ERROR))
+
+    def _rpc_storage_delete_request(self, request: Any) -> None:
+        path = request.storage_delete_request.path
+        if self.files.pop(path, None) is None:
+            self._send(request, self._error(request, flipper_pb2.ERROR_STORAGE_NOT_EXIST))
+        else:
+            self._send(request, self._ok(request))
+
+    def _rpc_system_get_datetime_request(self, request: Any) -> None:
+        epoch = self.rtc_epoch if self.rtc_epoch is not None else int(time.time())
+        moment = time.gmtime(epoch)
+        reply = self._reply(request)
+        dt = reply.system_get_datetime_response.datetime
+        dt.year, dt.month, dt.day = moment.tm_year, moment.tm_mon, moment.tm_mday
+        dt.hour, dt.minute, dt.second = moment.tm_hour, moment.tm_min, moment.tm_sec
+        dt.weekday = moment.tm_wday + 1
+        self._send(request, reply)
 
     def _rpc_app_load_file_request(self, request: Any) -> None:
         path = request.app_load_file_request.path
@@ -538,8 +634,7 @@ class FakeFlipperTransport:
         if not self._app_running:
             self._send(request, self._error(request, flipper_pb2.ERROR_APP_NOT_RUNNING))
             return
-        self._app_running = False
-        self._loaded_file = None
+        self._stop_app()
         self._send(request, self._ok(request), self._state_event(application_pb2.APP_CLOSED))
 
     def _rpc_stop_session(self, request: Any) -> None:
@@ -547,8 +642,155 @@ class FakeFlipperTransport:
         self._mode = "cli"
         self._shell = "main"
         self._line.clear()
+        self._session_closed()
         self._app_running = False
         self._emit(MAIN_PROMPT)
+
+
+class FakeFap:
+    """Nagebootste `pitoolbox_ui` (FAP-kant van docs/fase4-protocol.md) voor de bridge-tests.
+
+    Gedraagt zich als `pitoolbox_ui.c`: groet na de start met HELLO (nieuwe willekeurige
+    instance per start), bevestigt elke DataExchange direct (OK, of ERROR_APP_CMD_ERROR bij
+    `reject_next`), en neemt Pi-berichten op met hun aankomsttijd. `hang` = nooit bevestigen.
+    """
+
+    def __init__(self, *, auto_hello: bool = True, max_rx: int = proto.MAX_MSG) -> None:
+        self.transport: FakeFlipperTransport | None = None
+        self.auto_hello = auto_hello
+        self.max_rx = max_rx
+        self.instances: list[int] = []  # vaste instances voor de volgende starts (anders random)
+        self.instance = 0
+        self.running = False
+        self.starts = 0
+        self.stops = 0
+        self.reject_next = 0
+        self.hang = False
+        self.received: list[proto.PiMessage] = []
+        self.received_at: list[float] = []
+        self.invalid = 0
+        self._seq = proto.SeqCounter()
+        self._cond = threading.Condition()
+
+    # --- door de transport aangeroepen (met de transport-lock) ---
+
+    def on_started(self) -> None:
+        import secrets
+
+        self.running = True
+        self.starts += 1
+        if self.instances:
+            self.instance = self.instances.pop(0)
+        else:
+            self.instance = secrets.randbelow(2**32 - 1) + 1
+        if self.auto_hello:
+            self.send(self.hello())
+
+    def on_stopped(self) -> None:
+        self.running = False
+        self.stops += 1
+        with self._cond:
+            self._cond.notify_all()
+
+    def on_data(self, data: bytes) -> str:
+        if self.hang:
+            return "hang"
+        if self.reject_next:
+            self.reject_next -= 1
+            return "reject"
+        try:
+            msg = proto.decode_from_pi(data)
+        except proto.ProtocolError:
+            self.invalid += 1
+            return "reject"
+        with self._cond:
+            self.received.append(msg)
+            self.received_at.append(time.monotonic())
+            self._cond.notify_all()
+        return "ok"
+
+    # --- testkant ---
+
+    def next_seq(self) -> int:
+        return self._seq.next()
+
+    def hello(self, instance: int | None = None) -> proto.Hello:
+        return proto.Hello(
+            seq=self.next_seq(),
+            app_major=1,
+            app_minor=0,
+            proto_max=1,
+            instance=instance or self.instance,
+            max_rx=self.max_rx,
+        )
+
+    def send(self, msg: proto.Message) -> None:
+        self.send_raw(proto.encode(msg))
+
+    def send_raw(self, data: bytes) -> None:
+        assert self.transport is not None
+        self.transport.inject_app_data(data)
+
+    def send_burst(self, msgs: list[proto.Message]) -> None:
+        """Alle berichten in één keer in de stroom (de Pi leest ze in één slag)."""
+        assert self.transport is not None
+        with self.transport._cond:
+            for msg in msgs:
+                self.transport.inject_app_data(proto.encode(msg))
+
+    def action(self, kind: proto.ActionKind, action_id: int) -> int:
+        seq = self.next_seq()
+        self.send(proto.Action(seq=seq, kind=kind, action_id=action_id))
+        return seq
+
+    def quick(self, action: proto.QuickAction) -> int:
+        return self.action(proto.ActionKind.QUICK, int(action))
+
+    def answer(self, handle: int, approve: bool) -> int:
+        seq = self.next_seq()
+        self.send(proto.ConfirmAnswer(seq=seq, handle=handle, approve=approve))
+        return seq
+
+    def of_type(self, cls: type[Any]) -> list[Any]:
+        with self._cond:
+            return [m for m in self.received if isinstance(m, cls)]
+
+    def wait_for(self, cls: type[Any], predicate: Any = None, timeout: float = 3.0) -> Any:
+        """Eerste ontvangen bericht van type `cls` (dat aan `predicate` voldoet)."""
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            while True:
+                for msg in self.received:
+                    if isinstance(msg, cls) and (predicate is None or predicate(msg)):
+                        return msg
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        f"geen {cls.__name__} ontvangen; wel: "
+                        f"{[type(m).__name__ for m in self.received]}"
+                    )
+                self._cond.wait(remaining)
+
+    def result_text(self, ref: int, timeout: float = 3.0) -> str:
+        """Wacht op een volledig RESULT voor `ref` en zet de delen weer in elkaar."""
+        reassembler = proto.Reassembler()
+        deadline = time.monotonic() + timeout
+        seen = 0
+        while True:
+            chunks = [m for m in self.of_type(proto.ResultChunk) if m.ref == ref]
+            for chunk in chunks[seen:]:
+                text = reassembler.feed(chunk)
+                if text is not None:
+                    return text
+            seen = len(chunks)
+            if time.monotonic() > deadline:
+                raise AssertionError(f"geen volledig RESULT voor ref {ref}")
+            time.sleep(0.005)
+
+    def clear(self) -> None:
+        with self._cond:
+            self.received.clear()
+            self.received_at.clear()
 
 
 # --- BLE: GATT-kant van een Flipper + fake bleak --------------------------------------------

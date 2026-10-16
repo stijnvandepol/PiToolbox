@@ -9,6 +9,11 @@ Aanpak afgeleid van busse/flipperzero-mcp (MIT), `protobuf_rpc.py` (framing, com
   laat antwoord op een eerdere timeout) gaan naar een eventqueue; `wait_event()` haalt ze
   daar weer uit. Volgorde van aankomst maakt dus niet uit (event vóór of na het antwoord).
 * Een niet-OK `command_status` wordt `RpcError` met de statusnaam uit flipper.proto.
+* `event_hook` (optioneel) ziet elk ongevraagd frame vóór de eventqueue en mag het
+  overnemen (True). Zo komen DataExchange-frames van de PiToolbox-app meteen bij de bridge,
+  ook als ze binnenkomen terwijl `request()` op een ander antwoord wacht, en niet in de
+  begrensde queue (fase4-spike.md, test 4). `pump()` leest ongevraagde frames als er geen
+  request loopt.
 
 De Flipper verwerkt app-commando's strikt na elkaar (rpc_app.c: `last_command_id == 0`
 wordt afgedwongen), dus deze client is bewust niet voor gelijktijdige requests bedoeld.
@@ -89,8 +94,13 @@ class RpcClient:
         max_frame_size: int = DEFAULT_MAX_FRAME_SIZE,
         read_slice_s: float = 0.05,
         max_events: int = 256,
+        event_hook: Callable[[Main], bool] | None = None,
     ) -> None:
+        """`event_hook(frame)` krijgt elk ongevraagd frame (in de lezende thread, die de
+        device-lock heeft): True = afgehandeld, niet in de eventqueue. Hij mag niet blokkeren
+        en deze client niet aanroepen."""
         self._transport = transport
+        self._event_hook = event_hook
         self._decoder = FrameDecoder(max_frame_size)
         self._read_slice_s = read_slice_s
         self._inbox: deque[Main] = deque()
@@ -116,6 +126,12 @@ class RpcClient:
         return self._dropped_events
 
     def _queue_event(self, frame: Main) -> None:
+        if self._event_hook is not None:
+            try:
+                if self._event_hook(frame):
+                    return
+            except Exception:
+                log.exception("event-hook faalde; frame gaat naar de eventqueue")
         if self._events.maxlen is not None and len(self._events) >= self._events.maxlen:
             self._dropped_events += 1
             # Eerste keer en daarna elke 100e: zichtbaar zonder de log te laten vollopen.
@@ -141,6 +157,19 @@ class RpcClient:
         self._transport.write(encode_frame(main.SerializeToString()))
         return cid
 
+    def _read_some(self, timeout: float) -> None:
+        """Lees hoogstens `timeout` s en zet complete frames in de inbox."""
+        chunk = self._transport.read(4096, timeout)
+        if not chunk:
+            return
+        for payload in self._decoder.feed(chunk):
+            main = flipper_pb2.Main()
+            try:
+                main.ParseFromString(payload)
+            except Exception as exc:
+                raise FrameError(f"PB.Main niet te parsen: {exc}") from exc
+            self._inbox.append(main)
+
     def _next_frame(self, deadline: float, cancel: Callable[[], bool] | None) -> Main | None:
         """Eén geparsed frame, of None als de deadline verstrijkt."""
         while True:
@@ -151,16 +180,26 @@ class RpcClient:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
-            chunk = self._transport.read(4096, min(self._read_slice_s, remaining))
-            if not chunk:
-                continue
-            for payload in self._decoder.feed(chunk):
-                main = flipper_pb2.Main()
-                try:
-                    main.ParseFromString(payload)
-                except Exception as exc:
-                    raise FrameError(f"PB.Main niet te parsen: {exc}") from exc
-                self._inbox.append(main)
+            self._read_some(min(self._read_slice_s, remaining))
+
+    def pump(self, duration: float, *, stop: Callable[[], bool] | None = None) -> int:
+        """Lees ongevraagde frames gedurende hoogstens `duration` s (er loopt geen request).
+
+        Elk frame gaat via `event_hook` of de eventqueue. Stopt eerder zodra `stop()` waar is
+        (gecontroleerd per leesslice). Geeft het aantal verwerkte frames.
+        """
+        deadline = time.monotonic() + duration
+        handled = 0
+        while True:
+            while self._inbox:
+                self._queue_event(self._inbox.popleft())
+                handled += 1
+            if stop is not None and stop():
+                return handled
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return handled
+            self._read_some(min(self._read_slice_s, remaining))
 
     def request(
         self,
