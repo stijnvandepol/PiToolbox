@@ -41,6 +41,11 @@ Tests: `uv run pytest` (1257 passed, 1 skipped op de Pi; de skip is shellcheck a
   - Een hernoemde Flipper (geen prefix `Flipper`) vindt `ble-scan` gewoon, via de 16-bit service-UUID 0x3082 in de advertentie (geverifieerd).
 - **Flipper via USB werkt** (`/dev/ttyACM0`): system_info en storage.
 - **Wifi-interfaces:** `wlan1` = Alfa (`mt7921u`), `wlan0` = ingebouwde Broadcom, dus de standaardwaarden kloppen. NetworkManager beheert `wlan1` nog (fase 5).
+- **Flipper-app + bridge op hardware (2026-10-17, na de BusFault-herstart):** de Flipper kwam gezond terug (mntm-012, API 87.1). `pitoolbox_ui.fap` geïnstalleerd in `/ext/apps/Tools/` via RPC (24.052 B, md5 klopt). Rooktest met de bridge, zonder te zenden (lege scope; de enige pending is een `ir_send` buiten scope):
+  - **USB:** de app start en de handshake is rond in 0,6 s. Over **BLE** duurt het 5,2 s (4,6 s daarvan is de BLE-verbinding). Daarna wordt de lease gekoppeld, en loopt quick action `status` via de runner.
+  - `confirm_action` uit een chat-frontend geeft `confirm_on_flipper`; de vraag verschijnt op de Flipper en verloopt na 60 s netjes (niemand drukte).
+  - Stoppen: eerst de lease los, dan sluit de app. Direct daarna is de loader nog even bezet (zoals in spike-test 2); een paar seconden later is hij vrij.
+  - **Nog open:** OK/Back met de hand, de snelle acties vanaf het menu, de valtest (20x), spike-tests 6 en 7.
 - **TIJDELIJK:** `PITOOLBOX_UPLINK_IFACE=eth0` in `~/.zshenv`, omdat de Pi tijdens het ontwikkelen via ethernet aan het net hangt. Onderweg is de uplink `wlan0` (de standaard). **Weghalen vóór fase 5 / gebruik onderweg.** Dit niet in de code-default zetten.
 
 ## Eerste stappen op de Pi
