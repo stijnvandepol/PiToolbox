@@ -20,7 +20,7 @@ from test_flipper_ui_bridge import FAST_BRIDGE, IR_POWER, Lab
 
 from pitoolbox.agent.session import AgentSession, ConfirmStatus
 from pitoolbox.core.tools.runner import CONFIRM_ON_FLIPPER, CONFIRM_TOOL
-from pitoolbox.frontends.flipper_ui import bridge as bridge_mod
+from pitoolbox.frontends.flipper_ui import bridge_confirm
 from pitoolbox.frontends.flipper_ui import protocol as proto
 from pitoolbox.frontends.flipper_ui.bridge import FRONTEND, BridgeState
 
@@ -138,7 +138,7 @@ def test_app_that_does_not_greet_again_is_closed(tmp_path: Path) -> None:
 def test_answer_on_just_expired_handle_gets_closed_expired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(bridge_mod, "MAX_TTL_S", 2)  # handle korter dan de pending
+    monkeypatch.setattr(bridge_confirm, "MAX_TTL_S", 2)  # handle korter dan de pending
     # Timer voor handles praktisch uit: het antwoord komt vóór de volgende controle.
     lab = _lab(tmp_path, ttl_s=10.0, timing=replace(FAST_BRIDGE, expire_s=30.0))
     try:
@@ -192,7 +192,7 @@ def test_build_prompt_uses_clock_at_send_time(tmp_path: Path) -> None:
 def test_pending_longer_than_handle_ttl_is_asked_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(bridge_mod, "MAX_TTL_S", 2)  # zoals PITOOLBOX_CONFIRM_TTL_S > 120
+    monkeypatch.setattr(bridge_confirm, "MAX_TTL_S", 2)  # zoals PITOOLBOX_CONFIRM_TTL_S > 120
     lab = _lab(tmp_path, ttl_s=10.0)
     try:
         lab.connect()
