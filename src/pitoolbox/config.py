@@ -6,7 +6,9 @@ import os
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from pitoolbox.core.devices._ble_pairing import normalize_adapter
 
 
 def _env_path(name: str, default: str) -> Path:
@@ -31,6 +33,9 @@ class Settings(BaseModel):
     # BLE: vast adres van de gepairde Flipper (aanbevolen), anders zoeken op naamprefix.
     flipper_ble_address: str | None = None
     flipper_ble_name_prefix: str = "Flipper"
+    # BLE: Bluetooth-adapter (hciN) voor scannen, verbinden en koppelen; None = de standaard-
+    # adapter van BlueZ/bleak (de eerste die aan staat).
+    flipper_ble_adapter: str | None = None
     # Interval (s) voor een RPC-ping als de verbinding idle is; 0 = uit.
     flipper_keepalive_s: float = 20.0
     alfa_iface: str = "wlan1"
@@ -56,6 +61,11 @@ class Settings(BaseModel):
     # http://127.0.0.1:6274/oauth/callback) extra exacte redirect-URI's toestaan.
     extra_redirect_uris: list[str] = Field(default_factory=list)
 
+    @field_validator("flipper_ble_adapter")
+    @classmethod
+    def _check_ble_adapter(cls, value: str | None) -> str | None:
+        return normalize_adapter(value)
+
     @classmethod
     def from_env(cls) -> Settings:
         allow = os.environ.get("PITOOLBOX_TOOL_ALLOWLIST", "")
@@ -71,6 +81,7 @@ class Settings(BaseModel):
             ),
             flipper_ble_address=os.environ.get("PITOOLBOX_FLIPPER_BLE_ADDRESS") or None,
             flipper_ble_name_prefix=os.environ.get("PITOOLBOX_FLIPPER_BLE_NAME_PREFIX", "Flipper"),
+            flipper_ble_adapter=os.environ.get("PITOOLBOX_FLIPPER_BLE_ADAPTER") or None,
             flipper_keepalive_s=float(os.environ.get("PITOOLBOX_FLIPPER_KEEPALIVE_S", "20")),
             alfa_iface=os.environ.get("PITOOLBOX_ALFA_IFACE", "wlan1"),
             uplink_iface=os.environ.get("PITOOLBOX_UPLINK_IFACE", "wlan0"),

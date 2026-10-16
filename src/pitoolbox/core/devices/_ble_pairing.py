@@ -21,7 +21,9 @@ Bronnen (alles hieronder is daaruit afgeleid):
   Connected, Adapter, Name, Alias; foutlijst van Pair() staat in de docstring van `_ERRORS`).
 * Adapter: https://github.com/bluez/bluez/blob/master/doc/org.bluez.Adapter.rst
   (`StartDiscovery()`, `StopDiscovery()`, `RemoveDevice(object device)` verwijdert het device
-  inclusief bonding-informatie).
+  inclusief bonding-informatie). Objectpad van een adapter: `/org/bluez/hciX` ("Object path
+  [variable prefix]/{hci0,hci1,...}"); bleak 3.0.2 bouwt het pad net zo uit de naam
+  (bleak/backends/bluezdbus/scanner.py `start`, client.py `_get_adapter_path`).
 * dbus-fast: https://dbus-fast.readthedocs.io (aio.MessageBus, ServiceInterface, @dbus_method,
   DBusError). Zelfde patroon als bleak 3.0.2: .venv/Lib/site-packages/bleak/backends/bluezdbus/
   (manager.py: GetManagedObjects; client.py: Pair/RemoveDevice; advertisement_monitor.py:
@@ -44,9 +46,10 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import re
 import sys
 import threading
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
@@ -75,6 +78,27 @@ ERR_CANCELED = "org.bluez.Error.Canceled"
 
 # {object path: {interface: {property: waarde}}} zoals GetManagedObjects (varianten uitgepakt).
 ManagedObjects = dict[str, dict[str, dict[str, Any]]]
+
+# Adapternamen zoals BlueZ/de kernel ze geven (hci0, hci1, ...); zie de module-docstring.
+_ADAPTER_NAME_RE = re.compile(r"hci[0-9]{1,3}")
+
+
+def normalize_adapter(value: str | None) -> str | None:
+    """Controleer een adapternaam (`hciN`); leeg of None = de standaardadapter van BlueZ.
+
+    Raises:
+        ValueError: geen geldige naam (er wordt nooit een willekeurig D-Bus-pad doorgegeven).
+    """
+    if value is None or not value.strip():
+        return None
+    name = value.strip()
+    if not _ADAPTER_NAME_RE.fullmatch(name):
+        raise ValueError(f"ongeldige Bluetooth-adapter {value!r} (verwacht hciN, bijv. hci1)")
+    return name
+
+
+def adapter_path(adapter: str) -> str:
+    return f"{ROOT_PATH}/{adapter}"
 
 
 # --- fouten ------------------------------------------------------------------------------
@@ -219,6 +243,10 @@ class BluezBus(Protocol):
     async def set_property(
         self, path: str, interface: str, name: str, signature: str, value: Any
     ) -> None: ...
+
+    async def get_property(self, path: str, interface: str, name: str) -> Any:
+        """org.freedesktop.DBus.Properties.Get, uitgepakt; gooit `BluezDBusError`."""
+        ...
 
     def export_agent(self, path: str, agent: PairingAgent) -> None: ...
 
@@ -508,6 +536,10 @@ class _DbusFastBus:
         variant = self._m["signature"].Variant(signature, value)
         await self.call(path, PROPERTIES_IFACE, "Set", "ssv", [interface, name, variant])
 
+    async def get_property(self, path: str, interface: str, name: str) -> Any:
+        body = await self.call(path, PROPERTIES_IFACE, "Get", "ss", [interface, name])
+        return self._m["root"].unpack_variants(body[0])
+
     def export_agent(self, path: str, agent: PairingAgent) -> None:
         self._bus.export(path, _build_agent_interface(agent))
 
@@ -520,7 +552,15 @@ class _DbusFastBus:
             await self._bus.wait_for_disconnect()
 
 
-async def _connect(bus_factory: BusFactory | None) -> BluezBus:
+def _adapter_arg(adapter: str | None) -> str | None:
+    try:
+        return normalize_adapter(adapter)
+    except ValueError as exc:
+        raise BlePairingError(str(exc)) from exc
+
+
+async def connect_bus(bus_factory: BusFactory | None = None) -> BluezBus:
+    """De system bus via `bus_factory`, anders dbus-fast; gooit `BlePairingError`."""
     if bus_factory is not None:
         return await bus_factory()
     return await _DbusFastBus.connect()
@@ -538,9 +578,26 @@ def _mac(address: str) -> str:
         ) from exc
 
 
-def _find_adapter(objects: ManagedObjects) -> str:
-    """Eerste ingeschakelde adapter (zoals bleak: manager.get_default_adapter)."""
+def find_adapter(objects: ManagedObjects, adapter: str | None = None) -> str:
+    """Objectpad van de adapter: de opgegeven `hciN`, anders de eerste ingeschakelde (zoals bleak:
+    manager.get_default_adapter). Een adapter die BlueZ niet kent of die uit staat is een fout
+    met de namen die er wel zijn."""
     adapters = sorted(path for path, ifaces in objects.items() if ADAPTER_IFACE in ifaces)
+    known = ", ".join(path.rsplit("/", 1)[-1] for path in adapters) or "geen"
+    if adapter is not None:
+        path = adapter_path(adapter)
+        if path not in adapters:
+            raise BlePairingError(
+                f"Bluetooth-adapter {adapter} bestaat niet in BlueZ (bekend: {known}). Controleer "
+                "PITOOLBOX_FLIPPER_BLE_ADAPTER of --adapter en 'bluetoothctl list'; een adapter "
+                "waarvan de firmware niet start (dmesg) ziet BlueZ niet."
+            )
+        if not objects[path][ADAPTER_IFACE].get("Powered", False):
+            raise BlePairingError(
+                f"Bluetooth-adapter {adapter} staat uit. Zet hem aan met 'rfkill unblock "
+                "bluetooth' en 'bluetoothctl power on'."
+            )
+        return path
     if not adapters:
         raise BlePairingError(
             "Geen Bluetooth-adapter gevonden in BlueZ (controleer 'bluetoothctl list' en of de "
@@ -563,7 +620,8 @@ def _devices(objects: ManagedObjects) -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def _find_device(objects: ManagedObjects, mac: str, adapter: str | None = None) -> str | None:
+def find_device(objects: ManagedObjects, mac: str, adapter: str | None = None) -> str | None:
+    """Devicepad van `mac` (hoofdletters), optioneel alleen onder adapterpad `adapter`."""
     for path, props in _devices(objects):
         if str(props.get("Address", "")).upper() != mac:
             continue
@@ -602,12 +660,17 @@ async def _call(
 
 
 async def _resolve_device(
-    bus: BluezBus, mac: str, *, discovery_timeout: float, poll_s: float
+    bus: BluezBus,
+    mac: str,
+    *,
+    discovery_timeout: float,
+    poll_s: float,
+    adapter_name: str | None = None,
 ) -> tuple[str, str]:
     """Geef (adapterpad, devicepad); start zo nodig een korte discovery."""
     objects = await bus.get_managed_objects()
-    adapter = _find_adapter(objects)
-    path = _find_device(objects, mac, adapter)
+    adapter = find_adapter(objects, adapter_name)
+    path = find_device(objects, mac, adapter)
     if path is not None:
         return adapter, path
 
@@ -625,7 +688,7 @@ async def _resolve_device(
         deadline = loop.time() + discovery_timeout
         while True:
             await asyncio.sleep(poll_s)
-            path = _find_device(await bus.get_managed_objects(), mac, adapter)
+            path = find_device(await bus.get_managed_objects(), mac, adapter)
             if path is not None:
                 return adapter, path
             if loop.time() >= deadline:
@@ -666,19 +729,26 @@ async def pair_async(
     discovery_timeout: float = 10.0,
     poll_s: float = 0.5,
     disconnect_after: bool = True,
+    adapter: str | None = None,
 ) -> PairResult:
     """Koppel met `address`. `passkey_provider` levert de code van het Flipper-scherm.
 
     `timeout` geldt voor de Pair()-aanroep, dus inclusief de tijd dat de gebruiker de code
-    intikt. Na afloop (ook bij een fout) is de agent altijd afgemeld.
+    intikt. Na afloop (ook bij een fout) is de agent altijd afgemeld. `adapter` (`hciN`) kiest
+    de Bluetooth-adapter; None = de eerste ingeschakelde.
     """
     mac = _mac(address)
-    bus = await _connect(bus_factory)
+    adapter = _adapter_arg(adapter)
+    bus = await connect_bus(bus_factory)
     exported = False
     registered = False
     try:
         _adapter, device_path = await _resolve_device(
-            bus, mac, discovery_timeout=min(discovery_timeout, timeout), poll_s=poll_s
+            bus,
+            mac,
+            discovery_timeout=min(discovery_timeout, timeout),
+            poll_s=poll_s,
+            adapter_name=adapter,
         )
         props = (await bus.get_managed_objects())[device_path][DEVICE_IFACE]
 
@@ -766,20 +836,25 @@ async def pair_async(
             await bus.close()
 
 
-async def unpair_async(address: str, *, bus_factory: BusFactory | None = None) -> bool:
+async def unpair_async(
+    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
+) -> bool:
     """Verwijder het apparaat en zijn bonding uit BlueZ (Adapter1.RemoveDevice).
 
-    Geeft False terug als het apparaat niet bekend was (er viel niets te verwijderen).
+    Geeft False terug als het apparaat niet bekend was (er viel niets te verwijderen). Met
+    `adapter` alleen het apparaat onder die adapter.
     """
     mac = _mac(address)
-    bus = await _connect(bus_factory)
+    adapter = _adapter_arg(adapter)
+    bus = await connect_bus(bus_factory)
     try:
         objects = await bus.get_managed_objects()
-        path = _find_device(objects, mac)
+        only = find_adapter(objects, adapter) if adapter is not None else None
+        path = find_device(objects, mac, only)
         if path is None:
             return False
-        adapter = str(objects[path][DEVICE_IFACE].get("Adapter") or _find_adapter(objects))
-        await _call(bus, "Ontkoppelen", adapter, ADAPTER_IFACE, "RemoveDevice", "o", [path])
+        owner = str(objects[path][DEVICE_IFACE].get("Adapter") or find_adapter(objects))
+        await _call(bus, "Ontkoppelen", owner, ADAPTER_IFACE, "RemoveDevice", "o", [path])
         return True
     finally:
         with contextlib.suppress(Exception):
@@ -787,31 +862,49 @@ async def unpair_async(address: str, *, bus_factory: BusFactory | None = None) -
 
 
 async def list_devices_async(
-    prefix: str = "", *, only_paired: bool = True, bus_factory: BusFactory | None = None
+    prefix: str = "",
+    *,
+    only_paired: bool = True,
+    bus_factory: BusFactory | None = None,
+    adapter: str | None = None,
+    service_uuids: Collection[str] = (),
 ) -> list[PairedDevice]:
-    """Door BlueZ gekende apparaten waarvan de naam met `prefix` begint (hoofdletterongevoelig)."""
-    bus = await _connect(bus_factory)
+    """Door BlueZ gekende apparaten waarvan de naam met `prefix` begint (hoofdletterongevoelig),
+    of die een van `service_uuids` in hun `UUIDs`-property hebben (Device.rst: "List of 128-bit
+    UUIDs that represents the available remote services"); zo vind je ook een hernoemde Flipper.
+
+    Met `adapter` alleen de apparaten onder die adapter (die moet dan bestaan).
+    """
+    adapter = _adapter_arg(adapter)
+    bus = await connect_bus(bus_factory)
     try:
         objects = await bus.get_managed_objects()
     finally:
         with contextlib.suppress(Exception):
             await bus.close()
+    only = find_adapter(objects, adapter) if adapter is not None else None
     wanted = prefix.casefold()
+    uuids = {u.lower() for u in service_uuids}
     result = []
     for _path, props in _devices(objects):
+        if only is not None and props.get("Adapter", only) != only:
+            continue
         device = _as_paired_device(props)
         if only_paired and not (device.paired or device.bonded):
             continue
-        if wanted and not (device.name or "").casefold().startswith(wanted):
+        by_uuid = bool(uuids & {str(u).lower() for u in props.get("UUIDs", ())})
+        if wanted and not by_uuid and not (device.name or "").casefold().startswith(wanted):
             continue
         result.append(device)
     return result
 
 
 async def paired_devices_async(
-    prefix: str = "", *, bus_factory: BusFactory | None = None
+    prefix: str = "", *, bus_factory: BusFactory | None = None, adapter: str | None = None
 ) -> list[PairedDevice]:
-    return await list_devices_async(prefix, only_paired=True, bus_factory=bus_factory)
+    return await list_devices_async(
+        prefix, only_paired=True, bus_factory=bus_factory, adapter=adapter
+    )
 
 
 # --- synchrone wrappers voor de CLI ------------------------------------------------------
@@ -823,22 +916,40 @@ def pair(
     timeout: float = 90.0,
     *,
     bus_factory: BusFactory | None = None,
+    adapter: str | None = None,
 ) -> PairResult:
     """Synchrone variant van `pair_async` (niet aanroepen vanuit een draaiende event loop)."""
-    return asyncio.run(pair_async(address, passkey_provider, timeout, bus_factory=bus_factory))
+    return asyncio.run(
+        pair_async(address, passkey_provider, timeout, bus_factory=bus_factory, adapter=adapter)
+    )
 
 
-def unpair(address: str, *, bus_factory: BusFactory | None = None) -> bool:
-    return asyncio.run(unpair_async(address, bus_factory=bus_factory))
+def unpair(
+    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
+) -> bool:
+    return asyncio.run(unpair_async(address, bus_factory=bus_factory, adapter=adapter))
 
 
 def list_devices(
-    prefix: str = "", *, only_paired: bool = True, bus_factory: BusFactory | None = None
+    prefix: str = "",
+    *,
+    only_paired: bool = True,
+    bus_factory: BusFactory | None = None,
+    adapter: str | None = None,
+    service_uuids: Collection[str] = (),
 ) -> list[PairedDevice]:
-    return asyncio.run(list_devices_async(prefix, only_paired=only_paired, bus_factory=bus_factory))
+    return asyncio.run(
+        list_devices_async(
+            prefix,
+            only_paired=only_paired,
+            bus_factory=bus_factory,
+            adapter=adapter,
+            service_uuids=service_uuids,
+        )
+    )
 
 
 def paired_devices(
-    prefix: str = "", *, bus_factory: BusFactory | None = None
+    prefix: str = "", *, bus_factory: BusFactory | None = None, adapter: str | None = None
 ) -> list[PairedDevice]:
-    return asyncio.run(paired_devices_async(prefix, bus_factory=bus_factory))
+    return asyncio.run(paired_devices_async(prefix, bus_factory=bus_factory, adapter=adapter))

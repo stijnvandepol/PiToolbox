@@ -31,14 +31,50 @@ Bronnen (flipperzero-firmware @3fb1d517):
 bleak 3.x (installed: bleak/__init__.py, bleak/backends/bluezdbus/client.py):
 
 * `BleakClient.mtu_size` geeft op BlueZ altijd 23 (alleen via een privé-hack te corrigeren).
-  We gebruiken `BleakGATTCharacteristic.max_write_without_response_size` (BlueZ >= 5.62 leest
-  daar de `MTU`-property van de karakteristiek: MTU - 3).
+  `BleakGATTCharacteristic.max_write_without_response_size` leest de `MTU`-property uit de cache
+  van bleak (manager.py `get_max_write_without_response_size`: MTU - 3). Die cache blijft bij
+  een gebonden Flipper op 23 staan: BlueZ exporteert de karakteristieken uit zijn GATT-cache
+  vóór de verbinding, en `characteristic_create` registreert de `att_exchange`-callback (die
+  PropertiesChanged voor "MTU" stuurt) alleen als er al een ATT-bearer is (BlueZ 5.87
+  src/gatt-client.c). `MTU` zelf wordt live gelezen (`characteristic_get_mtu`:
+  `bt_att_get_mtu`). Daarom vragen we de property na het verbinden zelf op via D-Bus
+  (gemeten op de Pi: bleak 23, D-Bus 414 = `CFG_BLE_MAX_ATT_MTU` van de Flipper).
+* Adapterkeuze: `bluez={"adapter": "hciN"}` op `BleakScanner` en `BleakClient`
+  (bleak/args/bluez.py `BlueZScannerArgs`/`BlueZClientArgs`, nieuw in 3.0; het oude `adapter=`
+  is deprecated). Een onbekende adapter geeft `BleakError("adapter 'hciN' not found")`
+  (manager.py `_check_adapter`).
+* `BleakClient(<adres-string>)` doet bij `connect()` eerst `find_device_by_address` (een scan).
+  Met een `BLEDevice` waarvan `details` het BlueZ-pad en de properties bevat (zoals de BlueZ-
+  scanner ze maakt: scanner.py `_handle_advertising_data`, client.py `__init__`) wordt direct
+  `Device1.Connect` aangeroepen. Voor een gebonden Flipper die BlueZ al kent slaan we de scan
+  dus over (gemeten: verbinden 1,3 s zonder scan; met scan 1,5 s tot 5 s).
+* bleak slaat `Connect` over als BlueZ het apparaat al verbonden heeft (client.py: "skipping
+  calling Connect", BlueZ issue #89), bijv. na een gecrasht proces. Dan zouden we in de oude
+  RPC-sessie van de Flipper verder schrijven; we verbreken zo'n link daarom eerst
+  (`Device1.Disconnect`).
+* `Device1.Disconnect` wacht in BlueZ altijd `DISCONNECT_TIMER` (2 s) voordat de link echt
+  verbroken wordt (src/device.c `device_request_disconnect`); sluiten duurt daarom ~2,5 s.
 * `start_notify` regelt notificaties én indicaties; BlueZ `StartNotify` kiest zelf op basis van
   de flags (TX heeft alleen INDICATE). Indicaties worden door BlueZ bevestigd.
 * GATT-fouten komen als `BleakGATTProtocolError` (nieuw in 3.0) met `.code`; BlueZ-weigeringen
   zonder ATT-code (bijv. "Not paired") blijven `BleakDBusError`.
 * Een lezing van een karakteristiek waarop al `start_notify` staat, geeft op BlueZ een dubbele
   melding in de notify-callback; daarom lezen we het initiële krediet vóór het abonneren.
+
+Snelheid (~100 ms per RPC-frame, gemeten op een Pi 4 met BCM43455): de TX-karakteristiek
+gebruikt indicaties, en bt.c (`bt_rpc_send_bytes_callback`) wacht na elk pakket op de
+bevestiging (`SerialServiceEventTypeDataSent` bij `ACI_GATT_SERVER_CONFIRMATION_VSEVT_CODE`).
+Elk antwoordframe kost dus minstens een heen-en-terug over de link, in de praktijk twee
+verbindingsintervallen. Het interval kiest de central: Linux begint met
+`le_conn_min/max_interval` 0x0018..0x0028 (30..50 ms, net/bluetooth/hci_core.c) of de per-
+apparaat opgeslagen parameters (hci_sync.c `hci_le_create_conn_sync`). Momentum mntm-012
+(targets/f7/ble_glue/gap.c `gap_verify_connection_parameters`, serial_profile.c 0x06..0x24 =
+7,5..45 ms) vraagt alleen een update aan als het interval onder 7,5 ms ligt, of als de link al
+beveiligd is en het interval boven het maximum ligt. Die controle draait alleen bij
+"connection complete" (dan is `is_secure` nog false) en bij "connection update complete", dus
+bij een verbinding vanaf Linux wordt er nooit om een korter interval gevraagd. Zonder root kan
+een central op Linux het interval niet beïnvloeden (geen D-Bus-API; alleen main.conf [LE]
+Min/MaxConnectionInterval, mgmt of debugfs).
 """
 
 from __future__ import annotations
@@ -55,6 +91,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from bleak import BleakClient, BleakScanner
+from bleak.args.bluez import BlueZClientArgs, BlueZScannerArgs
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak.exc import (
@@ -66,6 +103,15 @@ from bleak.exc import (
     BleakGATTProtocolErrorCode,
 )
 
+from pitoolbox.core.devices import _ble_pairing
+from pitoolbox.core.devices._ble_pairing import (
+    DEVICE_IFACE,
+    BlePairingError,
+    BluezBus,
+    BluezDBusError,
+    BusFactory,
+    normalize_adapter,
+)
 from pitoolbox.core.devices.flipper import TransportError
 from pitoolbox.core.errors import Aborted, DeviceError, DeviceNotConnected
 
@@ -116,6 +162,9 @@ RPC_STATUS_UUID = uuid_from_firmware_bytes(FW_RPC_STATUS_UUID_BYTES)  # niet geb
 _ADV_SERVICE_UUIDS = frozenset(
     f"{0x3080 | color:08x}-0000-1000-8000-00805f9b34fb" for color in range(4)
 )
+# Alles waaraan een Flipper te herkennen is, ook als hij hernoemd is: BlueZ zet deze UUID's na
+# het verbinden ook in de `UUIDs`-property van Device1 (gezien op de Pi: 0x3082 en de serial-UUID).
+FLIPPER_UUIDS = _ADV_SERVICE_UUIDS | {SERVICE_UUID}
 
 # Maten, zie de moduledocstring.
 MAX_WRITE_CHUNK = 243  # BLE_SVC_SERIAL_CHAR_VALUE_LEN_MAX
@@ -123,6 +172,17 @@ _MIN_ATT_PAYLOAD = 20  # standaard ATT-MTU 23 min 3 bytes header
 _MAX_RX_BUFFER = 8 * 1024 * 1024
 
 NOT_PAIRED_MESSAGE = "niet gepaird: draai `pitoolbox-flipper ble-pair`"
+
+GATT_CHAR_IFACE = "org.bluez.GattCharacteristic1"
+# Hoe lang we wachten tot een achtergebleven BlueZ-verbinding weg is (DISCONNECT_TIMER is 2 s).
+_STALE_DISCONNECT_WAIT_S = 8.0
+# Verbinden met een gebonden Flipper zonder scan: de Flipper adverteert in de spaarstand nog
+# elke 1..2,5 s (gap.c `gap_advertise_start`), dus dit is ruim; een Flipper die uit staat of
+# buiten bereik is, faalt zo niet pas na de volle `connect_timeout_s`.
+_KNOWN_DEVICE_CONNECT_EXTRA_S = 4.0
+
+# Testnaad: de D-Bus-verbinding voor de BlueZ-opzoekingen (None = dbus-fast, system bus).
+_bluez_bus_factory: BusFactory | None = None
 
 _AUTH_ATT_CODES = frozenset(
     {
@@ -205,8 +265,31 @@ def _run_blocking(coro: Coroutine[Any, Any, T], timeout: float) -> T:
         return pool.submit(asyncio.run, coro).result(timeout)
 
 
-async def _scan(name_prefix: str, timeout: float) -> list[BleCandidate]:
-    found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+def _scanner_args(adapter: str | None) -> BlueZScannerArgs:
+    return {"adapter": adapter} if adapter else {}
+
+
+def _client_args(adapter: str | None) -> BlueZClientArgs:
+    return {"adapter": adapter} if adapter else {}
+
+
+def _is_missing_adapter(exc: BaseException) -> bool:
+    """bleak: `BleakError("adapter 'hciN' not found")` (manager.py `_check_adapter`)."""
+    text = str(exc).lower()
+    return isinstance(exc, BleakError) and "adapter" in text and "not found" in text
+
+
+def _missing_adapter_message(adapter: str | None) -> str:
+    return (
+        f"Bluetooth-adapter {adapter or '(standaard)'} bestaat niet in BlueZ. Controleer "
+        "PITOOLBOX_FLIPPER_BLE_ADAPTER of --adapter en 'bluetoothctl list'."
+    )
+
+
+async def _scan(name_prefix: str, timeout: float, adapter: str | None) -> list[BleCandidate]:
+    found = await BleakScanner.discover(
+        timeout=timeout, return_adv=True, bluez=_scanner_args(adapter)
+    )
     candidates: list[BleCandidate] = []
     for device, adv in found.values():
         if _is_flipper(device, adv, name_prefix):
@@ -215,17 +298,25 @@ async def _scan(name_prefix: str, timeout: float) -> list[BleCandidate]:
     return candidates
 
 
-def scan_flippers(name_prefix: str = "Flipper", timeout: float = 8.0) -> list[BleCandidate]:
-    """Zoek Flippers in de buurt (sterkste signaal eerst).
+def scan_flippers(
+    name_prefix: str = "Flipper", timeout: float = 8.0, adapter: str | None = None
+) -> list[BleCandidate]:
+    """Zoek Flippers in de buurt (sterkste signaal eerst), optioneel via adapter `hciN`.
 
     Een Flipper adverteert alleen als hij BLE aan heeft en niet al met een telefoon/ander
     apparaat verbonden is.
     """
     try:
-        return _run_blocking(_scan(name_prefix, timeout), timeout + 20.0)
+        adapter = normalize_adapter(adapter)
+    except ValueError as exc:
+        raise DeviceError(str(exc)) from exc
+    try:
+        return _run_blocking(_scan(name_prefix, timeout, adapter), timeout + 20.0)
     except BleakBluetoothNotAvailableError as exc:
         raise DeviceError(f"Bluetooth is niet beschikbaar: {exc}") from exc
     except (BleakError, OSError, TimeoutError) as exc:
+        if _is_missing_adapter(exc):
+            raise DeviceError(_missing_adapter_message(adapter)) from exc
         raise DeviceError(f"BLE-scan mislukt: {exc}") from exc
 
 
@@ -288,7 +379,9 @@ class BleTransport:
     """`ByteTransport` over de Flipper-BLE-serial-service (sync API bovenop async bleak).
 
     Zonder `address` wordt de eerste Flipper gezocht waarvan de naam met `name_prefix` begint;
-    een vast adres is aanbevolen (en nodig als er meerdere Flippers in de buurt zijn).
+    een vast adres is aanbevolen (en nodig als er meerdere Flippers in de buurt zijn). Een
+    gebonden Flipper die BlueZ al kent wordt zonder scan verbonden. `adapter` (`hciN`) kiest de
+    Bluetooth-adapter; None = de standaardadapter van BlueZ/bleak.
     """
 
     kind = "ble"
@@ -299,6 +392,7 @@ class BleTransport:
         address: str | None = None,
         name_prefix: str = "Flipper",
         *,
+        adapter: str | None = None,
         scan_timeout_s: float = 8.0,
         connect_timeout_s: float = 20.0,
         credit_timeout_s: float = 10.0,
@@ -307,6 +401,7 @@ class BleTransport:
     ) -> None:
         self._address = address
         self._name_prefix = name_prefix
+        self._adapter = normalize_adapter(adapter)
         self._name: str | None = None
         self._scan_timeout_s = scan_timeout_s
         self._connect_timeout_s = connect_timeout_s
@@ -338,7 +433,8 @@ class BleTransport:
     def describe(self) -> str:
         address = self._address or "(auto)"
         name = self._name or f"{self._name_prefix}*"
-        return f"ble:{address} ({name})"
+        via = f" via {self._adapter}" if self._adapter else ""
+        return f"ble:{address} ({name}){via}"
 
     def open(self) -> None:
         with self._open_lock:
@@ -352,7 +448,9 @@ class BleTransport:
                 self._reason = "verbinden"
             loop = _LoopThread("pitoolbox-ble")
             self._loop = loop
-            total_timeout = self._scan_timeout_s + self._connect_timeout_s + 15.0
+            total_timeout = (
+                self._scan_timeout_s + self._connect_timeout_s + _STALE_DISCONNECT_WAIT_S + 15.0
+            )
             try:
                 loop.call(self._async_open(), total_timeout)
             except Exception as exc:
@@ -459,7 +557,7 @@ class BleTransport:
     async def _resolve_device(self) -> BLEDevice:
         if self._address:
             device = await BleakScanner.find_device_by_address(
-                self._address, timeout=self._scan_timeout_s
+                self._address, timeout=self._scan_timeout_s, bluez=_scanner_args(self._adapter)
             )
             if device is None:
                 raise DeviceNotConnected(
@@ -469,7 +567,9 @@ class BleTransport:
             return device
         prefix = self._name_prefix
         device = await BleakScanner.find_device_by_filter(
-            lambda d, ad: _is_flipper(d, ad, prefix), timeout=self._scan_timeout_s
+            lambda d, ad: _is_flipper(d, ad, prefix),
+            timeout=self._scan_timeout_s,
+            bluez=_scanner_args(self._adapter),
         )
         if device is None:
             raise DeviceNotConnected(
@@ -479,14 +579,117 @@ class BleTransport:
         log.info("BLE: Flipper %s gekozen op naamprefix", device.address)
         return device
 
+    async def _open_bluez(self) -> BluezBus | None:
+        """Eigen D-Bus-verbinding voor de BlueZ-opzoekingen; None als die er niet is (dan doet
+        bleak alles zelf, zoals op een systeem zonder dbus-fast)."""
+        try:
+            return await _ble_pairing.connect_bus(_bluez_bus_factory)
+        except BlePairingError as exc:
+            log.debug("BLE: BlueZ niet via D-Bus te bevragen (%s); alleen bleak", exc)
+            return None
+
+    async def _known_device(self, bus: BluezBus | None) -> tuple[str, dict[str, Any]] | None:
+        """(pad, properties) van de Flipper als BlueZ hem al gebonden kent op onze adapter.
+
+        Controleert ook de adapter: een opgegeven adapter die niet bestaat of uit staat is een
+        duidelijke fout, nog voordat bleak gaat scannen.
+        """
+        if bus is None:
+            return None
+        try:
+            objects = await bus.get_managed_objects()
+        except BluezDBusError as exc:
+            log.debug("BLE: GetManagedObjects mislukt (%s)", exc)
+            return None
+        try:
+            adapter_path = _ble_pairing.find_adapter(objects, self._adapter)
+        except BlePairingError as exc:
+            raise DeviceNotConnected(str(exc)) from exc
+        if not self._address:
+            return None
+        path = _ble_pairing.find_device(objects, self._address.upper(), adapter_path)
+        if path is None:
+            return None
+        props = objects[path][DEVICE_IFACE]
+        if not (props.get("Paired") or props.get("Bonded")):
+            return None  # ongepaird: via de scan, die geeft de bekende foutmeldingen
+        return path, props
+
+    async def _drop_stale_link(self, bus: BluezBus, path: str) -> None:
+        """BlueZ heeft de Flipper nog verbonden (gecrasht proces, ander proces): eerst verbreken.
+
+        bleak zou `Connect` overslaan en we zouden midden in de oude RPC-sessie verder schrijven.
+        `Disconnect` antwoordt pas als de link weg is (BlueZ src/device.c, DISCONNECT_TIMER 2 s).
+        """
+        log.warning(
+            "BLE: %s was nog verbonden in BlueZ (vorige sessie of ander proces); eerst verbreken "
+            "voor een verse RPC-sessie",
+            self._address,
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _STALE_DISCONNECT_WAIT_S
+        try:
+            await asyncio.wait_for(
+                bus.call(path, DEVICE_IFACE, "Disconnect"), _STALE_DISCONNECT_WAIT_S
+            )
+            while loop.time() < deadline:
+                if not await bus.get_property(path, DEVICE_IFACE, "Connected"):
+                    return
+                await asyncio.sleep(0.1)
+        except (BluezDBusError, TimeoutError) as exc:
+            log.warning("BLE: oude verbinding verbreken mislukte (%s); toch verder", exc)
+
+    async def _write_limit(self, bus: BluezBus | None, rx_char: Any) -> int:
+        """Max. bytes per write-without-response: MTU - 3, begrensd op 243 (zie docstring).
+
+        bleak's waarde komt uit een cache die bij een gebonden Flipper op MTU 23 blijft staan;
+        de `MTU`-property via D-Bus is de echte, door BlueZ onderhandelde waarde.
+        """
+        limit = int(rx_char.max_write_without_response_size)
+        obj = getattr(rx_char, "obj", None)
+        path = obj[0] if isinstance(obj, tuple) and obj and isinstance(obj[0], str) else None
+        if bus is not None and path is not None:
+            try:
+                mtu = int(await bus.get_property(path, GATT_CHAR_IFACE, "MTU"))
+            except (BluezDBusError, TypeError, ValueError) as exc:
+                log.debug("BLE: MTU-property niet leesbaar (%s); bleak-waarde %d", exc, limit)
+            else:
+                limit = max(limit, mtu - 3)
+        return max(1, min(limit, MAX_WRITE_CHUNK))
+
     async def _async_open(self) -> None:
-        device = await self._resolve_device()
+        bus = await self._open_bluez()
+        try:
+            await self._async_connect(bus)
+        finally:
+            if bus is not None:
+                with contextlib.suppress(Exception):
+                    await bus.close()
+
+    async def _async_connect(self, bus: BluezBus | None) -> None:
+        known = await self._known_device(bus)
+        device: BLEDevice
+        timeout = self._connect_timeout_s
+        if known is not None and self._address:
+            path, props = known
+            if props.get("Connected") and bus is not None:
+                await self._drop_stale_link(bus, path)
+            # Zelfde vorm als de BlueZ-scanner van bleak: dan slaat connect() de scan over.
+            name = props.get("Alias") or props.get("Name")
+            device = BLEDevice(
+                self._address.upper(), str(name) if name else None, {"path": path, "props": props}
+            )
+            timeout = min(timeout, self._scan_timeout_s + _KNOWN_DEVICE_CONNECT_EXTRA_S)
+            log.debug("BLE: %s is bekend bij BlueZ (%s); verbinden zonder scan", device, path)
+        else:
+            device = await self._resolve_device()
         self._address = device.address
         self._name = device.name or None
         client = BleakClient(
             device,
             disconnected_callback=self._on_disconnected,
-            timeout=self._connect_timeout_s,
+            timeout=timeout,
+            bluez=_client_args(self._adapter),
         )
         self._client = client
         await client.connect()
@@ -525,12 +728,7 @@ class BleTransport:
         await client.start_notify(TX_CHAR_UUID, self._on_tx)
         await client.start_notify(FLOW_CONTROL_UUID, self._on_flow)
 
-        limit = rx_char.max_write_without_response_size
-        deadline = time.monotonic() + 1.5
-        while limit <= _MIN_ATT_PAYLOAD and time.monotonic() < deadline:
-            await asyncio.sleep(0.1)  # BlueZ vult de MTU-property soms pas iets later
-            limit = rx_char.max_write_without_response_size
-        max_chunk = max(1, min(limit, MAX_WRITE_CHUNK))
+        max_chunk = await self._write_limit(bus, rx_char)
         use_response = self._write_with_response or "write-without-response" not in (
             rx_char.properties
         )
@@ -555,6 +753,8 @@ class BleTransport:
             )
         if is_auth_error(exc):
             return BleNotPaired(NOT_PAIRED_MESSAGE)
+        if _is_missing_adapter(exc):
+            return DeviceNotConnected(_missing_adapter_message(self._adapter))
         if isinstance(exc, TimeoutError):
             return DeviceNotConnected("BLE-verbinding met de Flipper maken duurde te lang")
         if isinstance(exc, BleakBluetoothNotAvailableError):
@@ -586,9 +786,15 @@ class BleTransport:
         log.debug("BLE: flow-control-krediet nu %d", credit)
 
     def _on_disconnected(self, _client: Any) -> None:
-        log.warning("BLE: verbinding met %s verbroken", self.describe())
         with self._cond:
+            was_open = self._open
             self._link_lost = True
+        # Bij een eigen close() is _open al False: geen waarschuwing voor een gewone afsluiting.
+        log.log(
+            logging.WARNING if was_open else logging.DEBUG,
+            "BLE: verbinding met %s verbroken",
+            self.describe(),
+        )
         self._mark_closed("verbinding verbroken")
 
     # --- toestand en opruimen ---------------------------------------------------------

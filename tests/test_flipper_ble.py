@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import pytest
@@ -13,6 +14,8 @@ from bleak.exc import BleakDBusError, BleakError, BleakGATTProtocolError
 from flipper_fakes import (
     BLE_ADV_UUID,
     FAST_TIMING,
+    RX_UUID_FAKE,
+    FakeBleChar,
     FakeBleFlipper,
     FakeBleWorld,
     fixture_json,
@@ -20,6 +23,7 @@ from flipper_fakes import (
     wait_until,
 )
 
+from pitoolbox.core.devices import _ble_pairing as bp
 from pitoolbox.core.devices import _flipper_ble as ble
 from pitoolbox.core.devices._flipper_rpc.framing import FrameDecoder, encode_frame
 from pitoolbox.core.devices._flipper_rpc.pb import flipper_pb2
@@ -54,6 +58,19 @@ def read_frame(transport: ble.BleTransport, timeout: float = 2.0) -> Any:
             main.ParseFromString(payload)
             return main
     raise AssertionError("geen frame ontvangen")
+
+
+@pytest.fixture(autouse=True)
+def no_real_dbus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Standaard geen BlueZ via D-Bus: de transport valt dan terug op alleen bleak (de fake).
+
+    Tests die de BlueZ-opzoekingen nodig hebben, zetten zelf een `FakeBluez`.
+    """
+
+    async def unavailable() -> bp.BluezBus:
+        raise bp.BlePairingError("geen D-Bus in deze test")
+
+    monkeypatch.setattr(ble, "_bluez_bus_factory", unavailable)
 
 
 @pytest.fixture
@@ -739,3 +756,300 @@ def test_keepalive_is_off_by_default(world: FakeBleWorld) -> None:
         assert pings(flipper) == 0
     finally:
         device.close()
+
+
+# --- BlueZ via D-Bus: adapter, verbinden zonder scan, MTU, oude verbinding -------------------
+
+HCI1 = "/org/bluez/hci1"
+FLIPPER_PATH = f"{HCI1}/dev_80_E1_26_00_00_01"
+RX_PATH = f"{FLIPPER_PATH}/service000c/char000f"
+
+
+class FakeBluez:
+    """`BluezBus` met de objecten die BlueZ voor een gebonden Flipper exporteert."""
+
+    def __init__(
+        self,
+        *,
+        paired: bool = True,
+        connected: bool = False,
+        mtu: int | None = 414,
+        adapters: Sequence[str] = ("hci1",),
+    ) -> None:
+        self.objects: bp.ManagedObjects = {
+            f"/org/bluez/{name}": {bp.ADAPTER_IFACE: {"Powered": True}} for name in adapters
+        }
+        self.objects[FLIPPER_PATH] = {
+            bp.DEVICE_IFACE: {
+                "Address": "80:E1:26:00:00:01",
+                "Alias": "Flipper Testy",
+                "Adapter": HCI1,
+                "Paired": paired,
+                "Bonded": paired,
+                "Connected": connected,
+            }
+        }
+        self.objects[RX_PATH] = {ble.GATT_CHAR_IFACE: {} if mtu is None else {"MTU": mtu}}
+        self.calls: list[str] = []
+        self.closed = 0
+
+    async def call(
+        self, path: str, interface: str, member: str, signature: str = "", body: Sequence[Any] = ()
+    ) -> list[Any]:
+        self.calls.append(member)
+        if member == "Disconnect":
+            self.objects[path][bp.DEVICE_IFACE]["Connected"] = False
+        return []
+
+    async def get_managed_objects(self) -> bp.ManagedObjects:
+        self.calls.append("GetManagedObjects")
+        return copy.deepcopy(self.objects)
+
+    async def set_property(
+        self, path: str, interface: str, name: str, signature: str, value: Any
+    ) -> None:
+        raise AssertionError("de transport schrijft geen properties")
+
+    async def get_property(self, path: str, interface: str, name: str) -> Any:
+        self.calls.append(f"Get {name}")
+        try:
+            return self.objects[path][interface][name]
+        except KeyError as exc:
+            raise bp.BluezDBusError("org.freedesktop.DBus.Error.InvalidArgs", name) from exc
+
+    def export_agent(self, path: str, agent: bp.PairingAgent) -> None:
+        raise AssertionError("geen agent nodig")
+
+    def unexport_agent(self, path: str) -> None:
+        raise AssertionError("geen agent nodig")
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def bluez(monkeypatch: pytest.MonkeyPatch) -> FakeBluez:
+    bus = FakeBluez()
+
+    async def connect() -> bp.BluezBus:
+        return bus
+
+    monkeypatch.setattr(ble, "_bluez_bus_factory", connect)
+    return bus
+
+
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch, world: FakeBleWorld) -> dict[str, list[Any]]:
+    """Neemt op wat de transport aan BleakClient/BleakScanner meegeeft (bovenop de fakes)."""
+    seen: dict[str, list[Any]] = {"client": [], "scan": []}
+    client_cls = ble.BleakClient
+    scanner_cls = ble.BleakScanner
+
+    class Client(client_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, device: Any, *args: Any, **kwargs: Any) -> None:
+            seen["client"].append((device, kwargs))
+            super().__init__(device, *args, **kwargs)
+
+    class Scanner(scanner_cls):  # type: ignore[misc, valid-type]
+        # Via de oorspronkelijke klasse doorgeven: de fake roept intern zelf nog methodes aan.
+        @classmethod
+        async def find_device_by_filter(cls, *args: Any, **kwargs: Any) -> Any:
+            seen["scan"].append(kwargs)
+            return await scanner_cls.find_device_by_filter(*args, **kwargs)
+
+        @classmethod
+        async def find_device_by_address(cls, *args: Any, **kwargs: Any) -> Any:
+            seen["scan"].append(kwargs)
+            return await scanner_cls.find_device_by_address(*args, **kwargs)
+
+        @classmethod
+        async def discover(cls, *args: Any, **kwargs: Any) -> Any:
+            seen["scan"].append(kwargs)
+            return await scanner_cls.discover(*args, **kwargs)
+
+    monkeypatch.setattr(ble, "BleakClient", Client)
+    monkeypatch.setattr(ble, "BleakScanner", Scanner)
+    return seen
+
+
+@pytest.fixture
+def rx_with_dbus_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """De RX-karakteristiek krijgt een BlueZ-pad (zoals bleak's `obj`) en de verouderde
+    bleak-MTU-cache (23 -> 20 bytes)."""
+
+    def obj(self: FakeBleChar) -> tuple[str, dict[str, Any]]:
+        return (RX_PATH if self.uuid == RX_UUID_FAKE else f"{FLIPPER_PATH}/x", {})
+
+    monkeypatch.setattr(FakeBleChar, "obj", property(obj), raising=False)
+    monkeypatch.setattr(FakeBleChar, "max_write_without_response_size", property(lambda s: 20))
+
+
+def test_known_bonded_flipper_connects_without_scan(
+    flipper: FakeBleFlipper,
+    world: FakeBleWorld,
+    bluez: FakeBluez,
+    recorded: dict[str, list[Any]],
+    make_transport: Callable[..., ble.BleTransport],
+) -> None:
+    world.scan_error = BleakError("er mag niet gescand worden")
+    transport = make_transport(flipper, connect_timeout_s=20.0)
+    transport.open()
+    assert transport.is_open
+    assert recorded["scan"] == []
+    device, kwargs = recorded["client"][0]
+    assert device.details["path"] == FLIPPER_PATH
+    assert device.details["props"]["Adapter"] == HCI1
+    assert device.name == "Flipper Testy"
+    # Sneller opgeven dan de volle connect-time-out als hij uit staat (scan 1 s + 4 s).
+    assert kwargs["timeout"] == pytest.approx(5.0)
+    assert kwargs["bluez"] == {}
+    assert bluez.closed == 1  # de eigen D-Bus-verbinding is na het openen weer dicht
+    assert "Disconnect" not in bluez.calls
+
+
+def test_unpaired_or_unknown_device_still_scans(
+    flipper: FakeBleFlipper,
+    bluez: FakeBluez,
+    recorded: dict[str, list[Any]],
+    make_transport: Callable[..., ble.BleTransport],
+) -> None:
+    bluez.objects[FLIPPER_PATH][bp.DEVICE_IFACE].update(Paired=False, Bonded=False)
+    make_transport(flipper).open()
+    assert len(recorded["scan"]) == 1
+    assert isinstance(recorded["client"][0][0], ble.BLEDevice)
+    assert recorded["client"][0][0].details is None  # het device uit de (fake) scan
+
+    del bluez.objects[FLIPPER_PATH]
+    make_transport(flipper).open()
+    assert len(recorded["scan"]) == 2
+
+
+def test_adapter_is_passed_to_scanner_and_client(
+    flipper: FakeBleFlipper,
+    recorded: dict[str, list[Any]],
+    make_transport: Callable[..., ble.BleTransport],
+) -> None:
+    transport = make_transport(flipper, adapter="hci1")  # zonder D-Bus: via de scan
+    transport.open()
+    assert recorded["scan"][0]["bluez"] == {"adapter": "hci1"}
+    assert recorded["client"][0][1]["bluez"] == {"adapter": "hci1"}
+    assert transport.describe().endswith("via hci1")
+
+
+def test_scan_flippers_uses_and_validates_the_adapter(
+    world: FakeBleWorld, recorded: dict[str, list[Any]]
+) -> None:
+    assert len(ble.scan_flippers("Flipper", 0.1, adapter="hci1")) == 1
+    assert recorded["scan"][-1]["bluez"] == {"adapter": "hci1"}
+    ble.scan_flippers("Flipper", 0.1)
+    assert recorded["scan"][-1]["bluez"] == {}
+    with pytest.raises(DeviceError, match="verwacht hciN"):
+        ble.scan_flippers("Flipper", 0.1, adapter="/org/bluez/hci1")
+    world.scan_error = BleakError("adapter 'hci7' not found")
+    with pytest.raises(DeviceError, match="hci7 bestaat niet in BlueZ"):
+        ble.scan_flippers("Flipper", 0.1, adapter="hci7")
+
+
+def test_invalid_adapter_name_is_rejected_by_the_transport() -> None:
+    with pytest.raises(ValueError, match="verwacht hciN"):
+        ble.BleTransport("80:E1:26:00:00:01", adapter="hci0 ; rm")
+
+
+def test_missing_adapter_fails_clearly_before_connecting(
+    flipper: FakeBleFlipper,
+    bluez: FakeBluez,
+    make_transport: Callable[..., ble.BleTransport],
+) -> None:
+    transport = make_transport(flipper, adapter="hci0")  # zoals de Alfa-BT die niet start
+    with pytest.raises(DeviceNotConnected, match=r"hci0 bestaat niet in BlueZ \(bekend: hci1\)"):
+        transport.open()
+    assert flipper.connects == 0
+    assert not transport.is_open
+    assert ble_threads() == []
+
+
+def test_missing_adapter_reported_by_bleak_is_translated(
+    flipper: FakeBleFlipper, make_transport: Callable[..., ble.BleTransport]
+) -> None:
+    flipper.connect_error = BleakError("adapter 'hci3' not found")  # zonder D-Bus-controle
+    with pytest.raises(DeviceNotConnected, match="hci3 bestaat niet in BlueZ"):
+        make_transport(flipper, adapter="hci3").open()
+
+
+def test_write_chunk_uses_the_mtu_from_dbus_not_the_stale_bleak_cache(
+    flipper: FakeBleFlipper,
+    bluez: FakeBluez,
+    rx_with_dbus_path: None,
+    make_transport: Callable[..., ble.BleTransport],
+) -> None:
+    flipper.swallow = True
+    transport = make_transport(flipper)
+    transport.open()
+    transport.write(b"w" * 600)
+    assert flipper.writes == [243, 243, 114]  # MTU 414 - 3, begrensd op 243
+    assert "Get MTU" in bluez.calls
+
+
+def test_write_chunk_falls_back_to_bleak_when_mtu_is_unreadable(
+    flipper: FakeBleFlipper,
+    bluez: FakeBluez,
+    rx_with_dbus_path: None,
+    make_transport: Callable[..., ble.BleTransport],
+) -> None:
+    del bluez.objects[RX_PATH][ble.GATT_CHAR_IFACE]["MTU"]
+    flipper.swallow = True
+    transport = make_transport(flipper)
+    transport.open()
+    transport.write(b"w" * 50)
+    assert flipper.writes == [20, 20, 10]
+
+
+def test_open_does_not_wait_for_a_late_mtu(world: FakeBleWorld, rx_with_dbus_path: None) -> None:
+    # Vroeger: tot 1,5 s pollen of de bleak-MTU nog boven 23 kwam; dat gebeurt nooit.
+    flipper = FakeBleFlipper(address="AA:AA:AA:AA:AA:09")
+    world.flippers.append(flipper)
+    transport = ble.BleTransport(flipper.address, scan_timeout_s=1.0)
+    started = time.monotonic()
+    try:
+        transport.open()
+        assert time.monotonic() - started < 1.0
+    finally:
+        transport.close()
+
+
+def test_stale_bluez_connection_is_dropped_before_connecting(
+    flipper: FakeBleFlipper,
+    bluez: FakeBluez,
+    make_transport: Callable[..., ble.BleTransport],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bluez.objects[FLIPPER_PATH][bp.DEVICE_IFACE]["Connected"] = True
+    transport = make_transport(flipper)
+    transport.open()
+    assert transport.is_open
+    assert bluez.calls.index("Disconnect") < bluez.calls.index("Get Connected")
+    assert flipper.connects == 1  # daarna gewoon (opnieuw) verbonden
+    assert "nog verbonden in BlueZ" in caplog.text
+
+
+def test_own_close_is_not_logged_as_link_loss(
+    flipper: FakeBleFlipper,
+    make_transport: Callable[..., ble.BleTransport],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="pitoolbox.core.devices._flipper_ble")
+    transport = make_transport(flipper)
+    transport.open()
+    flipper.drop_link()
+    assert wait_until(lambda: not transport.is_open)
+    lost = [r for r in caplog.records if "verbroken" in r.getMessage()]
+    assert [r.levelno for r in lost] == [logging.WARNING]
+
+    # Bij onze eigen close() roept bleak dezelfde callback aan, maar dan staat _open al op
+    # False: alleen een debugregel.
+    caplog.clear()
+    transport.open()
+    transport.close()
+    transport._on_disconnected(None)
+    lost = [r for r in caplog.records if "verbroken" in r.getMessage()]
+    assert lost and all(r.levelno == logging.DEBUG for r in lost)

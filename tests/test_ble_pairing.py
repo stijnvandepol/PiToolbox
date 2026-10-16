@@ -119,6 +119,12 @@ class FakeBus:
             raise self.errors["Set"]
         self.objects[path][interface][name] = value
 
+    async def get_property(self, path: str, interface: str, name: str) -> Any:
+        self.calls.append((path, bp.PROPERTIES_IFACE, "Get", [interface, name]))
+        if "Get" in self.errors:
+            raise self.errors["Get"]
+        return self.objects[path][interface][name]
+
     def export_agent(self, path: str, agent: bp.PairingAgent) -> None:
         self.exported[path] = agent
 
@@ -490,3 +496,98 @@ def test_agent_interface_matches_bluez_signatures() -> None:
     assert methods["RequestPinCode"] == (["o"], ["s"])
     assert methods["Cancel"] == ([], [])
     assert methods["Release"] == ([], [])
+
+
+# --- adapterkeuze ------------------------------------------------------------------------
+
+ADAPTER1 = "/org/bluez/hci1"
+DEV1 = f"{ADAPTER1}/dev_AA_BB_CC_DD_EE_FF"
+
+
+def two_adapters(*, hci1_powered: bool = True, paired_on_hci1: bool = False) -> bp.ManagedObjects:
+    """hci0 en hci1, met hetzelfde apparaat onder allebei (BlueZ houdt ze per adapter apart)."""
+    objects = make_objects(paired=False)
+    objects[ADAPTER1] = {
+        bp.ADAPTER_IFACE: {"Address": "00:11:22:33:44:66", "Powered": hci1_powered}
+    }
+    props = dict(objects[DEV][bp.DEVICE_IFACE])
+    props.update(Adapter=ADAPTER1, Paired=paired_on_hci1, Bonded=paired_on_hci1)
+    objects[DEV1] = {bp.DEVICE_IFACE: props}
+    return objects
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, None), ("", None), ("  ", None), ("hci0", "hci0"), (" hci12 ", "hci12")],
+)
+def test_normalize_adapter_accepts_hci_names(value: str | None, expected: str | None) -> None:
+    assert bp.normalize_adapter(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value", ["hci", "HCI0", "hci-1", "/org/bluez/hci0", "hci0/dev_x", "hci1234", "wlan0"]
+)
+def test_normalize_adapter_rejects_everything_else(value: str) -> None:
+    with pytest.raises(ValueError, match="verwacht hciN"):
+        bp.normalize_adapter(value)
+
+
+def test_find_adapter_by_name_and_clear_errors() -> None:
+    objects = two_adapters()
+    assert bp.find_adapter(objects) == ADAPTER  # eerste die aan staat
+    assert bp.find_adapter(objects, "hci1") == ADAPTER1
+    with pytest.raises(bp.BlePairingError, match=r"hci7 bestaat niet.*bekend: hci0, hci1"):
+        bp.find_adapter(objects, "hci7")
+    with pytest.raises(bp.BlePairingError, match="hci1 staat uit"):
+        bp.find_adapter(two_adapters(hci1_powered=False), "hci1")
+    with pytest.raises(bp.BlePairingError, match="bekend: geen"):
+        bp.find_adapter(make_objects(adapter=False, device=False), "hci0")
+
+
+async def test_pair_on_a_chosen_adapter_uses_that_device_object() -> None:
+    bus = FakeBus(two_adapters())
+    result = await pair(bus, adapter="hci1")
+    assert result.device_path == DEV1
+    assert ("Pair" in bus.members()) and all(
+        path == DEV1 for path, _i, member, _b in bus.calls if member == "Pair"
+    )
+
+
+async def test_pair_with_unknown_or_invalid_adapter_fails_before_any_action() -> None:
+    bus = FakeBus(make_objects())
+    with pytest.raises(bp.BlePairingError, match="hci3 bestaat niet"):
+        await pair(bus, adapter="hci3")
+    assert "RegisterAgent" not in bus.members()
+    assert bus.closed
+    with pytest.raises(bp.BlePairingError, match="verwacht hciN"):
+        await pair(FakeBus(make_objects()), adapter="../hci0")
+
+
+async def test_list_and_unpair_respect_the_adapter() -> None:
+    bus = FakeBus(two_adapters(paired_on_hci1=True))
+    on_hci1 = await bp.list_devices_async("", bus_factory=factory(bus), adapter="hci1")
+    assert [d.address for d in on_hci1] == [ADDR]
+    on_hci0 = await bp.list_devices_async("", bus_factory=factory(bus), adapter="hci0")
+    assert on_hci0 == []  # daar is hij niet gekoppeld
+
+    bus = FakeBus(two_adapters())
+    assert await bp.unpair_async(ADDR, bus_factory=factory(bus), adapter="hci1") is True
+    assert bus.calls == [(ADAPTER1, bp.ADAPTER_IFACE, "RemoveDevice", [DEV1])]
+    with pytest.raises(bp.BlePairingError, match="hci5 bestaat niet"):
+        await bp.unpair_async(ADDR, bus_factory=factory(FakeBus(make_objects())), adapter="hci5")
+
+
+async def test_list_devices_finds_a_renamed_flipper_by_service_uuid() -> None:
+    objects = make_objects(paired=True, name="A1tkethe")  # hernoemd: geen "Flipper"-prefix
+    objects[DEV][bp.DEVICE_IFACE]["UUIDs"] = [
+        "00001800-0000-1000-8000-00805f9b34fb",
+        "8FE5B3D5-2E7F-4A98-2A48-7ACC60FE0000",
+    ]
+    bus = FakeBus(objects)
+    assert await bp.list_devices_async("Flipper", bus_factory=factory(bus)) == []
+    found = await bp.list_devices_async(
+        "Flipper",
+        bus_factory=factory(bus),
+        service_uuids={"8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000"},
+    )
+    assert [d.name for d in found] == ["A1tkethe"]

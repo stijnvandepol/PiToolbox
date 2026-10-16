@@ -18,12 +18,23 @@ from flipper_fakes import (
 )
 
 from pitoolbox.config import Settings
+from pitoolbox.core.devices import _ble_pairing as bp
 from pitoolbox.core.devices import _flipper_ble as ble
 from pitoolbox.core.devices import flipper as flipper_mod
 from pitoolbox.core.devices.flipper import FlipperDevice, make_transport
 from pitoolbox.core.errors import DeviceNotConnected, UnsupportedTransport
 
 BLE_ADDRESS = "80:E1:26:00:00:01"
+
+
+@pytest.fixture(autouse=True)
+def no_real_dbus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Geen echte BlueZ-opzoekingen vanuit de BLE-transport; alleen de fake bleak."""
+
+    async def unavailable() -> bp.BluezBus:
+        raise bp.BlePairingError("geen D-Bus in deze test")
+
+    monkeypatch.setattr(ble, "_bluez_bus_factory", unavailable)
 
 
 @pytest.fixture
@@ -326,3 +337,26 @@ def test_keepalive_disabled_with_zero_interval(usb_only: SimpleNamespace) -> Non
         assert fake.rpc_log.count("system_ping_request") == pings_after_probe
     finally:
         device.close()
+
+
+def test_ble_adapter_setting_reaches_the_transport(usb: SimpleNamespace) -> None:
+    transport = make_transport(
+        settings(
+            flipper_transport="ble", flipper_ble_address=BLE_ADDRESS, flipper_ble_adapter="hci1"
+        )
+    )
+    assert isinstance(transport, ble.BleTransport)
+    assert transport._adapter == "hci1"
+    default = make_transport(settings(flipper_transport="ble", flipper_ble_address=BLE_ADDRESS))
+    assert isinstance(default, ble.BleTransport)
+    assert default._adapter is None
+
+
+def test_ble_adapter_env_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PITOOLBOX_FLIPPER_BLE_ADAPTER", "hci1")
+    assert Settings.from_env().flipper_ble_adapter == "hci1"
+    monkeypatch.setenv("PITOOLBOX_FLIPPER_BLE_ADAPTER", "")
+    assert Settings.from_env().flipper_ble_adapter is None
+    monkeypatch.setenv("PITOOLBOX_FLIPPER_BLE_ADAPTER", "/org/bluez/hci1")
+    with pytest.raises(ValueError, match="verwacht hciN"):
+        Settings.from_env()

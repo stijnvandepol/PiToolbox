@@ -8,6 +8,9 @@ Subcommando's:
 - ``ble-test``: de fase-3-meetscript: verbinden, system_info, opslaglijst, ping-latency en
   downloadsnelheid, optioneel naast USB.
 
+Elk subcommando kent ``--adapter hciN`` (standaard PITOOLBOX_FLIPPER_BLE_ADAPTER, anders de
+standaardadapter van BlueZ), handig als er meerdere Bluetooth-adapters zijn.
+
 Het koppelen praat rechtstreeks met BlueZ over D-Bus (zie core/devices/_ble_pairing.py); er wordt
 nergens een shell of ``bluetoothctl`` gestart. De Flipper-BLE-transportlaag zelf staat in
 core/devices/_flipper_ble.py en wordt pas bij gebruik geimporteerd.
@@ -105,6 +108,13 @@ def _path_arg(value: str) -> str:
         ) from exc
 
 
+def _adapter_arg(value: str) -> str | None:
+    try:
+        return ble_pairing.normalize_adapter(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def _positive_float(value: str) -> float:
     try:
         number = float(value)
@@ -132,12 +142,22 @@ def _build_parser(settings: Settings) -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="commando")
     prefix_default = settings.flipper_ble_name_prefix
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--adapter",
+        type=_adapter_arg,
+        default=settings.flipper_ble_adapter,
+        help="Bluetooth-adapter, bijv. hci1 (standaard PITOOLBOX_FLIPPER_BLE_ADAPTER, anders "
+        "de standaardadapter van BlueZ)",
+    )
 
-    p_scan = sub.add_parser("ble-scan", help="Flippers in de buurt zoeken")
+    p_scan = sub.add_parser("ble-scan", parents=[common], help="Flippers in de buurt zoeken")
     p_scan.add_argument("--timeout", type=_positive_float, default=8.0, help="scanduur (s)")
     p_scan.add_argument("--prefix", default=prefix_default, help="naamprefix van de Flipper")
 
-    p_pair = sub.add_parser("ble-pair", help="koppelen met een Flipper (code van zijn scherm)")
+    p_pair = sub.add_parser(
+        "ble-pair", parents=[common], help="koppelen met een Flipper (code van zijn scherm)"
+    )
     p_pair.add_argument("address", type=_mac_arg, help="BLE-adres (uit ble-scan)")
     p_pair.add_argument(
         "--timeout", type=_positive_float, default=90.0, help="totale tijd voor het koppelen (s)"
@@ -146,15 +166,19 @@ def _build_parser(settings: Settings) -> argparse.ArgumentParser:
         "--force", action="store_true", help="eerst een bestaande koppeling verwijderen"
     )
 
-    p_unpair = sub.add_parser("ble-unpair", help="koppeling met een Flipper verwijderen")
+    p_unpair = sub.add_parser(
+        "ble-unpair", parents=[common], help="koppeling met een Flipper verwijderen"
+    )
     p_unpair.add_argument("address", type=_mac_arg)
 
-    p_list = sub.add_parser("ble-list", help="gekoppelde Flippers tonen")
+    p_list = sub.add_parser("ble-list", parents=[common], help="gekoppelde Flippers tonen")
     p_list.add_argument(
         "--prefix", default=prefix_default, help="naamprefix; leeg = alle apparaten"
     )
 
-    p_test = sub.add_parser("ble-test", help="verbinding en doorvoer meten over BLE")
+    p_test = sub.add_parser(
+        "ble-test", parents=[common], help="verbinding en doorvoer meten over BLE"
+    )
     p_test.add_argument(
         "--address",
         type=_mac_arg,
@@ -216,13 +240,13 @@ class _Found:
     rssi: int | None
 
 
-def _scan(prefix: str, timeout: float) -> list[_Found]:
+def _scan(prefix: str, timeout: float, adapter: str | None = None) -> list[_Found]:
     """Zoek Flippers met de BLE-transportlaag (lui geimporteerd; die module is niet vast)."""
     try:
         from .core.devices._flipper_ble import scan_flippers
     except ImportError as exc:
         raise CliError(f"BLE-transportlaag niet beschikbaar ({exc}).") from exc
-    raw = _call_maybe_async(scan_flippers(prefix, timeout))
+    raw = _call_maybe_async(scan_flippers(prefix, timeout, adapter=adapter))
     found = []
     for cand in raw:
         rssi = getattr(cand, "rssi", None)
@@ -236,10 +260,12 @@ def _scan(prefix: str, timeout: float) -> list[_Found]:
     return found
 
 
-def _paired_by_address(prefix: str) -> dict[str, ble_pairing.PairedDevice] | None:
+def _paired_by_address(
+    prefix: str, adapter: str | None = None
+) -> dict[str, ble_pairing.PairedDevice] | None:
     """Koppelstatus uit BlueZ; None als D-Bus/BlueZ niet beschikbaar is (bijv. Windows)."""
     try:
-        devices = ble_pairing.list_devices(prefix="", only_paired=True)
+        devices = ble_pairing.list_devices(prefix="", only_paired=True, adapter=adapter)
     except ble_pairing.BlePairingError as exc:
         _err(f"Koppelstatus onbekend: {exc}")
         return None
@@ -247,15 +273,16 @@ def _paired_by_address(prefix: str) -> dict[str, ble_pairing.PairedDevice] | Non
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    _out(f"Zoeken naar Flippers (naamprefix {args.prefix!r}, {args.timeout:g} s)...")
-    found = _scan(args.prefix, args.timeout)
+    via = f", adapter {args.adapter}" if args.adapter else ""
+    _out(f"Zoeken naar Flippers (naamprefix {args.prefix!r}, {args.timeout:g} s{via})...")
+    found = _scan(args.prefix, args.timeout, args.adapter)
     if not found:
         _out(
             "Geen Flipper gevonden. Staat Bluetooth aan (Settings > Bluetooth) en is hij niet al "
             "verbonden met een telefoon?"
         )
         return 1
-    paired = _paired_by_address(args.prefix)
+    paired = _paired_by_address(args.prefix, args.adapter)
     rows = [["ADRES", "NAAM", "RSSI", "GEKOPPELD"]]
     for item in sorted(found, key=lambda f: -(f.rssi if f.rssi is not None else -999)):
         state = "?" if paired is None else ("ja" if item.address in paired else "nee")
@@ -267,8 +294,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _flipper_uuids() -> frozenset[str]:
+    """Service-UUID's van een Flipper (ook hernoemd herkenbaar); leeg zonder BLE-module."""
+    try:
+        from .core.devices._flipper_ble import FLIPPER_UUIDS
+    except ImportError:
+        return frozenset()
+    return FLIPPER_UUIDS
+
+
 def cmd_list(args: argparse.Namespace) -> int:
-    devices = ble_pairing.list_devices(prefix=args.prefix, only_paired=True)
+    devices = ble_pairing.list_devices(
+        prefix=args.prefix,
+        only_paired=True,
+        adapter=args.adapter,
+        service_uuids=_flipper_uuids(),
+    )
     if not devices:
         _out("Geen gekoppelde Flippers in BlueZ. Koppel er een met: pitoolbox-flipper ble-pair")
         return 0
@@ -289,7 +330,7 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 def cmd_unpair(args: argparse.Namespace) -> int:
-    if ble_pairing.unpair(args.address):
+    if ble_pairing.unpair(args.address, adapter=args.adapter):
         _out(f"Koppeling met {args.address} verwijderd uit BlueZ.")
         _out(
             "Verwijder ook de koppeling op de Flipper (Settings > Bluetooth > Unpair All "
@@ -317,9 +358,9 @@ def cmd_pair(args: argparse.Namespace) -> int:
     _out("2. Zorg dat de Flipper niet verbonden is met een telefoon of de Flipper-app.")
     _out("3. Zodra de Flipper 'Pairing code' met 6 cijfers toont, voer je die hieronder in.")
     _out()
-    if args.force and ble_pairing.unpair(address):
+    if args.force and ble_pairing.unpair(address, adapter=args.adapter):
         _out("Bestaande koppeling in BlueZ verwijderd (--force).")
-    result = ble_pairing.pair(address, prompt_passkey, args.timeout)
+    result = ble_pairing.pair(address, prompt_passkey, args.timeout, adapter=args.adapter)
     if result.already_paired:
         _out(f"{address} was al gekoppeld.")
         _out("Werkt verbinden niet meer? Gebruik 'ble-pair --force' en kies op de Flipper")
@@ -331,8 +372,11 @@ def cmd_pair(args: argparse.Namespace) -> int:
     _out()
     _out("Zet in /etc/pitoolbox/pitoolbox.env (daarna de service herstarten):")
     _out(f"PITOOLBOX_FLIPPER_BLE_ADDRESS={address}")
+    if args.adapter:
+        _out(f"PITOOLBOX_FLIPPER_BLE_ADAPTER={args.adapter}")
     _out()
-    _out(f"Test de verbinding met: pitoolbox-flipper ble-test --address {address}")
+    via = f" --adapter {args.adapter}" if args.adapter else ""
+    _out(f"Test de verbinding met: pitoolbox-flipper ble-test --address {address}{via}")
     return 0
 
 
@@ -553,7 +597,11 @@ def _render_reports(address: str | None, reports: list[TransportReport]) -> str:
 def cmd_test(args: argparse.Namespace, settings: Settings) -> int:
     address: str | None = args.address or settings.flipper_ble_address
     ble_settings = settings.model_copy(
-        update={"flipper_transport": "ble", "flipper_ble_address": address}
+        update={
+            "flipper_transport": "ble",
+            "flipper_ble_address": address,
+            "flipper_ble_adapter": args.adapter,
+        }
     )
     if address is None and not args.json:
         _err(

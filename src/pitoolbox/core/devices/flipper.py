@@ -226,7 +226,11 @@ def make_transport(settings: Settings) -> ByteTransport:
     # Pas hier importeren: bleak is zwaar en voor USB-gebruik niet nodig.
     from pitoolbox.core.devices._flipper_ble import BleTransport
 
-    return BleTransport(settings.flipper_ble_address, settings.flipper_ble_name_prefix)
+    return BleTransport(
+        settings.flipper_ble_address,
+        settings.flipper_ble_name_prefix,
+        adapter=settings.flipper_ble_adapter,
+    )
 
 
 @dataclass(frozen=True)

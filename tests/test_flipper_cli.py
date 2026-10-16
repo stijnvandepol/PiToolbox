@@ -141,6 +141,9 @@ def devices(
         ["ble-test", "--rounds", "abc"],
         ["ble-scan", "--timeout", "-1"],
         ["ble-pair", ADDR, "--timeout", "0"],
+        ["ble-scan", "--adapter", "/org/bluez/hci1"],
+        ["ble-list", "--adapter", "hci"],
+        ["ble-test", "--adapter", "hci1;reboot"],
         [],
         ["onbekend"],
     ],
@@ -262,7 +265,7 @@ def test_ble_scan_shows_paired_state(
     monkeypatch.setattr(
         flipper_cli,
         "_scan",
-        lambda prefix, timeout: [
+        lambda prefix, timeout, adapter=None: [
             flipper_cli._Found("11:11:11:11:11:11", "Flipper Zwak", -90),
             flipper_cli._Found(ADDR, "Flipper Abc", -50),
             flipper_cli._Found("22:22:22:22:22:22", None, None),
@@ -280,7 +283,9 @@ def test_ble_scan_shows_paired_state(
 def test_ble_scan_without_dbus_shows_unknown(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(flipper_cli, "_scan", lambda p, t: [flipper_cli._Found(ADDR, "F", -40)])
+    monkeypatch.setattr(
+        flipper_cli, "_scan", lambda p, t, a=None: [flipper_cli._Found(ADDR, "F", -40)]
+    )
 
     def no_dbus(**kw: Any) -> Any:
         raise bp.BlePairingError("alleen op Linux")
@@ -295,28 +300,28 @@ def test_ble_scan_without_dbus_shows_unknown(
 def test_ble_scan_nothing_found(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(flipper_cli, "_scan", lambda p, t: [])
+    monkeypatch.setattr(flipper_cli, "_scan", lambda p, t, a=None: [])
     assert flipper_cli.main(["ble-scan"]) == 1
     assert "Geen Flipper gevonden" in capsys.readouterr().out
 
 
 def test_scan_uses_ble_transport_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, float]] = []
+    calls: list[tuple[str, float, str | None]] = []
 
-    def scan_flippers(prefix: str, timeout: float) -> list[Any]:
-        calls.append((prefix, timeout))
+    def scan_flippers(prefix: str, timeout: float, adapter: str | None = None) -> list[Any]:
+        calls.append((prefix, timeout, adapter))
         return [types.SimpleNamespace(address="aa:bb:cc:dd:ee:ff", name="Flipper X", rssi=-60)]
 
     module = types.ModuleType("pitoolbox.core.devices._flipper_ble")
     module.scan_flippers = scan_flippers  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "pitoolbox.core.devices._flipper_ble", module)
     found = flipper_cli._scan("Flipper", 3.0)
-    assert calls == [("Flipper", 3.0)]
+    assert calls == [("Flipper", 3.0, None)]
     assert found == [flipper_cli._Found(ADDR, "Flipper X", -60)]
 
 
 def test_scan_supports_async_scan_function(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def scan_flippers(prefix: str, timeout: float) -> list[Any]:
+    async def scan_flippers(prefix: str, timeout: float, adapter: str | None = None) -> list[Any]:
         return [types.SimpleNamespace(address=ADDR, name=None, rssi=None)]
 
     module = types.ModuleType("pitoolbox.core.devices._flipper_ble")
@@ -516,3 +521,79 @@ def test_measure_transport_throughput_math() -> None:
     assert stats["bytes_per_s"] == pytest.approx(50_000)
     assert stats["kib_per_s"] == pytest.approx(50_000 / 1024)
     assert stats["seconds"] == pytest.approx(10.0)  # 2 x 250000 / 50000
+
+
+# --- adapterkeuze (--adapter / PITOOLBOX_FLIPPER_BLE_ADAPTER) ------------------------------
+
+
+def test_adapter_option_reaches_scan_and_pairing_state(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_scan(prefix: str, timeout: float, adapter: str | None = None) -> list[Any]:
+        seen["scan"] = adapter
+        return [flipper_cli._Found(ADDR, "Flipper Abc", -50)]
+
+    def fake_list(**kw: Any) -> list[bp.PairedDevice]:
+        seen["list"] = kw.get("adapter")
+        return [paired_device()]
+
+    monkeypatch.setattr(flipper_cli, "_scan", fake_scan)
+    monkeypatch.setattr(bp, "list_devices", fake_list)
+    assert flipper_cli.main(["ble-scan", "--adapter", "hci1"]) == 0
+    assert seen == {"scan": "hci1", "list": "hci1"}
+    assert "adapter hci1" in capsys.readouterr().out
+
+
+def test_adapter_defaults_to_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(flipper_cli, "_load_settings", lambda: Settings(flipper_ble_adapter="hci2"))
+    seen: list[Any] = []
+    monkeypatch.setattr(bp, "list_devices", lambda **kw: seen.append(kw.get("adapter")) or [])
+    assert flipper_cli.main(["ble-list"]) == 0
+    assert flipper_cli.main(["ble-list", "--adapter", "hci0"]) == 0
+    assert seen == ["hci2", "hci0"]
+
+
+def test_adapter_reaches_pair_unpair_and_env_hint(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[tuple[str, Any]] = []
+    monkeypatch.setattr(
+        bp, "unpair", lambda address, **kw: calls.append(("unpair", kw.get("adapter"))) or True
+    )
+
+    def fake_pair(address: str, provider: Callable[[], int], timeout: float, **kw: Any) -> Any:
+        calls.append(("pair", kw.get("adapter")))
+        return bp.PairResult(address, None, "/dev", False, True, True, True)
+
+    monkeypatch.setattr(bp, "pair", fake_pair)
+    assert flipper_cli.main(["ble-pair", ADDR, "--force", "--adapter", "hci1"]) == 0
+    assert flipper_cli.main(["ble-unpair", ADDR, "--adapter", "hci1"]) == 0
+    assert calls == [("unpair", "hci1"), ("pair", "hci1"), ("unpair", "hci1")]
+    out = capsys.readouterr().out
+    assert "PITOOLBOX_FLIPPER_BLE_ADAPTER=hci1" in out
+    assert "--adapter hci1" in out
+
+
+def test_ble_test_passes_adapter_to_the_ble_settings(devices: dict[str, Any]) -> None:
+    assert flipper_cli.main(["ble-test", "--adapter", "hci1"]) == 0
+    assert devices["settings"]["ble"].flipper_ble_adapter == "hci1"
+
+
+def test_ble_list_matches_flipper_service_uuids(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
+    from pitoolbox.core.devices import _flipper_ble
+
+    seen: dict[str, Any] = {}
+
+    def fake_list(**kw: Any) -> list[bp.PairedDevice]:
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(bp, "list_devices", fake_list)
+    assert flipper_cli.main(["ble-list"]) == 0
+    assert seen["service_uuids"] == _flipper_ble.FLIPPER_UUIDS
+    assert _flipper_ble.SERVICE_UUID in seen["service_uuids"]
+    assert "00003082-0000-1000-8000-00805f9b34fb" in seen["service_uuids"]
