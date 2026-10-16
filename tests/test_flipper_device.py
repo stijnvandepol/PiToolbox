@@ -6,7 +6,7 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from flipper_fakes import (
@@ -19,6 +19,7 @@ from flipper_fakes import (
 from pitoolbox.config import Settings
 from pitoolbox.core.devices import _flipper_cli as cli
 from pitoolbox.core.devices._flipper_rpc.client import RpcClient, RpcError
+from pitoolbox.core.devices._flipper_rpc.framing import FrameDecoder, encode_frame
 from pitoolbox.core.devices._flipper_rpc.pb import application_pb2, flipper_pb2
 from pitoolbox.core.devices.flipper import (
     ByteTransport,
@@ -311,6 +312,36 @@ def test_client_timeout_and_cancel() -> None:
         client.request(ping(), 0.05)
     with pytest.raises(Aborted):
         client.request(ping(), 5.0, cancel=lambda: True)
+
+
+class _SlowFrames:
+    """Levert de antwoordframes één voor één met een pauze ertussen (zoals BLE-indicaties)."""
+
+    def __init__(self, count: int, gap_s: float) -> None:
+        self._count = count
+        self._gap_s = gap_s
+        self._pending: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        [payload] = FrameDecoder().feed(data)
+        request = flipper_pb2.Main()
+        request.ParseFromString(payload)
+        for i in range(self._count):
+            frame = flipper_pb2.Main()
+            frame.command_id = request.command_id
+            frame.has_next = i < self._count - 1
+            frame.system_ping_response.data = b"x"
+            self._pending.append(encode_frame(frame.SerializeToString()))
+
+    def read(self, max_bytes: int, timeout: float) -> bytes:
+        time.sleep(min(self._gap_s, timeout))
+        return self._pending.pop(0) if self._pending else b""
+
+
+def test_client_timeout_is_per_frame_not_for_the_whole_answer() -> None:
+    client = RpcClient(cast(ByteTransport, _SlowFrames(count=8, gap_s=0.03)), read_slice_s=0.05)
+    frames = client.request(ping(), 0.1)  # totaal ~0,24 s, maar nooit 0,1 s stil
+    assert len(frames) == 8
 
 
 def test_client_command_ids_are_unique_and_nonzero() -> None:

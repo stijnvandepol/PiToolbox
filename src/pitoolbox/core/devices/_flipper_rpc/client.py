@@ -148,9 +148,14 @@ class RpcClient:
     ) -> list[Main]:
         """Verstuur `main` en verzamel alle antwoordframes tot `has_next` False is.
 
+        `timeout` is een inactiviteitstime-out: elk antwoordframe op dit verzoek geeft opnieuw
+        `timeout` seconden. Over BLE komt er per verbindingsinterval (~100 ms gemeten op een
+        Pi 4) maar één indicatie binnen, dus een antwoord met veel frames (DeviceInfo: ~37)
+        zou een vaste deadline niet halen.
+
         Raises:
             RpcError: niet-OK status in een antwoordframe (of sessiefout met command_id 0).
-            DeviceTimeout: geen compleet antwoord binnen `timeout` seconden.
+            DeviceTimeout: `timeout` seconden lang geen (volgend) antwoordframe.
             Aborted: `cancel()` werd waar tijdens het wachten.
         """
         kind = str(main.WhichOneof("content") or "leeg")
@@ -167,6 +172,7 @@ class RpcClient:
                 responses.append(frame)
                 if not frame.has_next:
                     return responses
+                deadline = time.monotonic() + timeout
                 continue
             self._events.append(frame)
             if frame.command_id == 0 and frame.command_status != flipper_pb2.OK:
