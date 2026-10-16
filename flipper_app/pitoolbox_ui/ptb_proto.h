@@ -82,6 +82,11 @@ typedef enum {
     PtbLastFailed = 2,
 } PtbLastResult;
 
+/* ERROR-codes (protocol.py ErrorCode); alleen die waar de FAP iets mee doet. */
+typedef enum {
+    PtbErrorNotReady = 11, /* de Pi kent deze sessie niet (meer): opnieuw HELLO */
+} PtbErrorCode;
+
 typedef enum {
     PtbCloseExecuted = 1,
     PtbCloseRejected = 2,

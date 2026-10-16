@@ -45,12 +45,25 @@ def _scope_section(ctx: ToolContext) -> dict[str, Any]:
     }
 
 
+# Achtergrondwerk van de Flipper-bridge: geen operatie die de gebruiker of het model start, en
+# het wijkt meteen voor elke tool-call (`FlipperDevice.poll_app_events`). Dus niet "bezet".
+_BACKGROUND_OPS = frozenset({"poll_app_events"})
+
+
+def _flipper_section(ctx: ToolContext) -> dict[str, Any]:
+    status = dict(ctx.flipper.status())
+    if status.get("operation") in _BACKGROUND_OPS:
+        status["busy"] = False
+        status["operation"] = None
+    return status
+
+
 def _status(ctx: ToolContext, args: StatusArgs) -> dict[str, Any]:
     return {
         "power": _section(ctx.system.throttled),
         "uplink": _section(ctx.system.uplink),
         "disk": _section(ctx.system.disk),
-        "flipper": _section(ctx.flipper.status),
+        "flipper": _section(lambda: _flipper_section(ctx)),
         "wifi": _section(lambda: _wifi_section(ctx)),
         "captures": _section(ctx.captures.list_active),
         "scope": _section(lambda: _scope_section(ctx)),

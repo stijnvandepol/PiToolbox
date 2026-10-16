@@ -126,3 +126,21 @@ def test_emergency_stop_all_fail(make_ctx: MakeCtx, tmp_path: Path, fixed_scope:
 class _BrokenPending:
     def clear(self) -> int:
         raise RuntimeError("c")
+
+
+def test_status_does_not_report_bridge_poll_as_busy(
+    make_ctx: MakeCtx, tmp_path: Path, fixed_scope: Scope
+) -> None:
+    """De lezer van de Flipper-bridge wijkt voor elke tool-call: geen "bezet" naar het model."""
+    ctx = make_ctx(tmp_path, fixed_scope)
+    ctx.flipper.status.return_value = {
+        "connected": True,
+        "busy": True,
+        "operation": "poll_app_events",
+        "ui_app": "active",
+    }
+    out = call(ctx, "status")["flipper"]
+    assert out["busy"] is False and out["operation"] is None and out["ui_app"] == "active"
+    ctx.flipper.status.return_value = {"connected": True, "busy": True, "operation": "ir_send"}
+    out = call(ctx, "status")["flipper"]
+    assert out["busy"] is True and out["operation"] == "ir_send"

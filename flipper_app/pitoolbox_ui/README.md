@@ -55,6 +55,8 @@ Zet `dist/pitoolbox_ui.fap` op de SD-kaart, in **`/ext/apps/Tools/pitoolbox_ui.f
 - **Zelf openen** (Apps → Tools → PiToolbox): de app heeft dan geen kanaal naar de Pi. Hij laat een verzoek achter in `/ext/apps_data/pitoolbox_ui/start_request`, toont "Pi wordt gevraagd de app te openen..." en sluit. De Pi pollt dat bestand en start de app binnen een paar seconden opnieuw, dit keer gekoppeld. Is er geen host verbonden, dan zie je "Geen verbinding met Pi" en blijft er niets achter.
 - Back in het hoofdmenu sluit de app. Back tijdens een lopende actie breekt die af. De noodstop werkt altijd, ook als er al iets loopt.
 - Valt de verbinding weg, dan zie je 2 s "Verbinding met Pi verbroken" en sluit de app. Na het opnieuw verbinden start de Pi hem weer.
+- Raakt alleen de Pi de sessie kwijt (bijv. een bericht kwam niet aan), dan zie je even "Verbinden met Pi..." en groet de app opnieuw (ERROR `NOT_READY`, protocol §5). Een open vraag komt daarna terug, met een nieuwe handle.
+- Een antwoord (OK/Back) hoort altijd bij de vraag die op het scherm stond toen je drukte. Is die vraag intussen gesloten of vervangen, dan stuurt de app niets.
 
 ## Veiligheid rond sessieverlies
 

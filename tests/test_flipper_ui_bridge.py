@@ -32,6 +32,7 @@ from pitoolbox.frontends.flipper_ui import protocol as proto
 from pitoolbox.frontends.flipper_ui.bridge import (
     FRONTEND,
     START_REQUEST_PATH,
+    BridgeEvent,
     BridgeState,
     BridgeTiming,
     FlipperUiBridge,
@@ -213,6 +214,50 @@ def test_handshake_sends_welcome_presets_status_and_attaches_confirmer(tmp_path:
         lab.bridge.stop()
     assert lab.store.physical_confirmer is None
     assert not lab.fake.fap_running  # bij stoppen sluit de bridge zijn app
+
+
+def test_observer_sees_start_handshake_deliveries_and_detach(tmp_path: Path) -> None:
+    lab = _make(tmp_path)
+    seen: list[BridgeEvent] = []
+    lab.bridge = FlipperUiBridge(
+        lab.runner, app_path=FAP_PATH, timing=FAST_BRIDGE, observer=seen.append
+    )
+    try:
+        lab.connect()
+        assert wait_until(lambda: any(e.detail == "Status" for e in seen))
+        kinds = [e.kind for e in seen]
+        assert {"started", "hello", "connected", "delivered"} <= set(kinds)
+        assert kinds.index("hello") < kinds.index("connected")
+        delivered = [e.detail for e in seen if e.kind == "delivered"]
+        assert delivered[0] == "Welcome" and "Presets" in delivered
+        hello = next(e for e in seen if e.kind == "hello")
+        assert hello.instance == lab.fap.instance and hello.detail == "v1.0"
+        # send_status: een verse STATUS (via de status-tool) wordt afgeleverd.
+        before = delivered.count("Status")
+        lab.bridge.send_status()
+        assert wait_until(
+            lambda: [e.detail for e in seen if e.kind == "delivered"].count("Status") > before
+        )
+        lab.fake.fap_exits()
+        assert wait_until(lambda: any(e.kind == "detached" for e in seen))
+    finally:
+        lab.bridge.stop()
+
+
+def test_observer_reports_locked_loader(tmp_path: Path) -> None:
+    lab = _make(tmp_path)
+    seen: list[BridgeEvent] = []
+    lab.bridge = FlipperUiBridge(
+        lab.runner, app_path=FAP_PATH, timing=FAST_BRIDGE, observer=seen.append
+    )
+    lab.fake.user_app_open = True
+    try:
+        lab.bridge.start()
+        lab.bridge.request_start()
+        assert wait_until(lambda: any(e.kind == "start_failed" for e in seen))
+        assert next(e for e in seen if e.kind == "start_failed").detail == "locked"
+    finally:
+        lab.bridge.stop()
 
 
 def test_repeated_hello_same_instance_gets_welcome_without_reset(lab: Lab) -> None:
@@ -610,6 +655,7 @@ def test_manual_start_request_starts_app_and_is_deleted(tmp_path: Path) -> None:
     lab = _make(tmp_path, files=files)
     lab.fake.rtc_epoch = now
     try:
+        lab.device.connect()  # de bridge pollt alleen over een bestaande RPC-sessie
         lab.bridge.start()
         assert wait_until(lambda: lab.bridge.state is BridgeState.CONNECTED)
         assert START_REQUEST_PATH not in lab.fake.files
@@ -623,6 +669,7 @@ def test_manual_start_request_too_old_is_ignored(tmp_path: Path) -> None:
     lab = _make(tmp_path, files=files)
     lab.fake.rtc_epoch = now
     try:
+        lab.device.connect()
         lab.bridge.start()
         assert wait_until(lambda: START_REQUEST_PATH not in lab.fake.files)
         time.sleep(0.2)
@@ -639,6 +686,7 @@ def test_manual_start_not_polled_while_user_app_open(tmp_path: Path) -> None:
     lab.fake.rtc_epoch = now
     lab.fake.user_app_open = True
     try:
+        lab.device.connect()
         lab.bridge.start()
         assert wait_until(lambda: "app_lock_status_request" in lab.fake.rpc_log)
         time.sleep(0.2)

@@ -24,6 +24,11 @@ threads posten alleen een callable naar die lus:
   (bevestigingen), `flipper-ui-device` (app starten, verzoekbestand pollen) en `flipper-ui-aux`
   (STATUS samenstellen). De noodstop draait altijd meteen in een eigen thread.
 
+Het verzoekbestand (§8) wordt alleen gepold als het device al verbonden is en in RPC staat
+(`device.status()`, zonder lock): de bridge verbindt nooit zelf (geen reconnect-storm over BLE)
+en zet USB niet elke paar seconden van CLI naar RPC. Zonder RPC-sessie van de Pi schrijft de
+FAP ook geen verzoek (`rpc_get_sessions_count`), dus er valt dan niets te missen.
+
 De device-lock serialiseert alles wat de Flipper raakt; de Flipper doet toch maar één
 RPC-opdracht tegelijk. De sink van het device en de luisteraar van de `PendingStore` worden
 met hún lock vast aangeroepen: ze zetten alleen iets in de begrensde inbox van de hoofdlus.
@@ -36,6 +41,21 @@ loader vrij, dan start de bridge hem ("Pi kan starten"). Bij app dicht, link weg
 app of afsluiten koppelt de bridge eerst los (daarna geldt de oude regel weer), en pas dan
 gaat de rest. Een OK die nog onderweg was als de link wegviel, vindt een losgekoppelde lease
 en voert niets uit (fail closed); de pending houdt zijn TTL en kan daarna in de chat.
+
+**Eén vraag tegelijk, en pas na CONFIRM_CLOSED.** De rij met vragen is de `PendingStore` zelf
+(oudste eerst, zonder de pendings waarvoor een OK/Back loopt): een pending kan dus niet uit
+een eigen rij vallen. Een nieuwe CONFIRM_PROMPT gaat pas weg als de CONFIRM_CLOSED van de
+vorige echt afgeleverd is; een CLOSED of PROMPT die niet aankomt, maakt de sessie
+onbetrouwbaar (loskoppelen, de app opnieuw laten groeten). Verloopt een handle terwijl de
+pending nog leeft (handle-TTL ≤ 120 s), dan volgt een nieuwe vraag met een nieuwe handle.
+
+**Opnieuw groeten.** Draait de app nog terwijl de bridge losgekoppeld is (bijv. na een
+CLOSED die niet aankwam), dan stuurt de bridge bij het "starten" ERROR `NOT_READY`; de FAP
+groet daarop opnieuw (§5). Komt er geen HELLO, dan sluit de bridge zijn eigen app.
+
+**Waarnemen.** `observer` (optioneel) krijgt `BridgeEvent`s: app gestart of niet, HELLO,
+handdruk rond, elk afgeleverd bericht, losgekoppeld. Alleen kijken, niet sturen; gebruikt door
+`pitoolbox-flipper ui-test` en `ui-droptest`. `send_status()` stuurt een verse STATUS.
 """
 
 from __future__ import annotations
@@ -50,7 +70,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, StrEnum
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pitoolbox.agent.session import AgentEvent, AgentLimits, AgentSession, ToolCallStarted, TurnStop
 from pitoolbox.core.devices.flipper import (
@@ -61,7 +81,7 @@ from pitoolbox.core.devices.flipper import (
     DeviceBusy,
     FlipperDevice,
 )
-from pitoolbox.core.errors import DeviceError, ToolboxError
+from pitoolbox.core.errors import Aborted, DeviceError, ToolboxError
 from pitoolbox.core.policy import PendingChange, PendingEvent, PhysicalConfirmer
 from pitoolbox.frontends.flipper_ui.presets import PresetConfig
 from pitoolbox.frontends.flipper_ui.protocol import (
@@ -119,7 +139,7 @@ START_REQUEST_PATH = "/ext/apps_data/pitoolbox_ui/start_request"
 START_REQUEST_MAX_BYTES = 64
 START_REQUEST_MAX_AGE_S = 30
 _START_REQUEST_RE = re.compile(rb"^PTBUI 1 ([0-9]{1,10})\n?$")
-MAX_QUEUED_PROMPTS = 8  # protocol §6: hoogstens 8 open bevestigingen
+MAX_QUEUED_PROMPTS = 8  # protocol §6: hoogstens 8 open handles (in de praktijk 1: één vraag)
 _MAX_INBOX = 256  # externe gebeurtenissen (FAP-frames, pendings) in de hoofdlus
 _MAX_OUTBOX = 64
 
@@ -143,7 +163,8 @@ class BridgeTiming:
     restart_backoff_s: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0, 60.0)
     restart_window_s: float = 300.0  # na een verloren link zo lang opnieuw proberen
     link_backoff_s: tuple[float, ...] = (3.0, 6.0, 12.0, 30.0, 60.0)  # pollen zonder link
-    stop_join_s: float = 2.0
+    stop_join_s: float = 2.0  # ook de grens voor het sluiten van de app in stop()
+    start_timeout_s: float = 120.0  # vangnet: zo lang hoogstens in STARTING (device-lock bezet)
 
 
 class BridgeState(StrEnum):
@@ -154,6 +175,29 @@ class BridgeState(StrEnum):
     STOPPED = "stopped"
 
 
+BridgeEventKind = Literal["started", "start_failed", "hello", "connected", "delivered", "detached"]
+
+
+@dataclass(frozen=True)
+class BridgeEvent:
+    """Waarneming voor een `observer` (zie de module-docstring).
+
+    - `started`: APP_STARTED ontvangen. `start_failed`: niet gestart; `detail` is "locked" (de
+      loader was bezet) of de fout.
+    - `hello`: HELLO van een nieuwe instance. `connected`: WELCOME afgeleverd (handdruk rond).
+    - `delivered`: de FAP bevestigde een bericht; `detail` is het type (bijv. "Status").
+    - `detached`: app-sessie voorbij; `detail` is de reden.
+    """
+
+    kind: BridgeEventKind
+    detail: str = ""
+    instance: int | None = None
+    at: float = 0.0  # time.monotonic()
+
+
+BridgeObserver = Callable[[BridgeEvent], None]
+
+
 class _Delivery(Enum):
     SENT = 1
     DROPPED = 2  # na de retries nog geweigerd; link is in orde
@@ -162,10 +206,15 @@ class _Delivery(Enum):
 
 @dataclass
 class _Out:
-    build: Callable[[int], Message]  # krijgt de seq pas bij versturen (volgorde = seq-volgorde)
+    # Krijgt de seq pas bij versturen (volgorde = seq-volgorde). None: niet meer sturen (bijv.
+    # een vraag waarvan de TTL al op is).
+    build: Callable[[int], Message | None]
     instance: int | None  # None: altijd sturen (fouten vóór HELLO)
     on_sent: Callable[[], None] | None = None  # draait in de hoofdlus
     progress_ref: int | None = None
+    # Draait in de hoofdlus als het bericht niet afgeleverd kon worden terwijl de link nog in
+    # orde leek (zendrij vol, de app weigerde 4x, niet te coderen). Niet bij DEAD.
+    on_failed: Callable[[], None] | None = None
 
 
 @dataclass
@@ -184,7 +233,7 @@ class _Fap:
     handles: ConfirmHandles[str]
     rx_seq: SeqTracker = field(default_factory=SeqTracker)
     shown: tuple[int, str] | None = None  # (handle, pending_id) dat nu op het scherm staat
-    queue: deque[str] = field(default_factory=deque)  # pending_ids die nog moeten
+    closing: set[int] = field(default_factory=set)  # handles met een CLOSED die nog onderweg is
 
 
 class _ActionFailed(Exception):
@@ -245,8 +294,12 @@ class FlipperUiBridge:
         timing: BridgeTiming | None = None,
         clock: Callable[[], float] = time.monotonic,
         owns_provider: bool = False,
+        observer: BridgeObserver | None = None,
     ) -> None:
+        """`observer` wordt in verschillende threads aangeroepen en mag niet blokkeren (bijv.
+        alleen `queue.put_nowait`)."""
         self.runner = runner
+        self._observer = observer
         self._owns_provider = owns_provider
         self.device: FlipperDevice = runner.ctx.flipper
         self.store = runner.ctx.pending
@@ -264,12 +317,14 @@ class FlipperUiBridge:
         self._action: _Job | None = None
         self._answering: set[str] = set()  # pending_ids waarvoor een OK/Back loopt
         self._hello_deadline: float | None = None
+        self._start_deadline: float | None = None
         self._restart_at: float | None = None
         self._restart_until = 0.0
         self._restart_step = 0
         self._next_poll = 0.0
         self._link_step = 0
         self._next_expire = 0.0
+        # Per bridge, niet per FAP-sessie (§4): een nieuwe HELLO geeft geen nieuwe burst.
         self._rx_rate = RateLimiter(clock=clock)
         self._session: AgentSession | None = None  # alleen in de action-lane gebruikt
 
@@ -322,6 +377,19 @@ class FlipperUiBridge:
         """Start de app nu (als hij niet al draait en de loader vrij is). Thread-safe."""
         self._post(lambda: self._request_start("op verzoek"))
 
+    def send_status(self) -> None:
+        """Stuur een verse STATUS naar de app (als de handdruk rond is). Thread-safe."""
+        self._post(self._send_status)
+
+    def _notify(self, kind: BridgeEventKind, detail: str = "", instance: int | None = None) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer(BridgeEvent(kind, detail, instance, time.monotonic()))
+        except Exception:
+            log.exception("observer van de Flipper-bridge faalde")
+
     def start(self) -> None:
         if self._threads:
             raise RuntimeError("bridge draait al")
@@ -371,10 +439,24 @@ class FlipperUiBridge:
         for lane in self._lanes.values():
             lane.stop(self.timing.stop_join_s)
         if self.device.rpc_app_state != "off":
-            self.device.exit_rpc_app()
+            self._exit_app_bounded()
+        if self._session is not None:
+            self._session.close()
         if self._owns_provider and self.provider is not None:
             self.provider.close()
         log.info("Flipper-bridge gestopt")
+
+    def _exit_app_bounded(self) -> None:
+        """App sluiten, maar stop() wacht hoogstens `stop_join_s`: `exit_rpc_app` wacht op de
+        device-lock, en een lopende tool (bijv. een lange capture) kan die lang vasthouden. De
+        lease is dan al los; de app sluit later alsnog (of bij `device.close()`)."""
+        thread = threading.Thread(
+            target=self.device.exit_rpc_app, name="flipper-ui-exit", daemon=True
+        )
+        thread.start()
+        thread.join(self.timing.stop_join_s)
+        if thread.is_alive():
+            log.warning("Flipper-bridge: app sluiten wacht op een lopende Flipper-actie")
 
     # --- inbox ------------------------------------------------------------------------
 
@@ -430,6 +512,16 @@ class FlipperUiBridge:
             self._next_expire = now + self.timing.expire_s
             self._expire_handles()
         if (
+            self._state is BridgeState.STARTING
+            and self._start_deadline is not None
+            and now >= self._start_deadline
+        ):
+            # Vangnet: de start-job meldde zich nooit (bijv. de device-lock bleef bezet).
+            log.warning("PiToolbox-app starten duurde te lang; opgegeven")
+            self._start_deadline = None
+            self._state = BridgeState.IDLE
+            return
+        if (
             self._state in (BridgeState.STARTING, BridgeState.HANDSHAKE)
             and self._hello_deadline is not None
             and now >= self._hello_deadline
@@ -452,10 +544,11 @@ class FlipperUiBridge:
         if fap is None:
             return
         for handle, _pid in fap.handles.expire():
+            # Leeft de pending nog (TTL > handle-TTL), dan vraagt _show_next hem opnieuw.
             log.info("bevestiging op de Flipper verlopen (handle %08x)", handle)
-            self._send(partial(_closed, handle=handle, reason=CloseReason.EXPIRED))
             if fap.shown is not None and fap.shown[0] == handle:
                 fap.shown = None
+            self._close_prompt(fap, handle, CloseReason.EXPIRED)
         self._show_next()
 
     # --- starten (§8) -----------------------------------------------------------------
@@ -467,30 +560,53 @@ class FlipperUiBridge:
             return
         self._state = BridgeState.STARTING
         self._hello_deadline = None
+        self._start_deadline = self._clock() + self.timing.start_timeout_s
         log.info("PiToolbox-app starten (%s)", why)
 
         def job() -> None:
+            # Draait hij nog (deze kant koppelde los, de app niet), dan is starten een no-op
+            # en moet de app opnieuw groeten.
+            running = self.device.rpc_app_state == "active"
             try:
                 self.device.start_rpc_app(self.app_path, lock_wait_s=lock_wait_s)
             except AppLocked as exc:
                 log.info("app niet gestart: %s", exc)
+                self._notify("start_failed", "locked")
                 self._post(lambda: self._on_start_failed(retry=False))
-            except (DeviceError, ValueError) as exc:
+            except Aborted as exc:  # noodstop terwijl de start op de device-lock wachtte
+                log.info("app starten afgebroken: %s", exc)
+                self._notify("start_failed", str(exc))
+                self._post(lambda: self._on_start_failed(retry=False))
+            except (ToolboxError, ValueError) as exc:  # DeviceError is ook een ToolboxError
                 log.warning("app starten mislukte: %s", exc)
+                self._notify("start_failed", str(exc))
                 self._post(lambda: self._on_start_failed(retry=retry))
+            except Exception as exc:
+                log.exception("app starten faalde onverwacht")
+                self._notify("start_failed", type(exc).__name__)
+                self._post(lambda: self._on_start_failed(retry=False))
             else:
-                self._post(self._on_started)
+                self._notify("started")
+                self._post(partial(self._on_started, rehello=running))
 
         if not self._lanes["device"].submit(job):
             self._state = BridgeState.IDLE
+            self._start_deadline = None
 
-    def _on_started(self) -> None:
+    def _on_started(self, *, rehello: bool = False) -> None:
+        self._start_deadline = None
         if self._state is BridgeState.STARTING:
             self._state = BridgeState.HANDSHAKE
         if self._state is BridgeState.HANDSHAKE:
             self._hello_deadline = self._clock() + self.timing.hello_timeout_s
+            if rehello:
+                # §5: de FAP groet opnieuw op ERROR NOT_READY (zelfde instance, nieuwe sessie
+                # hier: oude handles bestaan aan deze kant niet meer).
+                log.info("PiToolbox-app draait nog; opnieuw groeten gevraagd")
+                self._send_error(0, ErrorCode.NOT_READY, "Opnieuw verbinden", instance=None)
 
     def _on_start_failed(self, *, retry: bool) -> None:
+        self._start_deadline = None
         if self._state is BridgeState.STARTING:
             self._state = BridgeState.IDLE
         if retry:
@@ -514,8 +630,12 @@ class FlipperUiBridge:
 
     def _poll_start_request(self) -> None:
         """Device-lane: verzoekbestand van een handmatig gestarte FAP (§8). Alleen als het
-        device vrij is en er geen andere app open is; een oud verzoek (> 30 s) telt niet."""
+        device verbonden is en in RPC staat, vrij is en er geen andere app open is; een oud
+        verzoek (> 30 s) telt niet."""
         if self.device.rpc_app_state != "off":
+            return
+        status = self.device.status()  # zonder lock en zonder te verbinden
+        if not status.get("connected") or status.get("mode") != "rpc":
             return
         try:
             if self.device.app_lock_status(idle_only=True):
@@ -573,6 +693,8 @@ class FlipperUiBridge:
         lease, self._lease = self._lease, None
         if lease is not None:
             self.runner.detach_physical_confirmer(lease, reason)
+        if self._fap is not None or self._state is not BridgeState.IDLE:
+            self._notify("detached", reason, self.instance)
         fap, self._fap = self._fap, None
         if fap is not None:
             fap.handles.revoke_all()
@@ -660,6 +782,7 @@ class FlipperUiBridge:
         self._restart_at = None
         self._restart_step = 0
         log.info("Flipper-app groet: v%d.%d", msg.app_major, msg.app_minor)
+        self._notify("hello", f"v{msg.app_major}.{msg.app_minor}", msg.instance)
         self._send_welcome(fap)
 
     def _send_welcome(self, fap: _Fap) -> None:
@@ -683,6 +806,7 @@ class FlipperUiBridge:
         if self._state is not BridgeState.CONNECTED:
             self._state = BridgeState.CONNECTED
             self._hello_deadline = None
+            self._notify("connected", instance=instance)
             if self._lease is None:
                 try:
                     self._lease = self.runner.attach_physical_confirmer(FRONTEND)
@@ -691,8 +815,6 @@ class FlipperUiBridge:
             self._send_presets(fap)
             self._send_status()
         # Alles wat al openstaat, moet nu op de Flipper (de chat kan het niet meer).
-        for action in self.store.list():
-            self._queue_prompt(fap, action.id)
         self._show_next()
 
     # --- bevestigen (§6) --------------------------------------------------------------------
@@ -702,9 +824,7 @@ class FlipperUiBridge:
             return
         pid = event.action.id
         if event.change is PendingChange.CREATED:
-            fap = self._fap
-            if self._state is BridgeState.CONNECTED and fap is not None:
-                self._queue_prompt(fap, pid)
+            if self._state is BridgeState.CONNECTED and self._fap is not None:
                 self._show_next()
             elif self._state is BridgeState.IDLE:
                 self._request_start("bevestiging nodig")
@@ -723,35 +843,59 @@ class FlipperUiBridge:
                 if event.change is PendingChange.EXPIRED
                 else CloseReason.REVOKED
             )
-            self._send(lambda seq: ConfirmClosed(seq=seq, handle=handle, reason=reason))
-            self._show_next()
-        elif pid in fap.queue:
-            fap.queue.remove(pid)
+            self._close_prompt(fap, handle, reason)
 
-    def _queue_prompt(self, fap: _Fap, pid: str) -> None:
-        if (fap.shown is not None and fap.shown[1] == pid) or pid in fap.queue:
+    def _close_prompt(self, fap: _Fap, handle: int, reason: CloseReason) -> None:
+        """CONFIRM_CLOSED naar de FAP. Tot die afgeleverd is, gaat er geen nieuwe vraag weg:
+        anders kan een OK die al onderweg was, op een vraag terechtkomen die de mens niet zag.
+        Komt hij niet aan, dan is de sessie onbetrouwbaar (`_on_confirm_undelivered`)."""
+        fap.closing.add(handle)
+        self._send(
+            partial(_closed, handle=handle, reason=reason),
+            on_sent=partial(self._on_closed_sent, fap, handle),
+            on_failed=partial(self._on_confirm_undelivered, fap, "CONFIRM_CLOSED"),
+        )
+
+    # Deze callbacks vergelijken de sessie zelf (`_Fap`), niet het instance-nummer: na opnieuw
+    # groeten (§5) heeft de nieuwe sessie hetzelfde nummer.
+
+    def _on_closed_sent(self, fap: _Fap, handle: int) -> None:
+        if self._fap is not fap:
             return
-        if pid in self._answering:
+        fap.closing.discard(handle)
+        self._show_next()
+
+    def _on_confirm_undelivered(self, fap: _Fap, what: str) -> None:
+        """Een PROMPT of CLOSED kwam niet aan terwijl de link in orde leek: wat er op het
+        scherm staat, weet de Pi dan niet meer. Loskoppelen (eerst de lease) en de app opnieuw
+        laten groeten; daarna komen de open pendings opnieuw, met nieuwe handles."""
+        if self._fap is not fap or self._state is BridgeState.STOPPED:
             return
-        if len(fap.queue) >= MAX_QUEUED_PROMPTS:
-            log.warning("te veel open bevestigingen; deze verschijnt niet op de Flipper")
-            return
-        fap.queue.append(pid)
+        log.warning("%s niet afgeleverd; sessie met de app opnieuw opbouwen", what)
+        self._detach(f"{what} niet afgeleverd", restart=True)
 
     def _show_next(self) -> None:
-        """Eén vraag tegelijk op het scherm; de rest wacht (protocol §6)."""
+        """Eén vraag tegelijk op het scherm (protocol §6). De rij is de PendingStore zelf:
+        oudste eerst, zonder de pendings waarvoor nog een OK/Back loopt."""
         fap = self._fap
-        if fap is None or self._state is not BridgeState.CONNECTED or self._lease is None:
+        if (
+            fap is None
+            or self._state is not BridgeState.CONNECTED
+            or self._lease is None
+            or fap.shown is not None
+            or fap.closing
+        ):
             return
-        while fap.shown is None and fap.queue:
-            pid = fap.queue.popleft()
-            action = self.store.get(pid)
-            if action is None:
+        for action in self.store.list():
+            pid = action.id
+            if pid in self._answering:
                 continue
-            ttl = int(self.store.remaining_s(action))
+            ttl = min(self.store.remaining_s(action), float(MAX_TTL_S))
             if ttl < 1:
                 continue
-            ttl = min(ttl, MAX_TTL_S)
+            # Vóór issue() vastgelegd: het aftellen op de FAP (vanaf `deadline`) eindigt zo
+            # nooit ná de handle; die verloopt uiterlijk met de pending (fractie van een ms).
+            deadline = self._clock() + ttl
             try:
                 handle = fap.handles.issue(pid, instance=fap.instance, ttl_s=ttl)
             except ProtocolError:
@@ -759,17 +903,41 @@ class FlipperUiBridge:
                 return
             fap.shown = (handle, pid)
             summary = _prompt_text(action.summary, action.tool, action.frontend)
-            self._send(partial(_prompt, handle=handle, ttl_s=ttl, summary=summary))
+            self._send(
+                partial(self._build_prompt, handle=handle, deadline=deadline, summary=summary),
+                on_failed=partial(self._on_confirm_undelivered, fap, "CONFIRM_PROMPT"),
+            )
+            return
+
+    def _build_prompt(
+        self, seq: int, *, handle: int, deadline: float, summary: str
+    ) -> ConfirmPrompt | None:
+        """Zender-thread: de TTL pas nu berekenen, zodat het aftellen op de FAP niet langer is
+        dan de handle-TTL op de Pi (ook niet na een tijd in de zendrij). Is de tijd al op, dan
+        niet sturen; de handle verloopt vanzelf (CONFIRM_CLOSED) en de pending komt opnieuw."""
+        ttl = min(int(deadline - self._clock()), MAX_TTL_S)
+        if ttl < 1:
+            return None
+        return ConfirmPrompt(seq=seq, handle=handle, ttl_s=ttl, summary=summary)
 
     def _on_confirm_answer(self, fap: _Fap, msg: ConfirmAnswer) -> None:
+        # CONFIRM_ANSWER heeft geen instance-veld: `fap` is de sessie sinds de laatste HELLO,
+        # en een handle bestaat alleen in de ConfirmHandles van die sessie (§6).
         lease = self._lease
+        on_screen = fap.shown is not None and fap.shown[0] == msg.handle
         pid = fap.handles.take(msg.handle, instance=fap.instance) if lease is not None else None
-        if fap.shown is not None and fap.shown[0] == msg.handle:
+        if on_screen:
             fap.shown = None
         if lease is None or pid is None:
-            # Onbekend, al gebruikt, verlopen of van een andere instance: niets doen.
+            # Onbekend, al gebruikt, verlopen of van een vorige sessie: niets doen.
             self._audit_refusal("ongeldige of verlopen handle", approve=msg.approve)
             self._send_error(msg.seq, ErrorCode.CONFIRM_INVALID, "Bevestiging ongeldig of verlopen")
+            if on_screen:
+                # Onze handle, net verlopen (de timer was nog niet langs): de FAP moet horen
+                # dat er niets gebeurde, anders blijft "ja gestuurd" staan.
+                fap.handles.revoke(msg.handle)
+                reason = CloseReason.EXPIRED if lease is not None else CloseReason.REVOKED
+                self._close_prompt(fap, msg.handle, reason)
             self._show_next()
             return
         self._answering.add(pid)
@@ -791,8 +959,10 @@ class FlipperUiBridge:
             self._post(lambda: self._on_answered(instance, handle, pid, tool, approve, raw))
 
         if not self._lanes["confirm"].submit(job):
+            # De handle is verbruikt, de pending niet: intrekken en opnieuw vragen.
             self._answering.discard(pid)
             self._send_error(msg.seq, ErrorCode.BUSY, "Pi is bezet, probeer opnieuw")
+            self._close_prompt(fap, handle, CloseReason.REVOKED)
 
     def _on_answered(
         self,
@@ -818,12 +988,9 @@ class FlipperUiBridge:
         log.info("bevestiging op de Flipper: %s", reason.name.lower())
         fap = self._fap
         if fap is not None and fap.instance == instance:
-            self._send(lambda seq: ConfirmClosed(seq=seq, handle=handle, reason=reason))
-        if self._session is not None:
-            session = self._session
-            self._lanes["action"].submit(
-                partial(_external_outcome, session, pid, approve=approve, result=raw)
-            )
+            self._close_prompt(fap, handle, reason)
+        # De preset-sessie (en elke andere AgentSession) hoort de uitkomst via de runner
+        # (`subscribe_resolutions`), niet via de bridge.
         self._send_status()
         self._show_next()
 
@@ -1004,9 +1171,10 @@ class FlipperUiBridge:
 
     def _send(
         self,
-        build: Callable[[int], Message],
+        build: Callable[[int], Message | None],
         *,
         on_sent: Callable[[], None] | None = None,
+        on_failed: Callable[[], None] | None = None,
         instance: int | None = -1,
     ) -> None:
         """Zet een bericht in de zendrij. Standaard alleen voor de huidige instance."""
@@ -1016,12 +1184,15 @@ class FlipperUiBridge:
                 return
             instance = fap.instance
         with self._out_cond:
-            if len(self._outbox) >= _MAX_OUTBOX:
+            full = len(self._outbox) >= _MAX_OUTBOX
+            if full:
                 self.dropped_out += 1
                 log.warning("zendrij naar de app vol; bericht weggegooid")
-                return
-            self._outbox.append(_Out(build, instance, on_sent))
-            self._out_cond.notify_all()
+            else:
+                self._outbox.append(_Out(build, instance, on_sent, on_failed=on_failed))
+                self._out_cond.notify_all()
+        if full and on_failed is not None:
+            self._post(on_failed)
 
     def _send_error(
         self, ref: int, code: ErrorCode, text: str, *, instance: int | None = -1
@@ -1143,14 +1314,23 @@ class FlipperUiBridge:
             if wait > 0:
                 time.sleep(wait)
             try:
-                data = encode(item.build(self._tx_seq.next()))
+                msg = item.build(self._tx_seq.next())
+                data = encode(msg) if msg is not None else None
             except (ProtocolError, ValueError):
                 log.exception("bericht naar de app kon niet gecodeerd worden")
+                if item.on_failed is not None:
+                    self._post(item.on_failed)
                 continue
+            if msg is None or data is None:
+                continue  # achterhaald (bijv. de TTL van een vraag was al op)
             outcome = self._deliver(data)
             self._last_send = time.monotonic()
+            if outcome is _Delivery.SENT:
+                self._notify("delivered", type(msg).__name__, current)
             if outcome is _Delivery.SENT and item.on_sent is not None:
                 self._post(item.on_sent)
+            elif outcome is _Delivery.DROPPED and item.on_failed is not None:
+                self._post(item.on_failed)
             elif outcome is _Delivery.DEAD:
                 with self._out_cond:
                     self._outbox.clear()
@@ -1196,18 +1376,8 @@ def _closed(seq: int, *, handle: int, reason: CloseReason) -> ConfirmClosed:
     return ConfirmClosed(seq=seq, handle=handle, reason=reason)
 
 
-def _prompt(seq: int, *, handle: int, ttl_s: int, summary: str) -> ConfirmPrompt:
-    return ConfirmPrompt(seq=seq, handle=handle, ttl_s=ttl_s, summary=summary)
-
-
 def _with_seq(chunk: ResultChunk, seq: int) -> ResultChunk:
     return chunk.model_copy(update={"seq": seq})
-
-
-def _external_outcome(
-    session: AgentSession, pending_id: str, *, approve: bool, result: dict[str, Any]
-) -> None:
-    session.external_outcome(pending_id, approved=approve, result=result)
 
 
 def _prompt_text(summary: str, tool: str, frontend: str) -> str:

@@ -337,7 +337,10 @@ static void ptb_scene_result_on_exit(void* context) {
 static void ptb_scene_confirm_on_enter(void* context) {
     PtbApp* app = context;
     ptb_confirm_view_set_prompt(
-        app->confirm_view, app->confirm_summary, ptb_confirm_remaining_s(app));
+        app->confirm_view,
+        app->confirm_summary,
+        ptb_confirm_remaining_s(app),
+        app->confirm_handle);
     view_dispatcher_switch_to_view(app->view_dispatcher, PtbViewConfirm);
 }
 
@@ -359,10 +362,10 @@ static bool ptb_scene_confirm_on_event(void* context, SceneManagerEvent event) {
     }
     if(event.type != SceneManagerEventTypeCustom) return false;
     switch(event.event) {
-    case PtbEventConfirmYes:
-    case PtbEventConfirmNo:
-        ptb_send_confirm_answer(app, event.event == PtbEventConfirmYes);
-        scene_manager_previous_scene(app->scene_manager);
+    case PtbEventConfirmAnswered:
+        /* Het antwoord ging al weg bij de knopdruk (ptb_confirm_callback). Kwam er intussen
+         * een nieuwe vraag binnen, dan staat die nu open: blijven. */
+        if(!app->confirm_active) scene_manager_previous_scene(app->scene_manager);
         return true;
     case PtbEventConfirmPrompt: /* nieuwe vraag terwijl dit scherm open is */
         ptb_scene_confirm_on_enter(app);

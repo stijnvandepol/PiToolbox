@@ -52,8 +52,7 @@ typedef enum {
     PtbEventResult,
     PtbEventConfirmPrompt,
     PtbEventConfirmClosed,
-    PtbEventConfirmYes,
-    PtbEventConfirmNo,
+    PtbEventConfirmAnswered, /* antwoord is al verstuurd (bij de knopdruk) */
     PtbEventWaitChanged,
     PtbEventMenuBase = 0x100, /* + index van een submenu-item */
 } PtbEvent;
@@ -144,7 +143,9 @@ typedef struct {
 bool ptb_send_action(PtbApp* app, PtbActionKind kind, uint8_t action_id, const char* label);
 bool ptb_send_status_request(PtbApp* app);
 bool ptb_send_presets_request(PtbApp* app);
-bool ptb_send_confirm_answer(PtbApp* app, bool approve);
+/* Antwoord op de vraag met `handle` (die van het scherm bij de knopdruk). false, en niets
+ * verstuurd, als dat niet meer de open vraag is (intussen gesloten of vervangen). */
+bool ptb_answer_confirm(PtbApp* app, uint32_t handle, bool approve);
 bool ptb_send_cancel(PtbApp* app);
 
 /* Tekst voor de TextBox: schrijf in ptb_text_begin(), toon met ptb_text_commit(). */

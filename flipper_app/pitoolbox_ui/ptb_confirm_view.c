@@ -22,6 +22,7 @@ typedef struct {
     uint8_t scroll;
     uint8_t lines; /* gezet tijdens het tekenen */
     uint32_t armed_at; /* tick vanaf wanneer OK telt */
+    uint32_t handle; /* van de vraag op het scherm; gaat mee met het antwoord */
 } PtbConfirmModel;
 
 /* Woordomloop op pixelbreedte; tekent regels [first, first+count). Geeft het totaal. */
@@ -85,6 +86,7 @@ static bool ptb_confirm_input(InputEvent* event, void* context) {
 
     bool fire = false;
     bool approve = false;
+    uint32_t handle = 0;
     with_view_model(
         confirm->view,
         PtbConfirmModel * m,
@@ -109,10 +111,11 @@ static bool ptb_confirm_input(InputEvent* event, void* context) {
             default:
                 break;
             }
+            handle = m->handle; /* nu vastleggen: de vraag kan daarna nog wisselen */
         },
         true);
 
-    if(fire && confirm->callback) confirm->callback(confirm->context, approve);
+    if(fire && confirm->callback) confirm->callback(confirm->context, handle, approve);
     return true; /* alles opeten: Back mag hier nooit "terug" betekenen zonder antwoord */
 }
 
@@ -148,7 +151,11 @@ void ptb_confirm_view_set_callback(
     confirm->context = context;
 }
 
-void ptb_confirm_view_set_prompt(PtbConfirmView* confirm, const char* summary, uint8_t remaining_s) {
+void ptb_confirm_view_set_prompt(
+    PtbConfirmView* confirm,
+    const char* summary,
+    uint8_t remaining_s,
+    uint32_t handle) {
     furi_check(confirm);
     with_view_model(
         confirm->view,
@@ -159,6 +166,7 @@ void ptb_confirm_view_set_prompt(PtbConfirmView* confirm, const char* summary, u
             m->scroll = 0;
             m->lines = 0;
             m->armed_at = furi_get_tick() + furi_ms_to_ticks(PTB_CONFIRM_ARM_MS);
+            m->handle = handle;
         },
         true);
 }

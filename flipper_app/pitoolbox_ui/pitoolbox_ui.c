@@ -147,14 +147,20 @@ bool ptb_send_action(PtbApp* app, PtbActionKind kind, uint8_t action_id, const c
     return sent;
 }
 
-bool ptb_send_confirm_answer(PtbApp* app, bool approve) {
-    if(!app->confirm_active) return false;
+bool ptb_answer_confirm(PtbApp* app, uint32_t handle, bool approve) {
+    /* Alleen voor de vraag die nu open staat. Een knopdruk op een vraag die intussen gesloten
+     * of vervangen is, telt niet: OK mag nooit naar een vraag gaan die de mens niet zag. */
+    if(!app->confirm_active || handle == 0 || handle != app->confirm_handle) {
+        FURI_LOG_W(TAG, "antwoord op een vraag die niet meer open staat genegeerd");
+        return false;
+    }
     uint8_t buf[PTB_MAX_FAP_MSG];
-    size_t n = ptb_encode_confirm_answer(buf, ptb_next_seq(app), app->confirm_handle, approve);
-    app->answered_handle = app->confirm_handle;
+    size_t n = ptb_encode_confirm_answer(buf, ptb_next_seq(app), handle, approve);
+    app->answered_handle = handle;
     app->confirm_active = false;
     app->last_confirm_text = approve ? "ja gestuurd" : "nee gestuurd";
-    return ptb_send(app, buf, n);
+    ptb_send(app, buf, n);
+    return true;
 }
 
 bool ptb_send_cancel(PtbApp* app) {
@@ -247,8 +253,31 @@ static void ptb_on_result(PtbApp* app, const PtbResultChunk* chunk) {
     if(app->next_part == app->total_parts) app->busy = false;
 }
 
+/* ERROR NOT_READY: de Pi kent deze sessie niet (meer), bijv. nadat hij een bericht niet kon
+ * afleveren en de sessie losliet. Dan opnieuw groeten met dezelfde instance (protocol §5). De
+ * open vraag vervalt: zijn handle geldt op de Pi niet meer (de Pi vraagt hem opnieuw). */
+static void ptb_on_not_ready(PtbApp* app) {
+    if(!app->rpc_mode || app->wait_state == PtbWaitOffline) return;
+    if(!app->connected && app->wait_state == PtbWaitConnecting) return; /* HELLO loopt al */
+    if(app->busy) furi_string_set_str(app->result, "Onderbroken: opnieuw verbonden met de Pi.");
+    app->connected = false;
+    app->busy = false;
+    app->confirm_active = false;
+    app->wait_state = PtbWaitConnecting;
+    app->hello_tries = 0;
+    /* Hoogstens één HELLO per PTB_HELLO_RETRY_MS; anders verstuurt de tick hem. */
+    if(furi_get_tick() - app->hello_tick >= PTB_HELLO_RETRY_MS) ptb_send_hello(app);
+    if(!scene_manager_search_and_switch_to_previous_scene(app->scene_manager, PtbSceneWait)) {
+        scene_manager_handle_custom_event(app->scene_manager, PtbEventWaitChanged);
+    }
+}
+
 static void ptb_on_message(PtbApp* app, const PtbMsg* msg) {
     SceneManager* sm = app->scene_manager;
+    if(msg->type == PtbMsgError && msg->error.code == PtbErrorNotReady) {
+        ptb_on_not_ready(app);
+        return;
+    }
     switch(msg->type) {
     case PtbMsgWelcome:
         if(msg->welcome.instance != app->instance || msg->welcome.proto != PTB_PROTO_VERSION)
@@ -448,10 +477,16 @@ void ptb_submenu_callback(void* context, uint32_t index) {
     view_dispatcher_send_custom_event(app->view_dispatcher, PtbEventMenuBase + index);
 }
 
-static void ptb_confirm_callback(void* context, bool approve) {
+static void ptb_confirm_callback(void* context, uint32_t handle, bool approve) {
     PtbApp* app = context;
-    view_dispatcher_send_custom_event(
-        app->view_dispatcher, approve ? PtbEventConfirmYes : PtbEventConfirmNo);
+    /* Meteen versturen, bij de knopdruk, met de handle van het scherm. Niet pas bij een
+     * custom event: tussen knopdruk en custom event kan de inbox een nieuwe CONFIRM_PROMPT
+     * verwerken, en dan zou het antwoord bij die (ongeziene) vraag horen. Input, custom events
+     * en de inbox lopen alle drie in de FuriEventLoop van de view_dispatcher (app-thread,
+     * view_dispatcher.h), dus hier is geen lock nodig. */
+    if(ptb_answer_confirm(app, handle, approve)) {
+        view_dispatcher_send_custom_event(app->view_dispatcher, PtbEventConfirmAnswered);
+    }
 }
 
 static bool ptb_custom_event_callback(void* context, uint32_t event) {
