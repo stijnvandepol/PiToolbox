@@ -77,7 +77,7 @@ sudo deploy/install.sh
 
 Het script is idempotent en doet niets met cloudflared-credentials. Het:
 
-1. maakt de systeemgebruiker `pitoolbox` (in `dialout` voor de Flipper en `video` voor `vcgencmd`) en `cloudflared`;
+1. maakt de systeemgebruiker `pitoolbox` (in `dialout` voor de Flipper, `video` voor `vcgencmd` en `bluetooth` voor de Flipper via BLE) en `cloudflared`;
 2. maakt `/opt/pitoolbox` (code), `/etc/pitoolbox` (0750), `/var/lib/pitoolbox` (0700: auth-database, audit-log, captures) en `/etc/cloudflared`;
 3. kopieert de code, installeert indien nodig `uv` voor de gebruiker `pitoolbox` (het script toont eerst wat het doet en de SHA-256 van het officiële installatiescript van astral.sh) en draait `uv sync --frozen --no-dev`;
 4. maakt `/etc/pitoolbox/pitoolbox.env` (0600, eigenaar `pitoolbox`) en `/etc/pitoolbox/scope.yaml` uit de voorbeelden, **alleen als ze nog niet bestaan**;
@@ -236,7 +236,7 @@ De docs zeggen: "A connected connector is available in your conversations on the
 - **Alles intrekken:** `sudo -u pitoolbox bash -c 'set -a; . /etc/pitoolbox/pitoolbox.env; set +a; exec /opt/pitoolbox/.venv/bin/pitoolbox-auth revoke-all'` verwijdert alle access- en refresh-tokens én alle geregistreerde clients. Daarna moet elke client opnieuw inloggen (in Claude: **Reconnect**). Doe dit bij elk vermoeden van misbruik, na een gestolen telefoon of na `pitoolbox-auth init --force`. Wil je de service direct uitzetten: `sudo systemctl stop cloudflared-pitoolbox` sluit de tunnel meteen.
 - **Eigen scope.** `/etc/pitoolbox/scope.yaml` is eigendom van root en alleen leesbaar voor de service: een gecompromitteerde service of LLM kan zijn eigen scope niet verruimen. Zenden (`transmit`) buiten scope wordt altijd geweigerd en binnen scope vraagt pitoolbox altijd een expliciete `confirm_action`.
 - **Hardening van de unit.** Geen root, alleen `CAP_NET_ADMIN`/`CAP_NET_RAW`, alleen `/var/lib/pitoolbox` schrijfbaar, geen `/home`, beperkte adresfamilies. Zie de commentaren in `deploy/systemd/pitoolbox-mcp.service`.
-- **Geheimen.** `pitoolbox.env` is `0600` en bevat later ook API-sleutels; `/etc/cloudflared/<UUID>.json` is `0640 root:cloudflared`. De systemd-man-page raadt omgevingsvariabelen voor geheimen af; `LoadCredential=` is het alternatief voor later.
+- **Geheimen.** `pitoolbox.env` is `0600` en bevat ook de LLM-API-sleutel; `/etc/cloudflared/<UUID>.json` is `0640 root:cloudflared`. De systemd-man-page raadt omgevingsvariabelen voor geheimen af; `LoadCredential=` is het alternatief voor later.
 - **Updates.** `cloudflared` komt via apt (de unit gebruikt `--no-autoupdate`); update met `sudo apt update && sudo apt install --only-upgrade cloudflared` en `sudo systemctl restart cloudflared-pitoolbox`.
 
 ### Optioneel: Cloudflare WAF-regel
@@ -335,7 +335,7 @@ Een code werkt maar één keer. Wacht op de volgende code als je net een geldige
 ### Wifi of Flipper werkt niet onder systemd
 
 - **`iw`/`airodump-ng`: operation not permitted.** Controleer `CapAmb: 0000000000003000` (stap 5) en `getcap $(command -v iw airodump-ng ip)`. Heeft een binary bestands-capabilities of een setuid-bit, dan wordt de ambient set daarvoor gewist en `NoNewPrivileges` verhindert het alternatief (zie de commentaren in de unit). Laatste redmiddel: `NoNewPrivileges=no` (met een `systemctl edit`-override), de rest van de hardening blijft staan. Test daarna opnieuw.
-- **NetworkManager** zet `wlan1` terug naar managed. Zie de hardware-testchecklist in de README (wlan1 unmanaged).
+- **NetworkManager** zet `wlan1` terug naar managed. `sudo deploy/install.sh --onderweg` zet de Alfa op unmanaged; zie [fase5-onderweg.md](fase5-onderweg.md).
 - **Flipper niet gevonden:** `ls -l /dev/ttyACM*` (groep `dialout`), `id pitoolbox` toont `dialout` en `video`, en de Flipper mag niet tegelijk in qFlipper of een terminal open staan.
 
 ## Bronnen

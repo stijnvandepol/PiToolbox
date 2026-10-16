@@ -7,7 +7,7 @@ Claude ──▶ pitoolbox-mcp ──┬── USB-serieel (CLI + RPC)     ◀�
                            └── BLE (alleen RPC) ──▶ BlueZ ──▶ Flipper
 ```
 
-> **Wat is geverifieerd en wat niet.** Alles over de Flipper-firmware komt uit de officiële broncode (flipperzero-firmware, commit `3fb1d517`), alles over BlueZ uit de BlueZ-documentatie in de bluez-repo. Gedrag op de echte Pi (4 of 5) + Flipper is in deze sessie niet getest; dat staat als checklist onderaan en is in de tekst gemarkeerd met *(niet geverifieerd)*.
+> **Wat is geverifieerd en wat niet.** Alles over de Flipper-firmware komt uit de officiële broncode (flipperzero-firmware, commit `3fb1d517`), alles over BlueZ uit de BlueZ-documentatie in de bluez-repo. Bij het schrijven was dit niet op hardware getest (gemarkeerd met *(niet geverifieerd)*). Inmiddels is BLE op een Pi 4 met Momentum getest: koppelen, system_info, storage en ping/doorvoer werken; zie [VOORTGANG.md](VOORTGANG.md) (hardwaretest) en de checklist onderaan voor wat nog open staat.
 
 ## 1. Op de Pi: voorwaarden
 

@@ -12,7 +12,7 @@ Onderweg hangt de Pi niet meer aan ethernet. De ingebouwde wifi is dan de uplink
 
 Alles wordt geïnstalleerd door `deploy/install.sh`, maar alleen als je het vraagt: zonder opties doet het script precies wat het in fase 2 deed.
 
-Getest is: de bestanden zelf (pytest: `tests/test_deploy.py`), install.sh in een testmap (`DESTDIR`), `--dry-run` op de Pi, NetworkManager die de drop-in inleest (`--print-config`), en een echte logrotate-run op een kopie. **Niet getest** is alles waarvoor root of een herstart nodig is. Dat staat in de [checklist](#7-hardware-en-testchecklist).
+Getest is: de bestanden zelf (pytest: `tests/test_deploy.py`), install.sh in een testmap (`DESTDIR`), `--dry-run` op de Pi, NetworkManager die de drop-in inleest (`--print-config`), en een echte logrotate-run op een kopie. **Niet getest** is alles waarvoor root of een herstart nodig is. Dat staat in de [checklist](#7-hardware--en-testchecklist).
 
 ## 1. Ontwerpkeuzes (met bronnen)
 
@@ -162,13 +162,13 @@ Had je al een eigen versie van een van deze bestanden, zet die dan terug uit `/v
 
 ## 6. Als de namen toch verwisselen
 
-Symptoom: `wlan1` heeft driver `brcmfmac`, of udev meldt in de journal dat hernoemen mislukt ("File exists"). **Gebruik pitoolbox dan niet:** de code beschermt de uplink op naam, dus `alfa_set_mode` zou de ingebouwde wifi omzetten. NetworkManager houdt wel de goede adapter (die matcht op driver). Oplossing, zoals systemd.link(5) aanraadt: namen buiten de naamruimte van de kernel.
+Symptoom: `wlan1` heeft driver `brcmfmac`, of udev meldt in de journal dat hernoemen mislukt ("File exists"). **Gebruik pitoolbox dan niet:** de code beschermt de uplink op naam. De driver-controle (`PITOOLBOX_ALFA_DRIVER`, standaard `mt7921u`) laat wifi-acties dan weigeren, maar dat is een vangnet, geen oplossing. NetworkManager houdt wel de goede adapter (die matcht op driver). Oplossing, zoals systemd.link(5) aanraadt: namen buiten de naamruimte van de kernel.
 
 1. Pas `Name=` in de twee bestanden in `/etc/systemd/network/` aan, bijv. naar `uplink0` en `alfa0`.
 2. Zet in `/etc/pitoolbox/pitoolbox.env` `PITOOLBOX_UPLINK_IFACE=uplink0` en `PITOOLBOX_ALFA_IFACE=alfa0`.
 3. Draai `sudo update-initramfs -u -k all` en daarna `sudo reboot`.
 
-Aanbeveling voor later (code, niet in deze fase): laat `AlfaAdapter` vóór monitor mode controleren dat de driver van de interface `mt7921u` is (`/sys/class/net/<if>/device/driver`). Dan helpt een verwisseling nooit meer de uplink om zeep.
+Die driver-controle zit erin: `AlfaAdapter` en `CaptureManager` lezen `/sys/class/net/<if>/device/driver` en weigeren als dat niet `PITOOLBOX_ALFA_DRIVER` is. Een verwisseling kan de uplink dus niet meer om zeep helpen; leeg zetten schakelt de controle uit (niet doen).
 
 ## 7. Hardware- en testchecklist
 

@@ -28,7 +28,9 @@
 #   3. kopieert de repo naar /opt/pitoolbox
 #   4. installeert uv voor gebruiker pitoolbox als die het nog niet heeft (officiele installer)
 #   5. `uv sync --frozen --no-dev` in /opt/pitoolbox
-#   6. zet de systemd-units neer en doet `systemctl daemon-reload`
+#   6. zet configbestanden neer (pitoolbox.env, scope.yaml) als ze nog niet bestaan
+#   7. zet de systemd-units neer en doet `systemctl daemon-reload`
+#   8. controleert of de systeemtools er zijn (iw, ip, airodump-ng, vcgencmd)
 #   9. alleen met --onderweg / --bluez-le: de fase-5-systeemconfig (opties hierboven)
 # Wat het NIET doet: enablen/starten van units, cloudflared installeren of inloggen,
 # credentials aanraken, pitoolbox-auth init draaien.
