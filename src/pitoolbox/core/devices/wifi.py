@@ -366,6 +366,41 @@ def _filter_band(networks: list[dict[str, Any]], band: str) -> list[dict[str, An
     return [n for n in networks if keep(n)]
 
 
+SYSFS_NET = Path("/sys/class/net")
+
+
+def iface_driver(iface: str, sysfs_net: Path = SYSFS_NET) -> str | None:
+    """Kerneldriver van een netwerkinterface, of None als die niet te bepalen is.
+
+    `/sys/class/net/<iface>/device/driver` is een symlink naar de driver; de naam is de basename
+    (Documentation/ABI/stable/sysfs-class-net en sysfs-bus-*, "driver"-link). Dit is dezelfde
+    waarde als udev's ID_NET_DRIVER (gemeten op de Pi: wlan1 -> mt7921u, wlan0 -> brcmfmac).
+    """
+    try:
+        target = (sysfs_net / validate_iface(iface) / "device" / "driver").resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return target.name
+
+
+def require_driver(iface: str, expected: str | None, sysfs_net: Path = SYSFS_NET) -> None:
+    """Tweede guard naast de naamvergelijking: alleen de adapter met de verwachte driver.
+
+    Een naamvergelijking beschermt de uplink niet als de interfacenamen ooit verwisseld raken
+    (bijv. de .link-bestanden uit fase 5 ontbreken). Met de driver weten we zeker dat het de
+    Alfa is. `expected` None of leeg: controle uit (PITOOLBOX_ALFA_DRIVER leeg).
+    """
+    if not expected:
+        return
+    actual = iface_driver(iface, sysfs_net)
+    if actual != expected:
+        found = repr(actual) if actual else "onbekend (interface bestaat niet?)"
+        raise InvalidState(
+            f"{iface} heeft driver {found}, verwacht {expected!r}; weiger hem aan te raken. "
+            "Klopt PITOOLBOX_ALFA_IFACE (zie `ls -l /sys/class/net/*/device/driver`)?"
+        )
+
+
 class AlfaAdapter:
     """Wijzigt en leest de staat van de Alfa-interface. Raakt NOOIT de uplink-interface aan."""
 
@@ -378,9 +413,13 @@ class AlfaAdapter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         tmp_root: Path | None = None,
+        expected_driver: str | None = None,
+        sysfs_net: Path = SYSFS_NET,
     ) -> None:
         self._iface = iface
         self._uplink = uplink_iface
+        self._expected_driver = expected_driver
+        self._sysfs_net = sysfs_net
         self._runner = runner
         self._clock = clock
         self._sleep = sleep
@@ -389,7 +428,12 @@ class AlfaAdapter:
 
     @classmethod
     def from_settings(cls, settings: Settings, runner: CommandRunner) -> AlfaAdapter:
-        return cls(settings.alfa_iface, settings.uplink_iface, runner)
+        return cls(
+            settings.alfa_iface,
+            settings.uplink_iface,
+            runner,
+            expected_driver=settings.alfa_driver or None,
+        )
 
     @property
     def iface(self) -> str:
@@ -402,7 +446,9 @@ class AlfaAdapter:
                 f"alfa_iface {self._iface!r} is gelijk aan uplink_iface; weiger de uplink aan te "
                 "raken (stel PITOOLBOX_ALFA_IFACE en PITOOLBOX_UPLINK_IFACE verschillend in)"
             )
-        return validate_iface(self._iface)
+        iface = validate_iface(self._iface)
+        require_driver(iface, self._expected_driver, self._sysfs_net)
+        return iface
 
     def get_mode(self) -> str:
         return read_mode(self._runner, self._iface)
@@ -578,9 +624,13 @@ class CaptureManager:
         timer_factory: TimerFactory = _default_timer_factory,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        expected_driver: str | None = None,
+        sysfs_net: Path = SYSFS_NET,
     ) -> None:
         self._iface = iface
         self._uplink = uplink_iface
+        self._expected_driver = expected_driver
+        self._sysfs_net = sysfs_net
         self._captures_dir = captures_dir
         self._runner = runner
         self._timer_factory = timer_factory
@@ -593,7 +643,13 @@ class CaptureManager:
 
     @classmethod
     def from_settings(cls, settings: Settings, runner: CommandRunner) -> CaptureManager:
-        return cls(settings.alfa_iface, settings.uplink_iface, settings.captures_dir, runner)
+        return cls(
+            settings.alfa_iface,
+            settings.uplink_iface,
+            settings.captures_dir,
+            runner,
+            expected_driver=settings.alfa_driver or None,
+        )
 
     # -- sessiemap ---------------------------------------------------------------------
 
@@ -631,6 +687,7 @@ class CaptureManager:
         if self._iface == self._uplink:
             raise InvalidState("alfa_iface is gelijk aan uplink_iface; weiger te capturen")
         iface = validate_iface(self._iface)
+        require_driver(iface, self._expected_driver, self._sysfs_net)
         mode = read_mode(self._runner, iface)
         if mode != "monitor":
             raise InvalidState(

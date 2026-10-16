@@ -215,3 +215,18 @@ def test_list_active_shape(env: Env) -> None:
     assert item["bssid"] == BSSID
     assert item["channel"] == 6
     assert item["elapsed_s"] == 10.0
+
+
+def test_refuses_wrong_driver_before_spawning(tmp_path: Path) -> None:
+    net = tmp_path / "sys" / "class" / "net"
+    target = tmp_path / "sys" / "drivers" / "brcmfmac"
+    target.mkdir(parents=True)
+    (net / "wlan1" / "device").mkdir(parents=True)
+    (net / "wlan1" / "device" / "driver").symlink_to(target)
+    runner = FakeRunner("monitor")
+    mgr = CaptureManager(
+        "wlan1", "wlan0", tmp_path / "caps", runner, expected_driver="mt7921u", sysfs_net=net
+    )
+    with pytest.raises(InvalidState, match="brcmfmac"):
+        mgr.start(BSSID, 6, 60)
+    assert runner.spawned == []

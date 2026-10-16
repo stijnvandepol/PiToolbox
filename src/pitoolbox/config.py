@@ -39,6 +39,10 @@ class Settings(BaseModel):
     # Interval (s) voor een RPC-ping als de verbinding idle is; 0 = uit.
     flipper_keepalive_s: float = 20.0
     alfa_iface: str = "wlan1"
+    # Verwachte kerneldriver van de Alfa (AWUS036AXML = MT7921AUN, in-kernel mt7921u). Tweede
+    # guard naast alfa_iface != uplink_iface: wifi-acties weigeren als de driver niet klopt, ook
+    # als interfacenamen verwisseld zijn. Leeg = controle uit (alleen voor andere adapters).
+    alfa_driver: str = "mt7921u"
     uplink_iface: str = "wlan0"
     confirm_ttl_s: int = 60
     # Lege lijst = alle geregistreerde tools toegestaan
@@ -84,6 +88,7 @@ class Settings(BaseModel):
             flipper_ble_adapter=os.environ.get("PITOOLBOX_FLIPPER_BLE_ADAPTER") or None,
             flipper_keepalive_s=float(os.environ.get("PITOOLBOX_FLIPPER_KEEPALIVE_S", "20")),
             alfa_iface=os.environ.get("PITOOLBOX_ALFA_IFACE", "wlan1"),
+            alfa_driver=os.environ.get("PITOOLBOX_ALFA_DRIVER", "mt7921u").strip(),
             uplink_iface=os.environ.get("PITOOLBOX_UPLINK_IFACE", "wlan0"),
             confirm_ttl_s=int(os.environ.get("PITOOLBOX_CONFIRM_TTL_S", "60")),
             tool_allowlist=[t.strip() for t in allow.split(",") if t.strip()],

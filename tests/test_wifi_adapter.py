@@ -10,7 +10,7 @@ import pytest
 from wifi_fakes import FakeHandle, FakeRunner, fixture
 
 from pitoolbox.config import Settings
-from pitoolbox.core.devices.wifi import AlfaAdapter
+from pitoolbox.core.devices.wifi import AlfaAdapter, iface_driver, require_driver
 from pitoolbox.core.errors import CommandFailed, InvalidState
 from pitoolbox.core.proc import (
     ALLOWED_BINARIES,
@@ -309,3 +309,57 @@ def test_scan_airodump_early_exit(tmp_path: Path) -> None:
     with pytest.raises(CommandFailed, match="SIOCSIWMODE"):
         a.scan("airodump", 5, "abg")
     assert list(tmp_path.iterdir()) == []  # ook bij een fout opgeruimd
+
+
+# -- driver-guard ----------------------------------------------------------------------
+
+
+def fake_sysfs(root: Path, drivers: dict[str, str]) -> Path:
+    """Bouwt /sys/class/net/<iface>/device/driver -> .../drivers/<naam> na."""
+    net = root / "class" / "net"
+    for iface, driver in drivers.items():
+        target = root / "bus" / "drivers" / driver
+        target.mkdir(parents=True, exist_ok=True)
+        device = net / iface / "device"
+        device.mkdir(parents=True)
+        (device / "driver").symlink_to(target)
+    return net
+
+
+def test_iface_driver_reads_sysfs_symlink(tmp_path: Path) -> None:
+    net = fake_sysfs(tmp_path, {"wlan0": "brcmfmac", "wlan1": "mt7921u"})
+    assert iface_driver("wlan0", net) == "brcmfmac"
+    assert iface_driver("wlan1", net) == "mt7921u"
+    assert iface_driver("wlan9", net) is None
+
+
+def test_require_driver_off_when_not_configured(tmp_path: Path) -> None:
+    require_driver("wlan9", None, tmp_path)
+    require_driver("wlan9", "", tmp_path)
+
+
+def test_set_mode_refuses_wrong_driver_before_any_command(tmp_path: Path) -> None:
+    # Namen verwisseld: "wlan1" is in werkelijkheid de ingebouwde wifi (de uplink).
+    net = fake_sysfs(tmp_path / "sys", {"wlan0": "mt7921u", "wlan1": "brcmfmac"})
+    runner = FakeRunner()
+    adapter = make_adapter(runner, tmp_path, expected_driver="mt7921u", sysfs_net=net)
+    with pytest.raises(InvalidState, match="brcmfmac"):
+        adapter.set_mode("monitor")
+    with pytest.raises(InvalidState, match="brcmfmac"):
+        adapter.scan("iw")
+    assert runner.calls == []
+
+
+def test_set_mode_refuses_missing_iface_with_driver_check(tmp_path: Path) -> None:
+    net = fake_sysfs(tmp_path / "sys", {"wlan0": "brcmfmac"})
+    adapter = make_adapter(FakeRunner(), tmp_path, expected_driver="mt7921u", sysfs_net=net)
+    with pytest.raises(InvalidState, match="onbekend"):
+        adapter.set_mode("monitor")
+
+
+def test_from_settings_checks_driver_by_default(tmp_path: Path) -> None:
+    assert Settings().alfa_driver == "mt7921u"
+    adapter = AlfaAdapter.from_settings(Settings(), FakeRunner())
+    assert adapter._expected_driver == "mt7921u"
+    off = AlfaAdapter.from_settings(Settings(alfa_driver=""), FakeRunner())
+    assert off._expected_driver is None
