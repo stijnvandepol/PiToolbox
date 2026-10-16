@@ -1,0 +1,7 @@
+# udevadm info -q property /sys/class/net/wlan0 (Pi 4 Model B, Kali, systemd 262, 2026-10-16)
+DEVTYPE=wlan
+INTERFACE=wlan0
+SUBSYSTEM=net
+ID_NET_DRIVER=brcmfmac
+ID_NET_NAME_MAC=wlxd83add9f587c
+ID_PATH=platform-fe300000.mmcnr

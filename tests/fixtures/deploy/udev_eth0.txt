@@ -1,0 +1,6 @@
+# udevadm info -q property /sys/class/net/eth0 (Pi 4 Model B, Kali, systemd 262, 2026-10-16)
+INTERFACE=eth0
+SUBSYSTEM=net
+ID_NET_DRIVER=bcmgenet
+ID_NET_NAME_MAC=enxd83add9f587b
+ID_PATH=platform-fd580000.ethernet

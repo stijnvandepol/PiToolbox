@@ -1,0 +1,12 @@
+# udevadm info -q property /sys/class/net/wlan1 (Pi 4 Model B, Kali, systemd 262, 2026-10-16)
+DEVTYPE=wlan
+INTERFACE=wlan1
+SUBSYSTEM=net
+ID_NET_DRIVER=mt7921u
+ID_BUS=usb
+ID_MODEL_ID=7961
+ID_VENDOR_ID=0e8d
+ID_USB_DRIVER=mt7921u
+ID_NET_NAME_MAC=wlx00c0cab57b25
+ID_NET_NAME_PATH=wlp1s0u1u2i3
+ID_PATH=platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2:1.3

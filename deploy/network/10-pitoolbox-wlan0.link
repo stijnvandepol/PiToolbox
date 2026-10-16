@@ -1,0 +1,38 @@
+# pitoolbox (fase 5): de ingebouwde wifi van de Pi heet altijd wlan0 (de uplink).
+# Installeren als /etc/systemd/network/10-pitoolbox-wlan0.link (install.sh --onderweg doet dat).
+#
+# Waarom een .link-bestand en geen udev-regel met NAME=: udev(7) verwijst bij NAME= zelf naar
+# systemd.link(5) als "higher-level mechanism for setting the interface name", en de Debian-wiki
+# noemt .link-bestanden de "canonical way" voor eigen namen (https://wiki.debian.org/NetworkInterfaceNames).
+# udev past ze toe via de builtin net_setup_link (/usr/lib/udev/rules.d/80-net-setup-link.rules);
+# systemd-networkd is daarvoor niet nodig, NetworkManager blijft het netwerk beheren.
+#
+# Bronnen: systemd.link(5) van systemd 262 (lokaal: `man systemd.link`), udev(7).
+#  - Alleen het EERSTE passende .link-bestand (alfabetisch, over alle mappen) wordt toegepast.
+#    Prefix < 70 (aanbeveling uit de man-page), zodat dit voor 73-usb-net-by-mac.link en
+#    99-default.link komt. Op Kali voor de Pi zijn die twee in /etc gemaskeerd (-> /dev/null).
+#  - Name= werkt ook met net.ifnames=0 op de kernel-commandline (zo staat Kali op de Pi):
+#    die optie zet alleen NamePolicy= uit, en Name= geldt juist als NamePolicy= uit staat.
+#  - LET OP (man-page bij Name=): een naam die de kernel zelf ook uitdeelt (eth0, wlan0) kan
+#    "racen" met de kernel. Hier is dat bewust zo, omdat de code-defaults wlan0/wlan1 zijn. Gaat
+#    het mis, dan zie je dat bij de controle in docs/fase5-onderweg.md; uitwijk staat daar ook.
+#
+# Matchen op driver en bus, NIET op MAC-adres: NetworkManager randomiseert MAC-adressen
+# (addr_assign_type 3 op deze Pi), en een vervangen Pi of adapter zou dan niet meer matchen.
+# Gemeten op de Pi 4 (`udevadm info /sys/class/net/wlan0`): ID_NET_DRIVER=brcmfmac,
+# DEVTYPE=wlan, ID_PATH=platform-fe300000.mmcnr, geen ID_BUS. De Pi 5 heeft dezelfde chipfamilie
+# (CYW43455, brcmfmac) maar een ander ID_PATH; daarom matchen we niet op het pad
+# (Pi 5 niet getest).
+
+[Match]
+# Driver van het parent-device (udev-property ID_NET_DRIVER).
+Driver=brcmfmac
+# DEVTYPE=wlan: alleen wifi-interfaces, geen p2p-dev of andere types.
+Type=wlan
+# "!" keert de test om: alleen een NIET-USB-brcmfmac (de ingebouwde, via SDIO). Een eventuele
+# USB-dongle met brcmfmac krijgt deze naam dus niet. ID_BUS komt uit 75-net-description.rules
+# (usb_id), dat voor 80-net-setup-link.rules draait.
+Property=!ID_BUS=usb
+
+[Link]
+Name=wlan0

@@ -1,0 +1,26 @@
+# pitoolbox (fase 5, OPTIONEEL, NIET GETEST): korter BLE-verbindingsinterval voor de Flipper.
+# Achtergrond en metingen: docs/fase3-ble.md, "BLE sneller maken".
+#
+# Dit is GEEN drop-in. BlueZ 5.87 (Kali, `bluetoothd --version`) leest alleen /etc/bluetooth/main.conf
+# (of het pad uit `bluetoothd -f`, man bluetoothd(8)); een map main.conf.d bestaat niet.
+# Bron: load_config() in src/main.c van BlueZ
+# (https://github.com/bluez/bluez/blob/master/src/main.c) bouwt alleen het pad
+# "<configdir>/main.conf". De binary op de Pi bevat ook alleen die string (`strings bluetoothd`).
+#
+# `sudo deploy/install.sh --bluez-le` zet de twee regels hieronder in de sectie [LE] van
+# /etc/bluetooth/main.conf. Het maakt eerst een backup, en het past niets aan als je die sleutels
+# al zelf op een andere waarde hebt gezet. Met de hand gaat het ook: zet de twee regels onder [LE].
+# Let op: dpkg ziet main.conf dan als gewijzigd conffile en vraagt bij een bluez-update wat je
+# wilt bewaren.
+#
+# Eenheid 1,25 ms (Bluetooth Core-spec; de [LE]-toelichting in main.conf verwijst daarnaar):
+# 6 = 7,5 ms, 12 = 15 ms. BlueZ accepteert 0x0006..0x0C80 (parse_le_config in src/main.c) en
+# negeert een waarde daarbuiten met een waarschuwing. De Flipper staat minimaal 7,5 ms toe
+# (serial_profile.c). Wordt de wifi van de Pi merkbaar trager (de BCM43455 deelt de radio),
+# neem dan MaxConnectionInterval=24.
+# Parameters die BlueZ per apparaat heeft opgeslagen, gaan voor (zie docs/fase3-ble.md).
+# Activeren: sudo systemctl restart bluetooth (verbreekt bestaande BLE-verbindingen).
+
+[LE]
+MinConnectionInterval=6
+MaxConnectionInterval=12

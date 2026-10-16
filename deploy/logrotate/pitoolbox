@@ -1,0 +1,45 @@
+# pitoolbox (fase 5): rotatie van de audit-log van de service.
+# Installeren als /etc/logrotate.d/pitoolbox (install.sh --onderweg). Het pad komt uit
+# PITOOLBOX_AUDIT_LOG in deploy/pitoolbox.env.example; pas het hier aan als je dat daar wijzigt.
+# Debian draait logrotate dagelijks via logrotate.timer.
+#
+# Bron: logrotate(8) van logrotate 3.22.0 (lokaal: `man logrotate`).
+#
+# Waarom GEEN copytruncate: de man-page waarschuwt dat er bij copytruncate "a very small time slice
+# between copying the file and truncating it" is waarin regels verloren gaan. Dat mag niet bij een
+# audit-log. Het is ook niet nodig: AuditLog.write (src/pitoolbox/core/audit.py) opent het bestand
+# bij ELKE regel opnieuw met open("a") en sluit het daarna. Na het hernoemen schrijft de volgende
+# call dus vanzelf in een nieuw bestand, en een write die tijdens het hernoemen loopt, komt nog
+# compleet in het oude bestand (zelfde inode). Er is geen signaal of herstart nodig.
+#
+# Waarom nocreate (en niet `create`): de service maakt het nieuwe bestand zelf aan bij de eerstvolgende
+# call, met UMask=0077 uit de unit (dus 0600, eigenaar pitoolbox). Met `create` zouden logrotate
+# en de service tegelijk hetzelfde bestand kunnen aanmaken.
+#
+# Waarom su: /var/lib/pitoolbox is van de (niet-root) servicegebruiker. De man-page raadt dan aan
+# "to use the su directive to rotate files in directories that are directly or indirectly in
+# control of non-privileged users". Zo kan een gecompromitteerde service root niet via een
+# symlink naar een ander bestand laten schrijven.
+#
+# Bewaren: maandelijks, eerder bij > 50 MiB, 24 oude bestanden (minimaal ~2 jaar, korter als
+# maxsize vaak ingrijpt). Wat ouder is wordt verwijderd; dat is het enige verlies, en het is
+# bewust. Wil je niets weggooien: `rotate -1` (man-page: "old logs are not removed at all").
+# Captures (pcap) worden NIET door logrotate behandeld: zie deploy/tmpfiles/pitoolbox.conf.
+
+/var/lib/pitoolbox/audit.jsonl {
+    su pitoolbox pitoolbox
+    monthly
+    maxsize 50M
+    rotate 24
+    nocreate
+    nocopytruncate
+    missingok
+    notifempty
+    compress
+    # Het laatst geroteerde bestand nog een rondje ongecomprimeerd laten (makkelijk grep'en).
+    delaycompress
+    # Datum in de naam. %s erbij, zodat twee rotaties op één dag (door maxsize) niet botsen;
+    # de man-page eist dat de namen lexicaal sorteerbaar zijn: jaar, maand, dag, dan epoch.
+    dateext
+    dateformat -%Y%m%d-%s
+}

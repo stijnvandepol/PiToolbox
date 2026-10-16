@@ -1,0 +1,22 @@
+# pitoolbox (fase 5): de Alfa AWUS036AXML heet altijd wlan1 (monitor/scan, nooit de uplink).
+# Installeren als /etc/systemd/network/11-pitoolbox-wlan1.link (install.sh --onderweg doet dat).
+# Waarom .link en welke bronnen: zie 10-pitoolbox-wlan0.link (systemd.link(5), udev(7)).
+#
+# Matchen op driver + USB-id, NIET op MAC-adres (MAC-randomisatie door NetworkManager).
+# Gemeten op de Pi 4 (`udevadm info /sys/class/net/wlan1`): ID_NET_DRIVER=mt7921u, DEVTYPE=wlan,
+# ID_BUS=usb, ID_VENDOR_ID=0e8d, ID_MODEL_ID=7961 (MediaTek MT7921AU). Elke MT7921AU-dongle met
+# dit USB-id matcht; met twee tegelijk krijgt de tweede deze naam niet (de naam is dan al bezet).
+#
+# Let op: een virtuele interface die je zelf op de Alfa aanmaakt (`iw phy ... interface add`)
+# heeft dezelfde driver. Udev probeert die dan ook wlan1 te noemen, wat faalt omdat de naam
+# bezet is (alleen een melding in de journal; niet geverifieerd). pitoolbox maakt zulke
+# interfaces niet: monitor mode gaat via `iw dev wlan1 set type monitor`.
+
+[Match]
+Driver=mt7921u
+Type=wlan
+# Meerdere properties in één regel worden ge-AND (systemd.link(5), Property=).
+Property=ID_BUS=usb ID_VENDOR_ID=0e8d ID_MODEL_ID=7961
+
+[Link]
+Name=wlan1
