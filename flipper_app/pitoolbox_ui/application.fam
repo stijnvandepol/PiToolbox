@@ -1,0 +1,15 @@
+# PiToolbox-bediening (fase 4). Bouwen met ufbt tegen de SDK van exact de firmware op de
+# Flipper (Momentum mntm-012, API 87.1); zie README.md.
+App(
+    appid="pitoolbox_ui",
+    name="PiToolbox",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="pitoolbox_ui_app",
+    requires=["gui", "storage", "notification"],
+    stack_size=4 * 1024,
+    fap_version=(1, 0),
+    fap_icon="pitoolbox_ui.png",
+    fap_category="Tools",
+    fap_description="Bediening voor PiToolbox op de Raspberry Pi, via Flipper-RPC",
+    fap_author="Stijn van de Pol",
+)

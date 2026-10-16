@@ -1,0 +1,222 @@
+# Fase 4: protocol tussen de Flipper-app en de Pi
+
+Versie 1. Dit document is de spec voor:
+
+- de codec op de Pi: [`src/pitoolbox/frontends/flipper_ui/protocol.py`](../src/pitoolbox/frontends/flipper_ui/protocol.py) (tests: `tests/test_flipper_ui_protocol.py`);
+- de FAP: [`flipper_app/pitoolbox_ui/`](../flipper_app/pitoolbox_ui/) (codec: `ptb_proto.c`).
+
+Achtergrond en metingen staan in [fase4-spike.md](fase4-spike.md). Bronverwijzingen naar de firmware gaan over Momentum **mntm-012** (`M` = `https://github.com/Next-Flip/Momentum-Firmware/blob/mntm-012/`), API 87.1.
+
+## 1. Uitgangspunten
+
+- **Kanaal:** de FAP draait met een RPC-koppeling (`StartRequest{args:"RPC"}`), en alle berichten gaan via `app_data_exchange_request` (DataExchange). Pi → FAP is een gewone RPC-opdracht met een `command_id`; de FAP bevestigt hem. FAP → Pi is een ongevraagd frame met `command_id = 0` (spike §3).
+- **De FAP is een onbetrouwbaar invoerapparaat.** Hij heeft geen geheimen en neemt geen beslissingen. Hij stuurt alleen ids: een snelle actie, een preset of een bevestigings-handle. Toolnamen, argumenten en vrije tekst stuurt hij nooit. Wat een id betekent, bepaalt de Pi (vaste tabel of Pi-config). Alles wat binnenkomt wordt gevalideerd voordat de bridge iets doet.
+- **Elke actie gaat via de `ToolRunner`** met frontend-id `flipper_ui`. Validatie, policy, scope en audit blijven dus precies zoals bij MCP.
+- **Klein en voorspelbaar:** elk bericht is hoogstens 512 bytes, er gaan hoogstens 5 berichten per seconde per richting, en de Pi stuurt naar de FAP met stop-and-wait.
+
+## 2. Codering: binair, vaste velden
+
+Elk bericht heeft een kop van 5 bytes plus een vaste body per type. Getallen zijn little-endian. Tekst is een `u8`-lengte gevolgd door printbare ASCII (0x20–0x7E). Alleen de samenvatting en het resultaat mogen ook `\n` bevatten.
+
+| Offset | Grootte | Veld |
+|---|---|---|
+| 0 | 1 | magic `0x50` (`'P'`) |
+| 1 | 1 | protocolversie (`1`) |
+| 2 | 1 | type |
+| 3 | 2 | `seq` (u16, per afzender, 1..65535, 0 komt niet voor) |
+
+**Waarom geen JSON?** Qua grootte zou het passen, ook een samenvatting van 200 tekens. Maar API 87.1 exporteert geen JSON-parser voor FAP's (`targets/f7/api_symbols.csv`: wel nanopb, geen JSON). We zouden dus een eigen JSON-parser in C moeten schrijven, en dat is aanvalsoppervlak aan de kant die het minst te testen is. Escapes en unicode moeten daarbij ook nog goed. **Waarom geen protobuf (nanopb)?** Dan is er aan beide kanten een generator nodig, plus `.options` voor de maximale groottes. Dat geeft meer code in de FAP dan dit hele protocol. De vaste layout hieronder is aan beide kanten in ongeveer 150 regels volledig te valideren. De C-decoder is op de host gekruiscontroleerd met de Python-codec: 14.200 geldige, gemuteerde en willekeurige berichten, 0 verschillen in accepteren of weigeren, en dezelfde velden.
+
+Strikt decoderen betekent aan beide kanten hetzelfde: verkeerde magic of versie, seq 0, een onbekend type, een type uit de verkeerde richting, te kort, bytes over na de body, een waarde buiten bereik, onbekende vlagbits of tekst buiten printbare ASCII geeft altijd "ongeldig". Er zijn geen standaardwaarden en geen stille correcties.
+
+## 3. Berichten
+
+`ref` verwijst naar de `seq` van het FAP-bericht waar het antwoord bij hoort. `ref = 0` betekent "geen antwoord" (de Pi begon zelf).
+
+### FAP → Pi
+
+| Type | Naam | Body | Regels |
+|---|---|---|---|
+| `0x01` | HELLO | `app_major u8, app_minor u8, proto_max u8, instance u32, max_rx u16` | `proto_max ≥ 1`, `instance ≠ 0` (willekeurig per start), `max_rx` 64..512 |
+| `0x02` | STATUS_REQUEST | leeg | |
+| `0x03` | PRESETS_REQUEST | leeg | |
+| `0x04` | ACTION | `kind u8, action_id u8` | `kind` 1 = snelle actie, 2 = preset; `action_id` 1..255 |
+| `0x05` | CONFIRM_ANSWER | `handle u32, answer u8` | `handle ≠ 0`, `answer` 0 = nee, 1 = ja |
+| `0x06` | CANCEL | `ref u16` | `ref ≠ 0`: breek de actie met die seq af |
+
+### Pi → FAP
+
+| Type | Naam | Body | Regels |
+|---|---|---|---|
+| `0x81` | WELCOME | `proto u8, instance u32, flags u8` | `instance` = die uit HELLO; bit0 = bevestigen op de Flipper aan, bit1 = agent beschikbaar |
+| `0x82` | STATUS | `flags u8, link u8, captures u8, pending u8, last_result u8, last_age_s u16, uplink str8, last_tool str8` | flags: bit0 uplink up, bit1 onderspanning nu, bit2 onderspanning eerder, bit3 voeding onbekend. `link` 0 = ?, 1 = USB, 2 = BLE. `last_result` 0 = geen, 1 = OK, 2 = fout. `last_age_s` 0xFFFF = onbekend. `uplink` ≤ 32, `last_tool` ≤ 24 |
+| `0x83` | PRESETS | `count u8` en dan `count ×(id u8, label str8)` | `count` ≤ 12, ids 1..255 en uniek, label 1..24 tekens. Alleen het label gaat naar de FAP, de prompt blijft op de Pi |
+| `0x84` | CONFIRM_PROMPT | `handle u32, ttl_s u8, summary str8` | `handle ≠ 0`, `ttl_s` 1..120, samenvatting 1..200 (mag `\n` bevatten) |
+| `0x85` | CONFIRM_CLOSED | `handle u32, reason u8` | 1 uitgevoerd, 2 geweigerd, 3 verlopen, 4 ingetrokken, 5 mislukt |
+| `0x86` | PROGRESS | `ref u16, text str8` | tekst ≤ 64, één regel; vervangt de vorige |
+| `0x87` | RESULT | `ref u16, part u8, total u8, text…` | `total` 1..8, `part < total`, tekst = rest van het bericht, ≤ 500 bytes, mag `\n` bevatten |
+| `0x88` | ERROR | `ref u16, code u8, text str8` | code 1 bezig, 2 rate limit, 3 onbekende actie, 4 ongeldig bericht, 5 versie, 6 tool faalde, 7 geen agent, 8 afgebroken, 9 time-out, 10 bevestiging ongeldig, 11 nog geen HELLO; tekst ≤ 120 |
+
+### Grenzen
+
+| Constante | Waarde | Waarom |
+|---|---|---|
+| `MAX_MSG` | 512 B | over BLE gemeten: 512 B OK (spike, test 3) |
+| `MAX_CHUNK` / `MAX_PARTS` | 500 B / 8 | 5 + 4 + 500 = 509 B; een antwoord is hoogstens 4000 B, en dat is ook de buffer in de FAP |
+| `MAX_SUMMARY` | 200 | ongeveer 8 regels op het scherm, met scrollen |
+| `MAX_PRESETS` / label | 12 / 24 | het grootste PRESETS-bericht is 318 B |
+| `MAX_TTL_S` | 120 | past in u8; de Pi-TTL voor bevestigingen is standaard 60 s |
+| rate | 5/s per richting, burst 5 | spike: boven ~10 frames/s loopt BLE achter |
+
+### Vaste vectoren
+
+Deze bytes staan ook in de tests (`test_known_vectors`) en zijn de referentie voor `ptb_proto.c`:
+
+```
+HELLO          seq=1 v1.0 instance=0x11223344 max_rx=512   50 01 01 01 00 01 00 01 44 33 22 11 00 02
+ACTION         seq=0x0102 quick id=4 (noodstop)            50 01 04 02 01 01 04
+CONFIRM_ANSWER seq=3 handle=0xA1B2C3D4 ja                  50 01 05 03 00 d4 c3 b2 a1 01
+CONFIRM_PROMPT seq=2 handle=0xA1B2C3D4 ttl=60 "IR tv"      50 01 84 02 00 d4 c3 b2 a1 3c 05 49 52 20 74 76
+RESULT         seq=5 ref=7 part=1 total=3 "ok"             50 01 87 05 00 07 00 01 03 6f 6b
+WELCOME        seq=1 v1 instance=0x11223344 bevestigen aan 50 01 81 01 00 01 44 33 22 11 01
+```
+
+## 4. Volgorde, duplicaten, verlies
+
+- **Pi → FAP: stop-and-wait.** App-opdrachten lopen op de Flipper strikt na elkaar (`rpc_app.c`, `last_command_id`). De Pi stuurt het volgende bericht pas als het vorige een antwoord heeft. `OK` betekent dat het bericht in de wachtrij van de FAP staat. `ERROR_APP_CMD_ERROR` betekent dat de FAP het bericht heeft geweigerd (ongeldig of wachtrij vol): de Pi probeert het na 200 ms opnieuw, hoogstens 3 keer, en laat het daarna vallen. Komt er binnen 3 s geen antwoord, dan geldt de FAP als hangend: niet meer sturen en de sessie als dood behandelen.
+- **FAP → Pi: fire-and-forget.** De spike mat geen verlies en geen verkeerde volgorde. Toch heeft elke kant per afzender een `seq` en een `SeqTracker` (serieel rekenen, RFC 1982, modulo 65535). Een bericht dat niet nieuwer is dan het vorige, is een duplicaat en wordt weggegooid. Een gat wordt gelogd. Na een nieuwe HELLO (andere `instance`) begint alles opnieuw.
+- **Antwoorden in delen:** de Pi stuurt de delen op volgorde. De FAP accepteert alleen `part == verwacht` en dezelfde `total`. Anders toont hij "Antwoord onvolledig ontvangen" en gooit de rest weg. `protocol.Reassembler` is de algemene referentie (ook voor een nagebootste FAP in tests). Die verdraagt een andere volgorde en identieke duplicaten. Een duplicaat met andere tekst geeft een fout. Ontbrekende delen verlopen na 30 s. Er staan hoogstens 4 antwoorden tegelijk open, met hoogstens 8 delen en 4000 B per antwoord.
+- **Eén actie tegelijk.** Zolang een actie loopt, stuurt de FAP geen nieuwe ACTION. De noodstop is de uitzondering: die mag altijd, en de Pi voert hem direct uit, ook als hij al bezig is. Back tijdens een actie stuurt CANCEL. De Pi antwoordt op een tweede ACTION met ERROR `BUSY`.
+- **Rate limits:** de FAP houdt minstens 200 ms tussen twee berichten. De Pi telt per FAP-sessie met een token bucket (5/s, burst 5) en laat de rest vallen (geteld, gelogd). De Pi stuurt zelf ook hoogstens 5 berichten/s: PROGRESS hoogstens 1 per seconde, en een nieuwere vervangt een oudere die nog niet verstuurd is.
+
+## 5. Handdruk en versies
+
+1. De Pi start de FAP (`StartRequest{name, args:"RPC"}`). De FAP koppelt en roept `rpc_system_app_send_started` aan, waarna de Pi `APP_STARTED` krijgt.
+2. De FAP stuurt HELLO. Krijgt hij binnen 3 s geen WELCOME, dan stuurt hij hem opnieuw, hoogstens 3 keer. Daarna toont hij "Pi antwoordt niet".
+3. Bij een HELLO met een nieuwe `instance` wist de Pi de vorige FAP-staat: seq-trackers en openstaande handles worden ingetrokken. Dan stuurt hij WELCOME, PRESETS en STATUS. Een herhaalde HELLO met dezelfde `instance` krijgt gewoon nog een WELCOME, zonder reset.
+4. Elk ander bericht vóór HELLO krijgt ERROR `NOT_READY`. De FAP verwerkt niets behalve WELCOME zolang de handdruk niet rond is.
+
+**Versies:** de kopversie is de versie van de layout van dat bericht. De Pi decodeert alleen versies die hij kent. Een onbekende versie geeft ERROR `UNSUPPORTED_VERSION`, met `ref` = de seq uit de kop (de codec bewaart die in `ProtocolError.seq`). HELLO, WELCOME en ERROR houden in elke latere versie dezelfde v1-layout, zodat een oude en een nieuwe kant elkaar altijd nog kunnen vertellen dat ze niet passen. `proto_max` in HELLO en `proto` in WELCOME zijn voor de onderhandeling. In v1 is dat altijd 1.
+
+## 6. Bevestigen op de Flipper
+
+Doel: een transmit die een agent of frontend voorstelt (`confirmation_required` met `pending_id`), wordt op de Flipper door een mens met OK bevestigd of met Back geweigerd.
+
+```
+Pi (bridge)                                    FAP
+ pending (via AgentSession, frontend flipper_ui)
+ handle = ConfirmHandles.issue(pending, instance, ttl)
+ CONFIRM_PROMPT{handle, ttl_s, summary}  ───▶  scherm "Zenden? 60s", licht + 1x trillen
+                                               OK pas na 1 s actief (geen doorgeschoten knopdruk)
+                                        ◀───  CONFIRM_ANSWER{handle, ja/nee}
+ pending = ConfirmHandles.take(handle, instance)   (eenmalig, TTL, zelfde instance)
+ ja:  AgentSession.confirm(pending, approved=True)  -> runner.call("flipper_ui","confirm_action",…)
+ nee: AgentSession.confirm(pending, approved=False)
+ CONFIRM_CLOSED{handle, uitgevoerd|geweigerd|mislukt}  ───▶  "Bevestiging: uitgevoerd" in status
+```
+
+- **Handle:** een willekeurig u32 van de Pi (`secrets`), nooit 0 en binnen een bridge nooit hergebruikt. De `pending_id` zelf gaat niet naar de FAP. Een antwoord geldt alleen voor een handle die deze Pi aan **deze** FAP-instance gaf, alleen **één keer**, en alleen **binnen de TTL** volgens de klok van de Pi. Het aftellen op de FAP is alleen voor de mens. Een antwoord met een verkeerde instance verbruikt de handle niet.
+- **Binding blijft intact:** de bevestiging loopt via dezelfde frontend-id als de call die de pending maakte (`AgentSession.confirm`), dus `PendingStore.take` controleert opnieuw de binding, de TTL, het eenmalig gebruik en de scope (README, "Bevestiging").
+- **Andere frontends:** een pending van MCP of de Claude-app wordt standaard niet op de Flipper getoond. Daar bevestigt de mens in het gesprek. Een frontend kan zich later wel aanmelden met een eigen callback (`request_confirmation(summary, ttl, on_answer)`). De bridge roept dan alleen die callback aan, en die bevestigt met de eigen frontend-id. De Flipper kan dus nooit een pending van een andere frontend "overnemen".
+- **Eén vraag tegelijk:** de Pi zet verdere vragen in de rij (hoogstens 8 open handles). Een CONFIRM_CLOSED met `ingetrokken` haalt de vraag weg: `emergency_stop` wist alle pendings, en de bridge stuurt dan voor elke open handle CONFIRM_CLOSED. Verloopt de TTL, dan sluit de FAP het scherm zonder iets te sturen, en de Pi stuurt CONFIRM_CLOSED met `verlopen`.
+- **Sessieverlies of nieuwe HELLO:** alle handles van die instance worden ingetrokken. De pending zelf verloopt daarna vanzelf in de `PendingStore`.
+
+## 7. Snelle acties en presets
+
+Snelle acties zijn vast in de FAP (ids) en vast op de Pi (`protocol.QUICK_ACTIONS`). Een test controleert dat elke tool bestaat en dat de argumenten geldig zijn.
+
+| id | Label | Tool-call(s) via de runner |
+|---|---|---|
+| 1 | Status | `status {}` |
+| 2 | Wifi-scan | `wifi_scan {method: iw, band: abg}`. Naar de FAP gaat een samenvatting: aantal, aantal in scope, sterkste SSID's |
+| 3 | Stop captures | `capture_stop {capture_id}` voor elke actieve capture. De ids komen uit `status`, nooit van de FAP |
+| 4 | Noodstop | `emergency_stop {}`. Altijd toegestaan, ook als er al een actie loopt |
+
+Presets staan in de Pi-config, als lijst van `{id, label, prompt}`. Alleen `id` en `label` gaan naar de FAP. Een ACTION met `kind = preset` start een agent-beurt (`AgentSession(frontend="flipper_ui").run_turn(prompt)`). Tussendoor gaat er PROGRESS naar de FAP (bijv. "tool: wifi_scan"), en aan het eind het antwoord in RESULT-delen (`chunk_result`, tekst via `to_display_text` naar ASCII). Zonder LLM-config is bit1 in WELCOME uit, en een preset krijgt ERROR `AGENT_UNAVAILABLE`.
+
+## 8. Starten
+
+### Door de Pi
+
+1. `app_lock_status_request`. Is `locked = true`, dan doet de Pi niets: hij **sluit nooit een app van de gebruiker**, ook niet via GUI-input. Spike test 2: direct na een `APP_CLOSED` kan `locked` nog één keer `true` zijn, dus hooguit 0,5 s wachten en opnieuw kijken.
+2. `StartRequest{name: "/ext/apps/Tools/pitoolbox_ui.fap", args: "RPC"}`. Bij `ERROR_APP_SYSTEM_LOCKED` (de gebruiker was net eerder) geeft de Pi het op.
+3. Wachten op `APP_STARTED` en dan op HELLO (3 s).
+
+### Handmatig (vanuit het Apps-menu)
+
+Een FAP die je zelf start, krijgt geen `"RPC %08lX"` en heeft dus geen kanaal naar de Pi (spike §3). **Gekozen ontwerp: verzoekbestand plus RPC-start door de Pi.**
+
+1. De FAP ziet geen geldige RPC-args. Met `rpc_get_sessions_count` (geëxporteerd, `api_symbols.csv` r. 3293, `M/applications/services/rpc/rpc.c#L520`) kijkt hij of er een host verbonden is.
+   - Geen sessie: hij toont "Geen verbinding met Pi" en sluit na 4 s. Er blijft niets achter.
+   - Wel een sessie: hij schrijft `/ext/apps_data/pitoolbox_ui/start_request` met de inhoud `PTBUI 1 <furi_hal_rtc_get_timestamp>\n`. Dat gaat atomair: eerst `.tmp` schrijven, dan hernoemen. Hij toont "Pi wordt gevraagd de app te openen..." en **sluit na 1,5 s zichzelf**, zodat de loader vrij is.
+2. De bridge op de Pi pollt alleen als er geen FAP-sessie is en er geen tool loopt, elke 3 s, met `storage_stat` op dat pad. Dat is één klein frame, ongeveer 100 ms over BLE, dus ongeveer 3 % van de link. `ERROR_STORAGE_NOT_EXIST` betekent niets te doen.
+3. Is het bestand er, dan leest de Pi het (≤ 64 B), wist het **meteen**, en controleert inhoud en versheid. Daarvoor vergelijkt hij de tijdstempel met `system_get_datetime_request`, omgerekend met `calendar.timegm` op dezelfde manier als `datetime_datetime_to_timestamp`. Het verschil moet ≤ 30 s zijn. Een oud verzoek (de Pi was niet verbonden toen je de app startte) wordt dus genegeerd, en de app springt niet uren later ongevraagd open.
+4. Daarna volgt dezelfde route als "Door de Pi". De lock-check mag 3 s lang elke 0,5 s herhaald worden, omdat de handmatige instance nog aan het sluiten is. Is de loader dan bezet, dan heeft de gebruiker intussen iets anders geopend: opgeven.
+
+Overwogen en afgewezen (bron: mntm-012):
+
+| Alternatief | Waarom niet |
+|---|---|
+| FAP start zelf het seriële BLE-profiel | sluit de RPC-sessie en is racegevoelig (spike §1) |
+| `rpc_session_open` vanuit de FAP (geëxporteerd, `api_symbols.csv` r. 3298) | maakt een **lokale** sessie zonder transport. De sessie van de Pi blijft onbereikbaar |
+| `loader_enqueue_launch` (start een app nadat de huidige sluit, `M/applications/services/loader/loader.c#L309`) | kan geen geldige `RpcAppSystem*` meegeven. Alleen `rpc_app.c` vervangt `"RPC"` door de pointer van de sessie |
+| Pi kijkt alleen naar `app_lock_status` | zegt niet **welke** app open is, dus niet te onderscheiden van een andere app van de gebruiker |
+| Pi leest het scherm via de GUI-stream | ~1 KiB per frame bij 1,2 KiB/s over BLE: legt de link plat en is fragiel |
+| Pi drukt Back via GUI-input en start opnieuw | grijpt in op wat de gebruiker doet, en is racy (spike test 1) |
+| `storage_timestamp_request` als versheid | geeft de tijd van de laatste wijziging van **de hele opslag**, niet van het bestand (`M/applications/services/storage/storage_processing.c#L349`, `storage_glue.c#L68`). Daarom staat de tijd in de inhoud |
+| Pi start de FAP bij elke BLE-connect | ongevraagd scherm (spike, open vraag 4). Kan later als optie, niet als standaard |
+
+## 9. FAP: veilig bij sessieverlies
+
+Wat de firmware doet (mntm-012):
+
+- Valt de sessie weg (BLE-disconnect, USB dicht), dan zet `bt.c` eerst `BT_RPC_EVENT_DISCONNECTED` en roept dan `rpc_session_close` aan. Die zet de send-callback van de sessie op NULL (`M/applications/services/bt/bt_service/bt.c#L394-L403`, `rpc.c#L433`). De worker stopt, en `rpc_session_thread_pending_callback` draait daarna **in de timer-thread** (`rpc.c#L354`, `#L384`). Die roept `rpc_system_app_free` aan, met SessionClose naar de app, en **wacht in een lus tot de callback NULL is. Pas dan geeft hij het `RpcAppSystem` vrij** (`rpc_app.c#L483-L506`). Meteen daarna gaat ook de sessie zelf vrij.
+- `rpc_system_app_confirm` controleert met `furi_check` dat er een open opdracht is (`rpc_app.c#L361-L363`). Een tweede confirm, of een confirm op SessionClose, crasht dus.
+
+**Waarschijnlijke oorzaak van de BusFault uit de spike** (aanname, niet met een crashlog bewezen): `rpc_debug_app` roept bij SessionClose `view_dispatcher_stop` aan **vanuit de timer-thread**, en pas daarna `app->rpc = NULL` (`rpc_debug_app.c#L50-L54`). De app-thread kan dan al in `rpc_debug_app_free` zitten, ziet `app->rpc` nog staan, en roept `rpc_system_app_send_exited` aan op een context die de timer-thread net vrijgeeft (`#L143-L147`). De log van run 4 laat precies die volgorde zien: `Session terminated` → `SendExit`. Dat is een use-after-free, en het verklaart reboots die afhangen van de timing. In dxprobe vond ik zo'n race niet. Daar viel de reboot samen met een ticker die op het moment van verbreken verstuurde. Of dat een firmwareprobleem is, moet de hardwaretest uitwijzen.
+
+Wat `pitoolbox_ui` daarom doet (`pitoolbox_ui.c`):
+
+1. **Eén mutex (`rpc_mutex`) rond elke `rpc_system_app_*`-aanroep**, steeds na de controle `app->rpc != NULL`. Dat geldt ook voor `set_callback`/`send_started` bij het starten en voor `exchange_data`.
+2. **SessionClose in de callback:** onder de mutex `rpc_system_app_set_callback(rpc, NULL, NULL)`, `app->rpc = NULL`, `rpc_gone = true`. Geen confirm, geen GUI-aanroep. Daarna komt er nooit meer een `rpc_system_app_*`-aanroep, uit geen enkele thread, want alle paden controleren eerst `app->rpc`.
+3. **De mutex blijft vast tijdens `exchange_data`.** Daardoor kan de SessionClose-callback (en dus het vrijgeven in de timer-thread) niet midden in een verzending komen. Dat kan niet eeuwig blokkeren: over BLE stopt het versturen op `DISCONNECTED`, dat vóór het sluiten wordt gezet (`bt.c#L226-L245`), en over USB stopt `pipe_send` bij een gebroken pipe (`lib/toolbox/pipe.c#L145-L160`). De volgorde van de locks is overal dezelfde (`rpc_mutex` → `callbacks_mutex` van de sessie), dus er is geen deadlock. Dit gaat in tegen de voorzichtige tip uit de spike ("geen mutex vasthouden tijdens exchange_data"). Zonder de mutex kan de context juist tijdens het versturen vrijgegeven worden.
+4. **Elke DataExchange wordt precies één keer bevestigd, in de callback zelf, in elke toestand.** Eerst controleren (grootte 5..512, magic), dan kopiëren naar een eigen wachtrij met `put(…, 0)` (nooit wachten), en dan `confirm(ok)`. AppExit krijgt `confirm(true)`, alle andere app-opdrachten `confirm(false)`.
+5. **Callbacks raken geen GUI aan.** De app-thread leest de wachtrij via een event-loop-abonnement (`furi_event_loop_subscribe_message_queue`). Daarom geen `view_dispatcher_send_custom_event` vanuit een callback: die wacht met `FuriWaitForever` (`view_dispatcher.c#L393`) en zou bij afsluiten vast kunnen blijven op een wachtrij die niemand meer leegt.
+6. **Afsluiten:** onder de mutex **eerst `send_exited`, dan `set_callback(NULL)`**, dan `rpc = NULL`. Die volgorde is essentieel. `rpc_system_app_free` (`rpc_app.c`) roept onze callback alleen aan als die niet NULL is, en geeft vrij zodra hij NULL is. Zetten we de callback eerst op NULL, dan kan een gelijktijdige SessionClose de context vrijgeven terwijl wij nog in `send_exited` zitten: dezelfde use-after-free als in `rpc_debug_app`. Zolang de callback staat, blokkeert de free-thread in onze callback op de mutex die wij vasthouden. Gevonden in de review en gerepareerd vóór de eerste hardwaretest. Dan wachten tot er geen callback meer in onze code loopt (een atomische teller). Pas daarna gaan wachtrij, mutex en app vrij, steeds met de eigen `*_free()` (`submenu_free`, `text_box_free`, `popup_free`, `view_free`, `view_dispatcher_free`, `scene_manager_free`, `furi_message_queue_free`, `furi_mutex_free`, `furi_string_free`).
+7. **Geen notificaties per bericht** (spike test 3: 200 ms-stalls). Alleen één keer licht en één keer trillen bij een bevestigingsvraag.
+8. **Na SessionClose:** de FAP toont 2 s "Verbinding met Pi verbroken" en sluit. Een nieuwe sessie kan niet opnieuw aan een draaiende FAP koppelen (spike §3).
+9. **Alleen exact `"RPC %08lX"`** (12 tekens, 8 hexcijfers, niet 0) geldt als RPC-start. Al het andere (geen args, een bestandspad uit het archief) is een handmatige start. Restrisico in mntm-012: een RPC-client kan een vervalste pointer meegeven (spike §3). Dat kan alleen een partij die al RPC-toegang heeft.
+
+Blijvend restrisico: tussen de controle `if(rpc_app->callback)` in de firmware en het eerste statement van onze callback zit een venster van een paar instructies. Daarin kan het afsluiten van de app net vallen. Dat venster hebben alle firmware-apps. De teller maakt het zo klein als vanuit een FAP kan.
+
+## 10. Bridge op de Pi (gepland, nog niet gebouwd)
+
+Komt na de agent-loop. De codec is zo opgezet dat de bridge vooral bestaande onderdelen aan elkaar koppelt:
+
+```
+FlipperDevice (één RPC-sessie, gedeeld met de tools; RpcClient is niet thread-safe)
+  └─ event-hook: command_id 0 + app_data_exchange_request → bridge.on_frame(bytes)
+     (direct afhandelen, niet in de eventqueue van max 256: spike test 4)
+FlipperUiBridge (eigen thread)
+  ├─ decode_from_fap → RateLimiter → SeqTracker → dispatch
+  ├─ HELLO: reset; WELCOME, PRESETS, STATUS
+  ├─ ACTION quick → worker: QUICK_ACTIONS[id] → runner.call("flipper_ui", tool, args)
+  │                → samenvatten → chunk_result → zendrij
+  ├─ ACTION preset → worker: AgentSession("flipper_ui").run_turn(prompt, on_event)
+  │                  on_event: tool-start → PROGRESS; PendingConfirmation → ConfirmHandles.issue → CONFIRM_PROMPT
+  ├─ CONFIRM_ANSWER → ConfirmHandles.take(handle, instance) → session.confirm(...) → CONFIRM_CLOSED
+  ├─ CANCEL → AgentSession/flipper.abort() waar mogelijk, ERROR CANCELLED
+  ├─ zendrij → device.app_data_exchange(bytes) (stop-and-wait, 3x opnieuw bij CMD_ERROR, ≤5/s)
+  ├─ ConfirmHandles.expire() elke seconde → CONFIRM_CLOSED(EXPIRED)
+  └─ zonder FAP-sessie en idle: start_request pollen (§8)
+```
+
+- Bij `APP_CLOSED` of een verbroken transport worden alle handles ingetrokken (`revoke_all`) en stopt de zendrij.
+- Lange storage-operaties tijdens een FAP-sessie vermijden of opknippen: ze blokkeren beide richtingen (spike test 4).
+- Sub-GHz/RFID via de CLI (USB) kunnen niet zolang de FAP draait (`loader_lock`, spike §2). Daarom zitten ze niet in de snelle acties.
+
+## 11. Testen
+
+- `uv run pytest tests/test_flipper_ui_protocol.py`: roundtrip van elk type, vaste vectoren, grootste berichten ≤ 512 B, modelgrenzen, strikte decoder (34 foutgevallen), fuzz (5000 willekeurige berichten, mutaties en inkortingen: alleen `ProtocolError`, en wat geaccepteerd wordt is canoniek), tekstconversie, seq (duplicaat, gat, wrap), rate limit, reassembly (andere volgorde, duplicaat, conflict, ontbrekend deel, limieten), handles (eenmalig, TTL, instance, intrekken) en de koppeling snelle actie → echte tool.
+- C ↔ Python: `ptb_proto.c` op de host gecompileerd (gcc, `-Wall -Wextra -Werror`) en vergeleken met de Python-codec op 14.200 berichten: 0 verschillen. Dat script staat niet in de repo.
+- Hardware: zie [fase4-spike.md](fase4-spike.md) en de README van de FAP. Een valtest (BLE weg terwijl de FAP verstuurt, 20 keer) is nodig voordat de FAP als stabiel geldt.

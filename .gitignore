@@ -13,3 +13,8 @@ scope.yaml
 *.env
 captures/
 audit*.jsonl
+
+# Flipper-app (ufbt): bouwuitvoer, gegenereerde compile_commands en een lokale SDK-map
+flipper_app/**/dist/
+flipper_app/**/.vscode/
+.ufbt/
