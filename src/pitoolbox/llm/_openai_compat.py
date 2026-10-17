@@ -28,6 +28,12 @@ Bronnen:
 - MiniMax: https://platform.minimax.io/docs/guides/text-m2-function-call — het volledige
   assistant-bericht incl. `reasoning_details` bewaren, en `content` niet wijzigen.
   Daarom bewaren we die velden in `ProviderState` en laten we `content` ongemoeid.
+
+Afwijkingen per preset (`Quirk`, gezet via `LLMConfig.quirks`; bronnen in `presets.py`):
+- `TOOL_CALL_EXTRA_CONTENT` (Gemini): `tool_calls[].extra_content` (de thought signature)
+  per call bewaren en ongewijzigd terugsturen; zonder geeft Gemini 3 een 400.
+- `CONTENT_PARTS` (Mistral): is `content` een lijst (thinking- en tekstblokken), dan die
+  lijst ongewijzigd terugsturen in plaats van alleen de tekst.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from pitoolbox.llm._common import (
 )
 from pitoolbox.llm.config import ProviderKind
 from pitoolbox.llm.errors import LLMResponseError
+from pitoolbox.llm.presets import Quirk
 from pitoolbox.llm.types import (
     AssistantMessage,
     Completion,
@@ -62,6 +69,9 @@ from pitoolbox.llm.types import (
 
 # Velden van het assistant-bericht die ongewijzigd terug moeten (zie bronnen hierboven).
 _REPLAY_FIELDS = ("reasoning_content", "reasoning_details")
+# Sleutels in `ProviderState.data` voor de quirks (naast `_REPLAY_FIELDS`).
+_STATE_CALL_EXTRA = "tool_call_extra_content"  # {call_id: extra_content}
+_STATE_CONTENT = "content"
 
 _FINISH_REASONS = {
     "stop": StopReason.END_TURN,
@@ -147,22 +157,28 @@ class OpenAICompatibleProvider(HttpProvider):
         return body
 
     def _assistant(self, m: AssistantMessage) -> dict[str, Any]:
-        msg: dict[str, Any] = {"role": "assistant", "content": m.text}
-        if m.tool_calls:
-            msg["tool_calls"] = [
-                {
-                    "id": c.id,
-                    "type": "function",
-                    "function": {"name": replay_name(c), "arguments": replay_arguments(c)},
-                }
-                for c in m.tool_calls
-            ]
         state = self._own_state(m.state)
-        if state is not None:
-            for key in _REPLAY_FIELDS:
-                if key in state.data:
-                    msg[key] = state.data[key]
+        data = state.data if state is not None else {}
+        content = data.get(_STATE_CONTENT, m.text)
+        msg: dict[str, Any] = {"role": "assistant", "content": content}
+        if m.tool_calls:
+            extra = data.get(_STATE_CALL_EXTRA, {})
+            msg["tool_calls"] = [self._replay_call(c, extra.get(c.id)) for c in m.tool_calls]
+        for key in _REPLAY_FIELDS:
+            if key in data:
+                msg[key] = data[key]
         return msg
+
+    @staticmethod
+    def _replay_call(call: ToolCall, extra_content: Any) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "id": call.id,
+            "type": "function",
+            "function": {"name": replay_name(call), "arguments": replay_arguments(call)},
+        }
+        if extra_content is not None:
+            out["extra_content"] = extra_content
+        return out
 
     def _parse(self, data: dict[str, Any]) -> Completion:
         choices = require_list(data, "choices", "choices")
@@ -173,19 +189,15 @@ class OpenAICompatibleProvider(HttpProvider):
         if not isinstance(message, dict):
             raise LLMResponseError("onverwacht antwoord: choices[0].message ontbreekt")
 
-        calls: list[ToolCall] = []
-        raw_calls = message.get("tool_calls")
-        for tc in raw_calls if isinstance(raw_calls, list) else []:
-            if not isinstance(tc, dict):
-                continue
-            fn = tc.get("function")
-            fn = fn if isinstance(fn, dict) else tc  # llama.cpp: name/arguments direct
-            calls.append(make_tool_call(tc.get("id"), fn.get("name"), fn.get("arguments")))
-
+        calls, call_extra = self._parse_calls(message.get("tool_calls"))
         raw_reason = as_str(choice.get("finish_reason"))
         reason = _FINISH_REASONS.get(raw_reason or "", StopReason.OTHER)
         usage = as_dict(data.get("usage"))
         replay = {k: message[k] for k in _REPLAY_FIELDS if message.get(k) is not None}
+        if call_extra:
+            replay[_STATE_CALL_EXTRA] = call_extra
+        if Quirk.CONTENT_PARTS in self.config.quirks and isinstance(message.get("content"), list):
+            replay[_STATE_CONTENT] = message["content"]
         return Completion(
             text=_content_text(message.get("content")),
             tool_calls=tuple(calls),
@@ -198,3 +210,19 @@ class OpenAICompatibleProvider(HttpProvider):
             model=as_str(data.get("model")),
             state=ProviderState(self.kind.value, replay) if replay else None,
         )
+
+    def _parse_calls(self, raw_calls: Any) -> tuple[list[ToolCall], dict[str, Any]]:
+        """Tool-calls plus (bij `TOOL_CALL_EXTRA_CONTENT`) hun `extra_content` per call-id."""
+        keep_extra = Quirk.TOOL_CALL_EXTRA_CONTENT in self.config.quirks
+        calls: list[ToolCall] = []
+        extra: dict[str, Any] = {}
+        for tc in raw_calls if isinstance(raw_calls, list) else []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            fn = fn if isinstance(fn, dict) else tc  # llama.cpp: name/arguments direct
+            call = make_tool_call(tc.get("id"), fn.get("name"), fn.get("arguments"))
+            calls.append(call)
+            if keep_extra and tc.get("extra_content") is not None:
+                extra[call.id] = tc["extra_content"]
+        return calls, extra
