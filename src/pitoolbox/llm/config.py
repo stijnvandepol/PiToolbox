@@ -64,6 +64,15 @@ def _http_host_allowed(host: str) -> bool:
     return any(addr.version == net.version and addr in net for net in _LOCAL_HTTP_NETWORKS)
 
 
+def _is_loopback(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return host is not None and ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def validate_base_url(url: str) -> str:
     """Controleert de base-URL volgens de regel hierboven; geeft hem zonder '/' aan het eind."""
     parts = urlsplit(url.strip())
@@ -150,7 +159,9 @@ def _base_url_for(preset: ProviderPreset, raw: str | None) -> str:
     """Eigen PITOOLBOX_LLM_BASE_URL wint (bijv. een regio-endpoint), anders die van de preset.
 
     Bij een preset met verplichte sleutel (cloud) moet een eigen URL https zijn: de sleutel
-    mag nooit onversleuteld over het netwerk, ook niet in het LAN.
+    mag nooit onversleuteld over het netwerk, ook niet in het LAN. Alleen loopback mag wel
+    http (de sleutel verlaat de Pi dan niet), bijv. `openai` tegen de Responses-API van een
+    lokale Ollama of een lokale proxy.
     """
     override = (raw or "").strip()
     if not override:
@@ -162,9 +173,11 @@ def _base_url_for(preset: ProviderPreset, raw: str | None) -> str:
             )
         return validate_base_url(preset.base_url)
     url = validate_base_url(override)
-    if preset.requires_key and urlsplit(url).scheme != "https":
+    parts = urlsplit(url)
+    if preset.requires_key and parts.scheme != "https" and not _is_loopback(parts.hostname):
         raise LLMConfigError(
             f"PITOOLBOX_LLM_BASE_URL moet https:// zijn voor {preset.name}: "
-            "de API-sleutel gaat anders onversleuteld over het netwerk"
+            "de API-sleutel gaat anders onversleuteld over het netwerk (http alleen naar "
+            "loopback)"
         )
     return url

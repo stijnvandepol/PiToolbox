@@ -113,6 +113,14 @@ def test_cloud_preset_override_must_be_https(name: str) -> None:
     assert KEY not in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "url", ["http://127.0.0.1:11434/v1", "http://localhost:4000", "http://[::1]:8080/v1"]
+)
+def test_key_preset_may_use_http_to_loopback(url: str) -> None:
+    # De sleutel verlaat de Pi niet: bijv. `openai` tegen de Responses-API van een lokale Ollama.
+    assert _cfg("openai", base_url=url).base_url == url
+
+
 def test_override_still_validated() -> None:
     with pytest.raises(LLMConfigError, match="query"):
         _cfg("deepseek", base_url="https://api.deepseek.com/?key=abc")
