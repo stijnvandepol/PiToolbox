@@ -436,7 +436,7 @@ def test_chunk_result_roundtrip_via_bytes() -> None:
         decoded = p.decode_from_pi(data)
         assert isinstance(decoded, p.ResultChunk)
         out = r.feed(decoded)
-    expected = p.to_display_text(text, max_len=p.MAX_RESULT, multiline=True)
+    expected = p.to_text_box(text, max_len=p.MAX_RESULT)  # afgebroken vóór het opsplitsen
     assert out == expected
     assert out.endswith("...")  # 200 regels passen niet in 4000 bytes
 
@@ -447,7 +447,9 @@ def test_chunk_result_small_and_empty() -> None:
     assert (only.part, only.total, only.text) == (0, 1, "")
     chunks = p.chunk_result(2, "x" * 200, seq, max_msg=64)  # 55 tekstbytes per deel
     assert all(len(p.encode(c)) <= 64 for c in chunks)
-    assert len(chunks) == 4 and "".join(c.text for c in chunks) == "x" * 200
+    joined = "".join(c.text for c in chunks)
+    assert len(chunks) == 4 and joined.replace("\n", "") == "x" * 200
+    assert all(p.text_width(line) <= 120 for line in joined.split("\n"))
     chunks = p.chunk_result(3, "x" * 500, seq, max_msg=64)  # past niet in 8 x 55
     assert len(chunks) == 8 and chunks[-1].text.endswith("...")
     with pytest.raises(ValueError):

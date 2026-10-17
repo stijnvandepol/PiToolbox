@@ -22,7 +22,8 @@ rate limiting, reassembly, bevestigings-handles). De koppeling aan de runner en 
 staat in `bridge.py`. De code staat per onderdeel in:
 
 * `protocol_spec.py`: grenzen, berichttypes, codes en `ProtocolError`;
-* `protocol_text.py`: tekstvelden (printbare ASCII) en `to_display_text`;
+* `protocol_text.py`: tekstvelden (printbare ASCII), `to_display_text` en het afbreken op
+  woordgrenzen voor de TextBox van de FAP (`to_text_box`);
 * `protocol_wire.py` en `protocol_messages.py`: body-layout en de berichtmodellen;
 * `protocol_codec.py`: kop, `encode` en de decoders per richting;
 * `protocol_flow.py`: volgnummers en rate limiting;
@@ -104,7 +105,10 @@ from pitoolbox.frontends.flipper_ui.protocol_text import (
     Summary,
     ToolText,
     UplinkText,
+    text_width,
     to_display_text,
+    to_text_box,
+    wrap_lines,
 )
 
 __all__ = [
@@ -177,5 +181,8 @@ __all__ = [
     "decode_from_pi",
     "encode",
     "quick_action_plan",
+    "text_width",
     "to_display_text",
+    "to_text_box",
+    "wrap_lines",
 ]

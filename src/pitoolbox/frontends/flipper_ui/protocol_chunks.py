@@ -18,7 +18,7 @@ from pitoolbox.frontends.flipper_ui.protocol_spec import (
     MIN_RX,
     ProtocolError,
 )
-from pitoolbox.frontends.flipper_ui.protocol_text import to_display_text
+from pitoolbox.frontends.flipper_ui.protocol_text import to_text_box
 
 # --- resultaten in delen ----------------------------------------------------------------------
 
@@ -33,15 +33,17 @@ def chunk_result(
 ) -> list[ResultChunk]:
     """Splits een (lang) antwoord in RESULT-delen voor de FAP.
 
-    De tekst wordt eerst schermklaar gemaakt (`to_display_text`) en afgekapt op wat in
-    `max_parts` delen past. `max_msg` is de `max_rx` uit de HELLO van de FAP (hoogstens 512).
+    De tekst wordt eerst schermklaar gemaakt (`to_text_box`: ASCII, afgebroken op woordgrenzen
+    voor de TextBox van de FAP) en afgekapt op wat in `max_parts` delen past. Pas daarna wordt
+    hij in delen geknipt; de FAP plakt ze weer aan elkaar. `max_msg` is de `max_rx` uit de
+    HELLO van de FAP (hoogstens 512).
     """
     if not MIN_RX <= max_msg <= MAX_MSG:
         raise ValueError(f"max_msg buiten {MIN_RX}..{MAX_MSG}")
     if not 1 <= max_parts <= MAX_PARTS:
         raise ValueError(f"max_parts buiten 1..{MAX_PARTS}")
     per_part = min(MAX_CHUNK, max_msg - _RESULT_OVERHEAD)
-    clean = to_display_text(text, max_len=per_part * max_parts, multiline=True)
+    clean = to_text_box(text, max_len=per_part * max_parts)
     pieces = [clean[i : i + per_part] for i in range(0, len(clean), per_part)] or [""]
     total = len(pieces)
     return [

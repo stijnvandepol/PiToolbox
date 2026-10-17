@@ -353,8 +353,9 @@ def test_quick_status_goes_through_runner(lab: Lab) -> None:
     lab.connect()
     ref = lab.fap.quick(Q.STATUS)
     text = lab.fap.result_text(ref)
-    assert "Uplink: aan wlan0 10.0.0.2/24" in text
-    assert "Voeding: OK (eerder onderspanning)" in text
+    # Te breed voor één TextBox-regel: afgebroken op een spatie.
+    assert "Uplink: aan wlan0\n10.0.0.2/24" in text
+    assert "Voeding: OK (eerder\nonderspanning)" in text
     # Zelfde woorden als het statusscherm van de app (ptb_scene_status_show).
     assert "Flipper-link: BLE" in text and "Captures: 0 actief" in text
     assert "Open bevestigingen: 0" in text
@@ -479,6 +480,31 @@ def test_preset_runs_agent_turn_with_progress(tmp_path: Path) -> None:
         assert getattr(first, "text", "") == "Hoe staat het ervoor?"
         turns = [r for r in lab.audit() if r.get("event") == "agent_turn_end"]
         assert turns and turns[-1]["frontend"] == FRONTEND
+    finally:
+        lab.bridge.stop()
+
+
+def test_preset_answer_is_wrapped_for_the_text_box(tmp_path: Path) -> None:
+    answer = (
+        "De uplink eth0 is up met adres 192.168.1.23; de Flipper hangt via BLE aan de Pi "
+        "en er lopen geen captures. Bestand: /ext/subghz/garage/poort_links_boven.sub"
+    )
+    provider = ScriptedProvider([reply(answer)])
+    presets = [PresetConfig(id=1, label="Status", prompt="Hoe staat het ervoor?")]
+    lab = _make(tmp_path, provider=provider, presets=presets)
+    try:
+        lab.connect()
+        ref = lab.fap.action(proto.ActionKind.PRESET, 1)
+        # Op woordgrenzen (in een pad na '/' of '_'), elke regel <= 120 px in het TextBox-font.
+        assert lab.fap.result_text(ref).split("\n") == [
+            "De uplink eth0 is up met",
+            "adres 192.168.1.23; de",
+            "Flipper hangt via BLE aan de",
+            "Pi en er lopen geen captures.",
+            "Bestand: /ext/subghz/",
+            "garage/poort_links_",
+            "boven.sub",
+        ]
     finally:
         lab.bridge.stop()
 

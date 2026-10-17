@@ -29,6 +29,8 @@ Elk bericht heeft een kop van 5 bytes plus een vaste body per type. Getallen zij
 
 Strikt decoderen betekent aan beide kanten hetzelfde: verkeerde magic of versie, seq 0, een onbekend type, een type uit de verkeerde richting, te kort, bytes over na de body, een waarde buiten bereik, onbekende vlagbits of tekst buiten printbare ASCII geeft altijd "ongeldig". Er zijn geen standaardwaarden en geen stille correcties.
 
+**Regels op het scherm.** De FAP toont het resultaat in een TextBox van de firmware. Die breekt een regel af zodra het volgende teken niet meer in 120 pixels past, ook midden in een woord (`text_box_seek_next_line` in Momentum mntm-012). Daarom breekt de Pi de tekst zelf af vóór het opsplitsen in delen (`to_text_box` in `protocol_text.py`): op spaties, en alleen in een woord dat breder is dan een hele regel na `/`, `-` of `_`, of anders midden in het woord. De breedte per teken komt uit het font van de firmware (`_font_widths.py`, gegenereerd door `scripts/gen_flipper_font_widths.py`). Een Momentum-assetpack met een eigen font maakt die breedtes onjuist; dan breekt de TextBox weer zelf af.
+
 ## 3. Berichten
 
 `ref` verwijst naar de `seq` van het FAP-bericht waar het antwoord bij hoort. `ref = 0` betekent "geen antwoord" (de Pi begon zelf).
@@ -145,7 +147,7 @@ Snelle acties zijn vast in de FAP (ids) en vast op de Pi (`protocol.QUICK_ACTION
 | 3 | Stop captures | `capture_stop {capture_id}` voor elke actieve capture. De ids komen uit `status`, nooit van de FAP |
 | 4 | Noodstop | `emergency_stop {}`. Altijd toegestaan, ook als er al een actie loopt |
 
-Presets staan in de Pi-config, als lijst van `{id, label, prompt}`. Alleen `id` en `label` gaan naar de FAP. Een ACTION met `kind = preset` start een agent-beurt (`AgentSession(frontend="flipper-ui").run_turn(prompt)`). Tussendoor gaat er PROGRESS naar de FAP (bijv. "tool: wifi_scan"), en aan het eind het antwoord in RESULT-delen (`chunk_result`, tekst via `to_display_text` naar ASCII). Zonder LLM-config is bit1 in WELCOME uit, en een preset krijgt ERROR `AGENT_UNAVAILABLE`.
+Presets staan in de Pi-config, als lijst van `{id, label, prompt}`. Alleen `id` en `label` gaan naar de FAP. Een ACTION met `kind = preset` start een agent-beurt (`AgentSession(frontend="flipper-ui").run_turn(prompt)`). Tussendoor gaat er PROGRESS naar de FAP (bijv. "tool: wifi_scan"), en aan het eind het antwoord in RESULT-delen (`chunk_result`, tekst via `to_text_box` naar ASCII en afgebroken op woordgrenzen). Zonder LLM-config is bit1 in WELCOME uit, en een preset krijgt ERROR `AGENT_UNAVAILABLE`.
 
 ## 8. Starten
 
