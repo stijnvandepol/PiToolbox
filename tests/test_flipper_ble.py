@@ -19,6 +19,7 @@ from flipper_fakes import (
     FakeBleChar,
     FakeBleFlipper,
     FakeBleWorld,
+    FakeFap,
     fixture_json,
     install_fake_bleak,
     make_fap,
@@ -37,6 +38,7 @@ from pitoolbox.core.errors import (
     DeviceNotConnected,
     UnsupportedTransport,
 )
+from pitoolbox.frontends.flipper_ui import protocol as proto
 
 # --- hulpjes -----------------------------------------------------------------------------
 
@@ -692,6 +694,41 @@ def test_abort_wakes_a_request_blocked_on_flow_control(world: FakeBleWorld) -> N
         assert not thread.is_alive()
         assert len(errors) == 1 and isinstance(errors[0], Aborted)
         assert device.status()["connected"] is False  # volgende actie krijgt een verse sessie
+    finally:
+        device.close()
+
+
+def test_abort_lets_a_bridge_message_waiting_for_credit_finish(world: FakeBleWorld) -> None:
+    """Een noodstop terwijl `app_send` midden in een bericht op krediet wacht: niet onderbreken.
+    Anders sluit de link, is de app weg en komt de uitkomst van de noodstop nooit aan."""
+    flipper = FakeBleFlipper(address="AA:AA:AA:AA:AA:24", buff_size=128)
+    flipper.auto_refill = False
+    world.flippers.append(flipper)
+    fap = flipper.rpc.attach_fap(FakeFap(auto_hello=False))
+    device = make_device(flipper)
+    message = proto.Error(seq=1, ref=0, code=proto.ErrorCode.BUSY, text="x" * 100)
+    errors: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            device.app_send(proto.encode(message))
+        except BaseException as exc:  # noqa: BLE001 - doorgeven aan de test
+            errors.append(exc)
+
+    try:
+        device.start_rpc_app("/ext/apps/Tools/pitoolbox_ui.fap")
+        thread = threading.Thread(target=send)
+        thread.start()
+        assert wait_until(lambda: flipper.credit == 0)  # eerste deel weg, de rest wacht
+        device.abort()
+        time.sleep(0.1)
+        flipper.refill()
+        thread.join(timeout=3.0)
+        assert not thread.is_alive()
+        assert errors == []
+        assert fap.received == [message]
+        assert device.status()["connected"] is True and flipper.connects == 1
+        assert device.rpc_app_state == "active"
     finally:
         device.close()
 

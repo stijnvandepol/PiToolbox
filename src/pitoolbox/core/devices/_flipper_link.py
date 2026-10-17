@@ -61,6 +61,7 @@ class FlipperLink:
         self._gen_lock = threading.Lock()
         self._abort_gen = 0
         self._waiters = 0  # threads die op `_lock` wachten (onder `_gen_lock` geteld)
+        self._op_abortable = False  # de lopende operatie is afbreekbaar (onder `_gen_lock`)
         # RPC-gekoppelde app (PiToolbox-FAP): "off" | "active" | "suspended" (handoff in ir_send).
         self._rpc_app_state: Literal["off", "active", "suspended"] = "off"
         self._rpc_app_path: str | None = None
@@ -134,6 +135,22 @@ class FlipperLink:
         with self._gen_lock:
             self._abort_gen += 1
 
+    def _interrupt_abortable_write(self) -> None:
+        """Maak een schrijfactie wakker die op BLE-flow-control wacht (die kent de
+        generatieteller niet), maar alleen als de lopende operatie afbreekbaar is.
+
+        Een niet-afbreekbare operatie (een bericht van de bridge) midden in een bericht
+        onderbreken zou over BLE de hele link sluiten: de app is dan weg, de lease los, en de
+        uitkomst van de noodstop komt niet meer op de Flipper. Onder `_gen_lock`, zodat er
+        tussen de controle en de interrupt geen andere operatie kan beginnen.
+        """
+        with self._gen_lock:
+            if not self._op_abortable:
+                return
+            interrupt = getattr(self._transport, "interrupt", None)
+            if callable(interrupt):
+                interrupt()
+
     def _cancel(self, gen: int) -> Callable[[], bool]:
         return lambda: self._abort_gen != gen
 
@@ -167,11 +184,15 @@ class FlipperLink:
             raise DeviceBusy(f"Flipper is bezet; {name} overgeslagen")
         try:
             self._busy_op = name
+            with self._gen_lock:
+                self._op_abortable = abortable
             try:
                 if abortable and self._abort_gen != gen:
                     raise Aborted("afgebroken voordat de Flipper-actie begon")
                 yield gen
             finally:
+                with self._gen_lock:
+                    self._op_abortable = False
                 self._busy_op = None
                 if touch_io:
                     self._last_io = time.monotonic()

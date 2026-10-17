@@ -19,6 +19,8 @@ via USB; in "auto"-modus schakelt het device daarvoor over naar USB als er een F
 Eén lock rond alle device-I/O. `status()` en `abort()` nemen die lock nooit blokkerend.
 `abort()` verhoogt een generatieteller; lopende CLI-lussen en RPC-wachttijden controleren die
 elke ~50 ms, sturen Ctrl+C (0x03, `cli_is_pipe_broken_or_is_etx_next_char`) en geven `Aborted`.
+Een BLE-write die op flow control wacht, wordt alleen voor een afbreekbare operatie gewekt; wat de
+bridge met de app uitwisselt (`app_send`, `poll_app_events`) maakt een noodstop gewoon af.
 
 **RPC-gekoppelde app (fase 4, de PiToolbox-FAP).** `start_rpc_app` start een FAP met
 `args:"RPC"` (nooit als de loader bezet is: een app van de gebruiker wordt nooit gesloten).
@@ -186,10 +188,7 @@ class FlipperDevice(FlipperCliActions, FlipperIr, FlipperInstaller):
     def abort(self) -> None:
         """Breek lopende en wachtende operaties af. Blokkeert niet op de I/O-lock."""
         self._bump_generation()
-        # Een schrijfactie die op BLE-flow-control wacht kent de generatieteller niet.
-        interrupt = getattr(self._transport, "interrupt", None)
-        if callable(interrupt):
-            interrupt()
+        self._interrupt_abortable_write()
         # Een draaiende operatie ruimt zelf op (finally). Alleen als het apparaat vrij is maar
         # er toch een app open staat (eerdere mislukte opruiming) sluiten we die hier.
         if self._app_active and self._mode == "rpc" and self._lock.acquire(blocking=False):
