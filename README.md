@@ -530,12 +530,12 @@ Deze lijsten werk je af op de echte Pi. De checklists van fase 4 en 5 staan bij 
 
 ### Fase 3
 
-- [ ] `ble-scan` vindt de Flipper; `ble-pair` vraagt de code van het Flipper-scherm en koppelt
-- [ ] `ble-test`: system_info en storage_list via BLE; noteer ping-latency en doorvoer (KiB/s) en vergelijk met `--compare-usb`
-- [ ] Haalt BlueZ op de Pi een grote MTU, of blijft het bij 20 bytes per write (traag maar werkend)?
+- [x] `ble-scan` vindt de Flipper; `ble-pair` vraagt de code van het Flipper-scherm en koppelt (2026-10-16)
+- [x] `ble-test`: system_info en storage_list via BLE; noteer ping-latency en doorvoer (KiB/s) en vergelijk met `--compare-usb` (ping 98 ms vs 2 ms, download 1,2 vs 97 KiB/s; zie VOORTGANG)
+- [x] Haalt BlueZ op de Pi een grote MTU, of blijft het bij 20 bytes per write (traag maar werkend)? (MTU 414 via D-Bus, writes tot 243 B)
 - [ ] `ir_send` via BLE (bevestigen → zendt)
 - [ ] `subghz_rx` met `transport=auto`: zonder kabel `unsupported_transport`, met kabel automatisch via USB
-- [ ] Flipper buiten bereik en terug: de volgende call verbindt opnieuw; keepalive houdt een idle link levend
+- [x] Link weg en terug: de volgende call verbindt opnieuw (`ui-droptest` 2x 20/20); de keepalive pingt door, ook met de app open (2026-10-17). Echt buiten bereik lopen is nog niet geprobeerd
 - [ ] De service als gebruiker `pitoolbox` (groep `bluetooth`) kan BLE gebruiken zonder D-Bus-fouten
 
 ### Fase 2
@@ -555,14 +555,14 @@ Deze lijsten werk je af op de echte Pi. De checklists van fase 4 en 5 staan bij 
 Alles hieronder is alleen getest tegen nagebootste apparaten, behalve wat in [Status](#status) staat. Op de Pi zelf controleren:
 
 **Flipper (USB)**
-- [ ] `system_info` geeft `firmware_origin_fork`, en het juiste CLI-profiel wordt gekozen
+- [x] `system_info` geeft `firmware_origin_fork`, en het juiste CLI-profiel wordt gekozen (`momentum`)
 - [ ] `storage_list /ext` en `storage_read` van een klein `.ir`-bestand werken
-- [ ] Omschakelen RPC ↔ CLI en terug, meerdere keren achter elkaar (bijv. `system_info` → `rfid_read` → `system_info`)
+- [x] Omschakelen RPC ↔ CLI en terug, meerdere keren achter elkaar (bijv. `system_info` → `rfid_read` → `system_info`)
 - [ ] `subghz_rx` op 433.92 MHz met een eigen afstandsbediening: klopt `packet_count`, en worden pakketten goed gesplitst? (de splitsheuristiek is niet uit de bron geverifieerd)
 - [ ] `rfid_read` met een eigen tag: protocol, hex en infotekst
 - [ ] `nfc_read` met en zonder tag (gedrag na Ctrl+C zonder tag); weigert de Flipper als de NFC-app open staat?
 - [ ] `ir_send` op je eigen tv: bevestiging → zendt → app sluit weer
-- [ ] `emergency_stop` tijdens een `subghz_rx` van 60 s: stopt binnen ~1 s
+- [x] `emergency_stop` tijdens een `subghz_rx` van 60 s: stopt binnen ~1 s (2026-10-17: noodstop 1 ms, rx 15 ms later afgebroken; daarna werken CLI en RPC gewoon)
 - [ ] USB eruit en erin tijdens gebruik: de volgende call verbindt opnieuw
 
 **Alfa AWUS036AXML (mt7921u)**
@@ -573,4 +573,4 @@ Alles hieronder is alleen getest tegen nagebootste apparaten, behalve wat in [St
 - [ ] Rechten: werkt het met `CAP_NET_ADMIN`/`CAP_NET_RAW`, of is root nodig?
 
 **Pi**
-- [ ] `status`: klopt `vcgencmd get_throttled` (gebruiker in de groep `video`), en worden uplink en schijf goed gerapporteerd?
+- [x] `status`: klopt `vcgencmd get_throttled` (gebruiker in de groep `video`), en worden uplink en schijf goed gerapporteerd? (als gebruiker kali; als service-gebruiker nog niet)
