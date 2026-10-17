@@ -816,7 +816,9 @@ class FakeFap:
         return "ok"
 
     def _on_not_ready(self) -> None:
-        """`ptb_on_not_ready`: de Pi kent deze sessie niet (meer)."""
+        """`ptb_on_not_ready`: de Pi kent deze sessie niet (meer). Niet nagebootst: de toestand
+        "Pi antwoordt niet" (na drie HELLO's zonder WELCOME), waaruit de echte app ook opnieuw
+        groet; deze fake stuurt HELLO maar één keer per start en komt daar nooit."""
         if not self.rehello or not self.running or not self.connected:
             return  # oude build, of de handdruk loopt al (de HELLO is onderweg)
         self.connected = False
