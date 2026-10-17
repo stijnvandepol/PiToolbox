@@ -104,6 +104,7 @@ class _BridgeCore:
         self._start_deadline: float | None = None
         self._restart_at: float | None = None
         self._restart_until = 0.0
+        self._locked_until = 0.0  # tot hier opnieuw proberen als de loader bezet is
         self._restart_step = 0
         self._next_poll = 0.0
         self._link_step = 0
@@ -198,6 +199,7 @@ class _BridgeCore:
         now = self._clock()
         if self._restart_at is None and self._restart_step == 0:
             self._restart_until = now + self.timing.restart_window_s
+            self._locked_until = now + self.timing.locked_retry_s
         if now >= self._restart_until:
             log.info("PiToolbox-app: opnieuw starten opgegeven")
             self._restart_at = None

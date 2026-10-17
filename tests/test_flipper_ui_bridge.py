@@ -58,6 +58,7 @@ FAST_BRIDGE = BridgeTiming(
     manual_lock_wait_s=0.3,
     restart_backoff_s=(0.05, 0.1),
     restart_window_s=3.0,
+    locked_retry_s=1.0,
     link_backoff_s=(0.05,),
     stop_join_s=2.0,
 )
@@ -673,6 +674,66 @@ def test_link_loss_mid_message_detaches_and_restarts(lab: Lab) -> None:
         timeout=5.0,
     )
     assert lab.fake.opens >= 2
+
+
+def _lose_link_with_loader_busy(lab: Lab, seen: list[BridgeEvent]) -> None:
+    """Link weg terwijl de loader bezet blijft (de oude app sluit nog, of een app van de
+    gebruiker): de eerste herstart vindt de loader bezet."""
+    lab.connect()
+    lab.fake.user_app_open = True
+    lab.fake.fail_on_rpc_kind = "app_data_exchange_request"  # kabel eruit tijdens versturen
+    lab.fap.quick(Q.STATUS)
+    assert wait_until(lambda: _locked_starts(seen) >= 1, timeout=3.0)
+
+
+def _locked_starts(seen: list[BridgeEvent]) -> int:
+    return sum(1 for e in list(seen) if e.kind == "start_failed" and e.detail == "locked")
+
+
+def test_restart_after_lost_link_waits_for_our_closing_app(tmp_path: Path) -> None:
+    """Op de Flipper toont de oude app nog 2 s "Verbinding met Pi verbroken": een snelle
+    herstart vindt de loader bezet. Dan even opnieuw proberen, niet meteen opgeven."""
+    seen: list[BridgeEvent] = []
+    lab = _make(tmp_path)
+    lab.bridge = FlipperUiBridge(
+        lab.runner, app_path=FAP_PATH, timing=FAST_BRIDGE, observer=seen.append
+    )
+    try:
+        _lose_link_with_loader_busy(lab, seen)
+        first = lab.fap.instance
+        lab.fake.user_app_open = False  # de oude app is nu dicht
+        assert wait_until(
+            lambda: (
+                lab.fap.instance != first
+                and lab.bridge.state is BridgeState.CONNECTED
+                and lab.store.physical_confirmer == FRONTEND
+            ),
+            timeout=5.0,
+        )
+        assert "app_exit_request" not in lab.fake.rpc_log  # niets gesloten om plaats te maken
+    finally:
+        lab.bridge.stop()
+
+
+def test_restart_gives_up_when_the_loader_stays_busy(tmp_path: Path) -> None:
+    """Blijft de loader bezet (een app van de gebruiker), dan stopt het opnieuw proberen na
+    `locked_retry_s`; die app wordt nooit gesloten."""
+    seen: list[BridgeEvent] = []
+    lab = _make(tmp_path)
+    lab.bridge = FlipperUiBridge(
+        lab.runner, app_path=FAP_PATH, timing=FAST_BRIDGE, observer=seen.append
+    )
+    try:
+        _lose_link_with_loader_busy(lab, seen)
+        assert wait_until(lambda: _locked_starts(seen) >= 2, timeout=3.0)  # opnieuw geprobeerd
+        time.sleep(FAST_BRIDGE.locked_retry_s + 0.5)
+        tries = _locked_starts(seen)
+        time.sleep(0.5)
+        assert _locked_starts(seen) == tries  # opgegeven
+        assert lab.bridge.state is BridgeState.IDLE and lab.store.physical_confirmer is None
+        assert lab.fake.user_app_open and "app_exit_request" not in lab.fake.rpc_log
+    finally:
+        lab.bridge.stop()
 
 
 def test_rejected_message_is_retried(lab: Lab) -> None:

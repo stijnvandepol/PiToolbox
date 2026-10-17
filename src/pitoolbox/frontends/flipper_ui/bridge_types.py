@@ -36,6 +36,10 @@ class BridgeTiming:
     manual_lock_wait_s: float = 3.0  # de handmatige instance sluit nog
     restart_backoff_s: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0, 60.0)
     restart_window_s: float = 300.0  # na een verloren link zo lang opnieuw proberen
+    # ... en zo lang (vanaf het verlies) ook als de loader bezet is: onze oude app toont nog 2 s
+    # "Verbinding met Pi verbroken" voordat hij sluit (protocol §9). Daarna is het een app van
+    # de gebruiker, en die sluit de Pi nooit.
+    locked_retry_s: float = 10.0
     link_backoff_s: tuple[float, ...] = (3.0, 6.0, 12.0, 30.0, 60.0)  # pollen zonder link
     stop_join_s: float = 2.0  # ook de grens voor het sluiten van de app in stop()
     start_timeout_s: float = 120.0  # vangnet: zo lang hoogstens in STARTING (device-lock bezet)

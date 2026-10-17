@@ -50,7 +50,7 @@ class _AppStarter(_FapOutput):
             except AppLocked as exc:
                 log.info("app niet gestart: %s", exc)
                 self._notify("start_failed", "locked")
-                self._post(lambda: self._on_start_failed(retry=False))
+                self._post(lambda: self._on_start_failed(retry=retry, locked=True))
             except Aborted as exc:  # noodstop terwijl de start op de device-lock wachtte
                 log.info("app starten afgebroken: %s", exc)
                 self._notify("start_failed", str(exc))
@@ -83,10 +83,16 @@ class _AppStarter(_FapOutput):
                 log.info("PiToolbox-app draait nog; opnieuw groeten gevraagd")
                 self._send_error(0, ErrorCode.NOT_READY, "Opnieuw verbinden", instance=None)
 
-    def _on_start_failed(self, *, retry: bool) -> None:
+    def _on_start_failed(self, *, retry: bool, locked: bool = False) -> None:
+        """`retry`: herstart na een verloren link. Was de loader bezet (`locked`), dan alleen
+        binnen `locked_retry_s` na het verlies: kort erna kan dat nog onze eigen, sluitende app
+        zijn; later is het een app van de gebruiker. Er wordt nooit een app gesloten."""
         self._start_deadline = None
         if self._state is BridgeState.STARTING:
             self._state = BridgeState.IDLE
+        if retry and locked and self._clock() >= self._locked_until:
+            log.info("PiToolbox-app: loader blijft bezet; opnieuw starten opgegeven")
+            retry = False
         if retry:
             self._schedule_restart()
         else:
