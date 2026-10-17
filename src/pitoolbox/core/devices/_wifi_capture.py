@@ -47,6 +47,27 @@ def _default_timer_factory(interval: float, fn: Callable[[], None]) -> _TimerLik
     return t
 
 
+@dataclass(frozen=True)
+class _CaptureRequest:
+    """Gevalideerde invoer van `CaptureManager.start`."""
+
+    bssid: str
+    channel: int
+    duration_s: int
+
+
+def _validate_request(bssid: str, channel: int, duration_s: int) -> _CaptureRequest:
+    try:
+        mac = normalize_mac(bssid)
+    except ValueError as exc:
+        raise InvalidState(str(exc)) from exc
+    if isinstance(channel, bool) or not 1 <= int(channel) <= 196:
+        raise InvalidState(f"ongeldig kanaal {channel!r}")
+    if not 10 <= int(duration_s) <= 3600:
+        raise InvalidState("duur moet tussen 10 en 3600 seconden liggen")
+    return _CaptureRequest(mac, int(channel), int(duration_s))
+
+
 @dataclass
 class _Capture:
     capture_id: str
@@ -136,17 +157,30 @@ class CaptureManager:
     def start(
         self, bssid: str, channel: int, duration_s: int, session: str | None = None
     ) -> dict[str, Any]:
-        try:
-            mac = normalize_mac(bssid)
-        except ValueError as exc:
-            raise InvalidState(str(exc)) from exc
-        if isinstance(channel, bool) or not 1 <= int(channel) <= 196:
-            raise InvalidState(f"ongeldig kanaal {channel!r}")
-        channel = int(channel)
-        if not 10 <= int(duration_s) <= 3600:
-            raise InvalidState("duur moet tussen 10 en 3600 seconden liggen")
-        duration_s = int(duration_s)
+        request = _validate_request(bssid, channel, duration_s)
+        iface = self._monitor_iface()
+        with self._lock:
+            self._reap()
+            self._check_room(request)
+            directory = self._session_dir(session)
+            cap = self._spawn(self._new_capture_id(), request, directory, iface)
+            self._active[cap.capture_id] = cap
+            cap.timer.start()
+            info = cap.info(self._clock())
+        return {
+            "capture_id": cap.capture_id,
+            "pid": cap.handle.pid,
+            "dir": str(cap.directory),
+            "files_prefix": str(cap.prefix),
+            "started": cap.started.isoformat(),
+            "stops_at": cap.stops_at.isoformat(),
+            "bssid": cap.bssid,
+            "channel": cap.channel,
+            "elapsed_s": info["elapsed_s"],
+        }
 
+    def _monitor_iface(self) -> str:
+        """Uplink- en driverguard; daarna moet de Alfa in monitor mode staan."""
         if self._iface == self._uplink:
             raise InvalidState("alfa_iface is gelijk aan uplink_iface; weiger te capturen")
         iface = validate_iface(self._iface)
@@ -157,70 +191,63 @@ class CaptureManager:
                 f"capture vereist monitor mode, {iface} staat op {mode!r}; "
                 "gebruik eerst alfa_set_mode(monitor)"
             )
+        return iface
 
-        with self._lock:
-            self._reap()
-            if len(self._active) >= MAX_CONCURRENT_CAPTURES:
-                raise InvalidState(f"maximaal {MAX_CONCURRENT_CAPTURES} gelijktijdige captures")
-            for cap in self._active.values():
-                if cap.bssid == mac:
-                    raise InvalidState(f"er loopt al een capture voor {mac} ({cap.capture_id})")
-                if cap.channel != channel:
-                    # Eén adapter kan maar op één kanaal tegelijk luisteren.
-                    raise InvalidState(
-                        f"lopende capture {cap.capture_id} staat op kanaal {cap.channel}; "
-                        "één adapter kan niet op twee kanalen tegelijk"
-                    )
-            directory = self._session_dir(session)
+    def _check_room(self, request: _CaptureRequest) -> None:
+        """Weigert een capture die niet naast de lopende kan; aanroepen onder `_lock`."""
+        if len(self._active) >= MAX_CONCURRENT_CAPTURES:
+            raise InvalidState(f"maximaal {MAX_CONCURRENT_CAPTURES} gelijktijdige captures")
+        for cap in self._active.values():
+            if cap.bssid == request.bssid:
+                raise InvalidState(
+                    f"er loopt al een capture voor {request.bssid} ({cap.capture_id})"
+                )
+            if cap.channel != request.channel:
+                # Eén adapter kan maar op één kanaal tegelijk luisteren.
+                raise InvalidState(
+                    f"lopende capture {cap.capture_id} staat op kanaal {cap.channel}; "
+                    "één adapter kan niet op twee kanalen tegelijk"
+                )
+
+    def _new_capture_id(self) -> str:
+        cid = secrets.token_hex(3)
+        while cid in self._active or cid in self._finished:
             cid = secrets.token_hex(3)
-            while cid in self._active or cid in self._finished:
-                cid = secrets.token_hex(3)
-            prefix = directory / f"cap-{cid}"
-            # airodump-ng: --bssid filtert op AP, --channel zet vaste kanaal (geen hoppen),
-            # --output-format pcap schrijft <prefix>-01.cap.
-            # https://www.aircrack-ng.org/doku.php?id=airodump-ng
-            argv = [
-                "airodump-ng",
-                "--bssid",
-                mac,
-                "--channel",
-                str(channel),
-                "--output-format",
-                "pcap",
-                "--write",
-                str(prefix),
-                iface,
-            ]
-            handle = self._runner.spawn(argv, directory, f"cap-{cid}.stderr.log")
-            started = self._now()
-            stops_at = datetime.fromtimestamp(started.timestamp() + duration_s, UTC)
-            timer = self._timer_factory(float(duration_s), lambda: self._auto_stop(cid))
-            cap = _Capture(
-                cid,
-                mac,
-                channel,
-                directory,
-                prefix,
-                handle,
-                timer,
-                started,
-                stops_at,
-                self._clock(),
-            )
-            self._active[cid] = cap
-            timer.start()
-            info = cap.info(self._clock())
-        return {
-            "capture_id": cid,
-            "pid": handle.pid,
-            "dir": str(directory),
-            "files_prefix": str(prefix),
-            "started": started.isoformat(),
-            "stops_at": stops_at.isoformat(),
-            "bssid": mac,
-            "channel": channel,
-            "elapsed_s": info["elapsed_s"],
-        }
+        return cid
+
+    def _spawn(self, cid: str, request: _CaptureRequest, directory: Path, iface: str) -> _Capture:
+        prefix = directory / f"cap-{cid}"
+        # airodump-ng: --bssid filtert op AP, --channel zet vaste kanaal (geen hoppen),
+        # --output-format pcap schrijft <prefix>-01.cap.
+        # https://www.aircrack-ng.org/doku.php?id=airodump-ng
+        argv = [
+            "airodump-ng",
+            "--bssid",
+            request.bssid,
+            "--channel",
+            str(request.channel),
+            "--output-format",
+            "pcap",
+            "--write",
+            str(prefix),
+            iface,
+        ]
+        handle = self._runner.spawn(argv, directory, f"cap-{cid}.stderr.log")
+        started = self._now()
+        stops_at = datetime.fromtimestamp(started.timestamp() + request.duration_s, UTC)
+        timer = self._timer_factory(float(request.duration_s), lambda: self._auto_stop(cid))
+        return _Capture(
+            cid,
+            request.bssid,
+            request.channel,
+            directory,
+            prefix,
+            handle,
+            timer,
+            started,
+            stops_at,
+            self._clock(),
+        )
 
     def _auto_stop(self, capture_id: str) -> None:
         try:
