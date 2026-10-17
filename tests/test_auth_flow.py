@@ -32,6 +32,7 @@ from test_auth_support import (
 from pitoolbox.auth import AuthBundle, build_auth
 from pitoolbox.auth.crypto import generate_totp_secret, hash_password, totp
 from pitoolbox.auth.store import TokenRow
+from pitoolbox.frontends.mcp_server import install_override_routes
 
 MCP_HEADERS = {
     "Accept": "application/json, text/event-stream",
@@ -76,6 +77,7 @@ def env(tmp_path: Path) -> Iterator[Env]:
             allowed_origins=["https://toolbox.example.com"],
         ),
     )
+    install_override_routes(app, bundle)
     with TestClient(app, base_url=PUBLIC_URL, follow_redirects=False) as client:
         yield Env(client, bundle, clock, secret)
 
@@ -751,8 +753,8 @@ def test_revoke_endpoint_kills_the_family(env: Env) -> None:
     client_id, tokens = full_login(env)
     resp = env.client.post(
         "/revoke",
-        # SDK-eigenaardigheid: RevocationRequest.client_secret is verplicht (ook publiek).
-        data={"token": tokens["refresh_token"], "client_id": client_id, "client_secret": ""},
+        # Publieke client: geen client_secret (de SDK-route eist hem, onze /revoke niet).
+        data={"token": tokens["refresh_token"], "client_id": client_id},
     )
     assert resp.status_code == 200
     assert initialize(env, tokens["access_token"]).status_code == 401

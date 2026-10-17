@@ -1,7 +1,8 @@
 """Integratie: build_http_app (onze productiewiring) + echte OAuth + ToolRunner.
 
 Controleert wat alleen in de samengestelde app zichtbaar is: 401 met resource_metadata,
-Host-header-check, en dat een transmit-bevestiging gebonden is aan de OAuth-client.
+Host-header-check, dat een transmit-bevestiging gebonden is aan de OAuth-client en dat onze
+/revoke die van de SDK overschaduwt.
 """
 
 from __future__ import annotations
@@ -13,7 +14,15 @@ from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
-from test_auth_flow import Env, complete_login, exchange_code, register, start_authorize
+from test_auth_flow import (
+    Env,
+    complete_login,
+    exchange_code,
+    full_login,
+    initialize,
+    register,
+    start_authorize,
+)
 from test_auth_support import PASSWORD, PUBLIC_URL, FakeClock, make_settings, pkce_pair
 from test_mcp_server import BSSID, Harness
 
@@ -23,6 +32,7 @@ from pitoolbox.core.scope import Scope
 from pitoolbox.frontends.mcp_server import (
     _require_loopback,
     build_http_app,
+    build_server,
     transport_security_for,
 )
 
@@ -181,3 +191,119 @@ def test_loopback_hosts_allowed(host: str) -> None:
 def test_non_loopback_hosts_refused(host: str) -> None:
     with pytest.raises(SystemExit):
         _require_loopback(host)
+
+
+# --- /revoke (RFC 7009) -----------------------------------------------------------------------
+
+
+def _refresh(env: Env, client_id: str, refresh_token: str) -> Any:
+    return env.client.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        },
+    )
+
+
+def test_revoke_public_client_without_secret(setup: tuple[Env, Harness]) -> None:
+    env, _ = setup
+    client_id, tokens = full_login(env)
+    resp = env.client.post(
+        "/revoke", data={"token": tokens["access_token"], "client_id": client_id}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.headers["pragma"] == "no-cache"
+    # De hele familie is weg: ook het refresh-token.
+    assert initialize(env, tokens["access_token"]).status_code == 401
+    assert _refresh(env, client_id, tokens["refresh_token"]).json()["error"] == "invalid_grant"
+
+
+def test_revoke_refresh_token_with_wrong_hint_still_found(setup: tuple[Env, Harness]) -> None:
+    env, _ = setup
+    client_id, tokens = full_login(env)
+    resp = env.client.post(
+        "/revoke",
+        data={
+            "token": tokens["refresh_token"],
+            "token_type_hint": "access_token",
+            "client_id": client_id,
+        },
+    )
+    assert resp.status_code == 200
+    assert initialize(env, tokens["access_token"]).status_code == 401
+
+
+def test_revoke_unknown_token_is_200(setup: tuple[Env, Harness]) -> None:
+    env, _ = setup
+    client_id, _ = full_login(env)
+    resp = env.client.post("/revoke", data={"token": "bestaat-niet", "client_id": client_id})
+    assert resp.status_code == 200
+
+
+def test_revoke_token_of_other_client_is_ignored(setup: tuple[Env, Harness]) -> None:
+    env, _ = setup
+    _, tokens_a = full_login(env)
+    env.clock.advance(30)  # volgende TOTP-stap (replay-bescherming)
+    client_b, _ = full_login(env)
+    resp = env.client.post(
+        "/revoke", data={"token": tokens_a["access_token"], "client_id": client_b}
+    )
+    # Zelfde antwoord als bij een onbekend token (geen orakel), maar het token van A leeft nog.
+    assert resp.status_code == 200
+    assert initialize(env, tokens_a["access_token"]).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("form", "status", "error"),
+    [
+        ({"token": "x"}, 401, "invalid_client"),
+        ({"token": "x", "client_id": "onbekend"}, 401, "invalid_client"),
+        ({"client_id": "<geregistreerd>"}, 400, "invalid_request"),
+    ],
+)
+def test_revoke_rejects_bad_requests(
+    setup: tuple[Env, Harness], form: dict[str, str], status: int, error: str
+) -> None:
+    env, _ = setup
+    if form.get("client_id") == "<geregistreerd>":
+        form = {"client_id": register(env)["client_id"]}
+    resp = env.client.post("/revoke", data=form)
+    assert resp.status_code == status
+    assert resp.json()["error"] == error
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_revoke_cors_and_body_limit_match_sdk_token_route(setup: tuple[Env, Harness]) -> None:
+    env, _ = setup
+    preflight = {
+        "Origin": "https://inspector.example",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "mcp-protocol-version",
+    }
+    ours = env.client.options("/revoke", headers=preflight)
+    sdk = env.client.options("/token", headers=preflight)
+    assert ours.status_code == sdk.status_code == 200
+    for header in ("access-control-allow-origin", "access-control-allow-headers"):
+        assert ours.headers[header] == sdk.headers[header]
+    too_big = b"x" * (4 * 1024 * 1024 + 1)  # DEFAULT_MAX_REQUEST_BODY_SIZE + 1
+    headers = {"Content-Type": "application/x-www-form-urlencoded", "Origin": "https://a.example"}
+    resp = env.client.post("/revoke", content=too_big, headers=headers)
+    assert resp.status_code == 413
+    assert resp.headers["access-control-allow-origin"] == "*"
+
+
+def test_sdk_revoke_route_alone_still_rejects_public_clients(setup: tuple[Env, Harness]) -> None:
+    """Zonder onze override geeft de SDK (mcp 2.3.0) een 400. Faalt deze test na een
+    SDK-update, dan kan RevocationEndpoint mogelijk weg (python-sdk issue #3508)."""
+    env, harness = setup
+    client_id, tokens = full_login(env)
+    server = build_server(harness.runner, auth=env.bundle)
+    with TestClient(server.streamable_http_app(), base_url=PUBLIC_URL) as sdk_only:
+        resp = sdk_only.post(
+            "/revoke", data={"token": tokens["access_token"], "client_id": client_id}
+        )
+    assert resp.status_code == 400
+    assert "client_secret" in resp.text

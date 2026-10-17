@@ -153,6 +153,7 @@ def build_server(
 
     Met `auth` worden de OAuth-routes van de SDK (authorize/token/register/revoke + metadata),
     de protected-resource-metadata, de 401-met-resource_metadata en onze /login-routes actief.
+    Onze eigen /revoke komt er pas bij in `build_http_app` (`install_override_routes`).
     """
     tools = [_make_tool(runner, spec, frontend) for spec in runner.specs()]
     if auth is None:
@@ -201,11 +202,22 @@ def transport_security_for(settings: Settings) -> TransportSecuritySettings:
 def build_http_app(runner: ToolRunner, settings: Settings, auth: AuthBundle) -> Starlette:
     """Starlette-app voor streamable HTTP op /mcp met OAuth."""
     server = build_server(runner, frontend=http_frontend, auth=auth)
-    return server.streamable_http_app(
+    app = server.streamable_http_app(
         streamable_http_path=MCP_PATH,
         transport_security=transport_security_for(settings),
         host=settings.http_host,
     )
+    install_override_routes(app, auth)
+    return app
+
+
+def install_override_routes(app: Starlette, auth: AuthBundle) -> None:
+    """Zet onze vervangende routes (zoals /revoke) vóór die van de SDK.
+
+    Starlette neemt de eerste route die past, en de SDK zet zijn OAuth-routes vooraan en
+    custom routes achteraan (``streamable_http_app`` in ``mcp/server/lowlevel/server.py``).
+    """
+    app.router.routes[:0] = auth.override_routes
 
 
 def _run_http(runner: ToolRunner, settings: Settings) -> None:

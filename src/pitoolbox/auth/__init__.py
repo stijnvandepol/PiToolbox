@@ -5,6 +5,7 @@ Publieke API (gebruikt door de HTTP-serverkant):
     bundle = build_auth(settings)
     MCPServer(..., auth=bundle.auth_settings, auth_server_provider=bundle.provider)
     # plus elke route uit bundle.routes als custom route (de SDK voegt de OAuth-routes zelf toe)
+    # en bundle.override_routes vóór alle routes van de gebouwde Starlette-app (vervangt SDK-routes)
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from .provider import (
     SUPPORTED_SCOPES,
     PitoolboxOAuthProvider,
 )
+from .revoke import RevocationEndpoint
 from .store import AuthStore
 
 __all__ = ["AuthBundle", "build_auth"]
@@ -37,6 +39,8 @@ class AuthBundle:
     auth_settings: AuthSettings
     provider: PitoolboxOAuthProvider
     routes: list[Route]
+    # Vervangen een SDK-route met hetzelfde pad: moeten vóór de SDK-routes staan (eerste match).
+    override_routes: list[Route]
 
 
 def _validated_public_url(public_url: str | None, *, allow_insecure_localhost: bool) -> str:
@@ -99,4 +103,10 @@ def build_auth(
         validate_token_resource=True,
     )
     login = LoginHandlers(provider, store, now, fail_delay_s=fail_delay_s)
-    return AuthBundle(auth_settings=auth_settings, provider=provider, routes=login.routes())
+    return AuthBundle(
+        auth_settings=auth_settings,
+        provider=provider,
+        routes=login.routes(),
+        # De SDK-route blijft bestaan (en de metadata noemt /revoke), maar wordt overschaduwd.
+        override_routes=[RevocationEndpoint(provider).route()],
+    )

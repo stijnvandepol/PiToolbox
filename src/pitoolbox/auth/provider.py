@@ -2,8 +2,9 @@
 
 Implementeert het protocol ``OAuthAuthorizationServerProvider`` uit de MCP-SDK
 (``mcp/server/auth/provider.py``) bovenop :class:`AuthStore`. De SDK levert zelf de routes
-(``/authorize``, ``/token``, ``/register``, ``/revoke``, metadata) en controleert PKCE S256,
-redirect_uri-gelijkheid en code-verloop in ``handlers/token.py``; deze provider zorgt voor:
+(``/authorize``, ``/token``, ``/register``, metadata; ``/revoke`` vervangen we, zie
+``revoke.py``) en controleert PKCE S256, redirect_uri-gelijkheid en code-verloop in
+``handlers/token.py``; deze provider zorgt voor:
 
 - redirect-allowlist (alleen de twee Claude-callbacks, exacte string-match);
 - DCR als publieke client (``token_endpoint_auth_method = none``) met begrensd aantal clients;
