@@ -626,9 +626,17 @@ def test_link_loss_mid_message_detaches_and_restarts(lab: Lab) -> None:
     lab.fap.quick(Q.STATUS)
     assert wait_until(lambda: lab.store.physical_confirmer is None)
     # Opnieuw verbinden met backoff: de app start opnieuw en groet met een nieuwe instance.
-    assert wait_until(lambda: lab.bridge.state is BridgeState.CONNECTED, timeout=5.0)
-    assert lab.fap.instance != first_instance
-    assert lab.store.physical_confirmer == FRONTEND
+    # Wachten op die nieuwe instance, niet alleen op CONNECTED: de bridge koppelt de lease
+    # los vóór hij de toestand verlaat, dus direct na het loskoppelen staat er nog even de
+    # oude CONNECTED.
+    assert wait_until(
+        lambda: (
+            lab.fap.instance != first_instance
+            and lab.bridge.state is BridgeState.CONNECTED
+            and lab.store.physical_confirmer == FRONTEND
+        ),
+        timeout=5.0,
+    )
     assert lab.fake.opens >= 2
 
 

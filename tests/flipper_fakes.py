@@ -754,11 +754,12 @@ class FakeFap:
         import secrets
 
         self.running = True
-        self.starts += 1
         if self.instances:
             self.instance = self.instances.pop(0)
         else:
             self.instance = secrets.randbelow(2**32 - 1) + 1
+        # Pas na de nieuwe instance: tests wachten op `starts` en lezen daarna `instance`.
+        self.starts += 1
         if self.auto_hello:
             self.send(self.hello())
 
