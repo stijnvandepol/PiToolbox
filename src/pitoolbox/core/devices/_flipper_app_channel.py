@@ -80,7 +80,7 @@ class FlipperAppChannel(FlipperModes):
         if self._rpc_app_state == "off":
             return
         try:
-            self._run_linked("exit_rpc_app", self._exit_rpc_app_locked)
+            self._run_linked("exit_rpc_app", self._exit_rpc_app_quietly)
         except DeviceError as exc:
             log.debug("app afsluiten: %s", exc)
         finally:
@@ -269,11 +269,17 @@ class FlipperAppChannel(FlipperModes):
         Een late bevestiging van het verlopen verzoek heeft een eigen command_id; de RpcClient
         zet die in zijn eventqueue, waar geen later verzoek of `wait_event` hem voor zich houdt.
         """
+        self._exit_rpc_app_quietly()
+        self._rpc_app_lost("de app bevestigde een bericht niet op tijd")
+
+    def _exit_rpc_app_quietly(self) -> None:
+        """Onder de lock: onze app sluiten. Antwoordt ze niet (ze hangt), dan is dat geen kapotte
+        verbinding: de time-out mag niet bij `_run_linked` komen, want die sluit over BLE de hele
+        link en dan wordt het `lost` (opnieuw starten) in plaats van `closed`."""
         try:
             self._exit_rpc_app_locked()
         except (RpcError, DeviceTimeout) as exc:
-            log.warning("PiToolbox-app sluiten na een time-out mislukte: %s", exc)
-        self._rpc_app_lost("de app bevestigde een bericht niet op tijd")
+            log.warning("PiToolbox-app sluiten mislukte (de app antwoordt niet): %s", exc)
 
     def _exit_rpc_app_locked(self) -> None:
         client = self._client

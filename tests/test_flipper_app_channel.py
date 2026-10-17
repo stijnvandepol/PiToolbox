@@ -195,6 +195,21 @@ def test_unacknowledged_message_closes_our_app_but_keeps_the_link(ble: bool) -> 
     assert fap.starts == 2 and fake.opens == opens
 
 
+@pytest.mark.parametrize("ble", [True, False])
+def test_closing_a_hung_app_keeps_the_link_and_reports_closed(ble: bool) -> None:
+    """De bridge sluit haar app (geen HELLO op tijd, of geen lease) maar de app hangt en
+    bevestigt AppExit niet: dat is geen kapotte verbinding. Over BLE sloot de time-out de hele
+    link en werd het `lost`, waarna de bridge de app ging herstarten."""
+    device, fake, _fap, sink = make(ble=ble)
+    device.start_rpc_app(FAP)
+    opens = fake.opens
+    fake.app_exit_hangs = True
+    device.exit_rpc_app()
+    assert sink.kinds()[-1] == "closed"
+    assert device.rpc_app_state == "off"
+    assert device.status()["connected"] is True and fake.opens == opens
+
+
 def test_late_answer_to_timed_out_message_is_harmless() -> None:
     """De bevestiging komt pas binnen als de Pi al opgegeven heeft (vóór het antwoord op
     app_exit): sluiten en latere verzoeken lopen gewoon door."""

@@ -94,7 +94,7 @@ def split_script(name: str) -> tuple[str, str]:
 class FakeFlipperTransport:
     """Eén fysiek apparaat; `open()` na `close()` start een verse CLI-shell (DTR-gedrag)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0915 platte lijst begintoestand en foutinjecties, geen logica
         self,
         *,
         device_info: dict[str, str] | None = None,
@@ -139,6 +139,7 @@ class FakeFlipperTransport:
         self.fail_on_rpc_kind: str | None = None  # TransportError bij dit RPC-berichttype (1x)
         self.extra_frames: list[Any] = []  # komen vóór het eerstvolgende antwoord
         self.drop_app_started = False  # app start wel, maar meldt APP_STARTED niet
+        self.app_exit_hangs = False  # app hangt: AppExit krijgt nooit een antwoord
         # --- opslag schrijven (ui-install) ---
         self.dirs: set[str] = set()  # lege mappen (naast de mappen die uit `files` volgen)
         self.write_chunks: list[int] = []  # grootte van elk storage_write-blok
@@ -707,6 +708,8 @@ class FakeFlipperTransport:
         self._send(request, reply)
 
     def _rpc_app_exit_request(self, request: Any) -> None:
+        if self.app_exit_hangs:
+            return
         if not self._app_running:
             self._send(request, self._error(request, flipper_pb2.ERROR_APP_NOT_RUNNING))
             return
