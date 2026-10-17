@@ -314,7 +314,7 @@ uv run pitoolbox-auth reset-totp
 uv run pitoolbox-agent            # chat met het ingestelde LLM (PITOOLBOX_LLM_*)
 ```
 
-Opties: `--scope <pad>`, `--audit-log <pad>`, `-v`/`--verbose`.
+Opties: `--scope <pad>`, `--audit-log <pad>`, `-v`/`--verbose`, `--list-providers` (geldige waarden van `PITOOLBOX_LLM_PROVIDER`).
 
 Het model gebruikt dezelfde tools als de MCP-server, altijd via de ToolRunner (validatie, scope, policy, audit). **Een transmit voert het model nooit zelf uit.** `confirm_action` is voor het model onzichtbaar en wordt geweigerd als het hem toch aanroept, en het model ziet geen `pending_id`. Na de beurt toont de agent de samenvatting en vraagt `Bevestigen? [j/N]`. Alleen `j`/`ja` voert de actie uit, eenmalig en binnen 60 s. Prompt-injectie via tool-uitvoer (een SSID, bestandsinhoud) kan zo hooguit een bevestigingsvraag opleveren. Tools buiten `PITOOLBOX_TOOL_ALLOWLIST` krijgt het model niet te zien.
 
@@ -322,22 +322,48 @@ Is de Flipper-app gekoppeld, dan vraagt de agent niet zelf: de vraag staat dan o
 
 Commando's: `/stop` (noodstop), `/help`, `/exit`. Ctrl+C breekt alleen de lopende beurt af en is **geen** noodstop: captures lopen door, en een open bevestiging wordt afgewezen. Zonder geconfigureerde provider stopt `pitoolbox-agent` met exitcode 2. In de audit-log staat per beurt een `agent_turn_start`/`agent_turn_end` (model, tellingen, tokens), zonder berichtinhoud.
 
-**LLM-provider.** Er is bewust geen standaardprovider: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. Er zijn drie providers:
+**LLM-provider.** Er is bewust geen standaardprovider en geen standaardmodel: zonder `PITOOLBOX_LLM_PROVIDER` en `PITOOLBOX_LLM_MODEL` weigert de agent te starten. `PITOOLBOX_LLM_PROVIDER` is een **preset** (naam van een provider) of een van de drie wire-formaten. `uv run pitoolbox-agent --list-providers` toont ze allemaal.
 
-| `PITOOLBOX_LLM_PROVIDER` | Endpoint | Sleutel |
-|---|---|---|
-| `openai-compatible` | verplicht via `PITOOLBOX_LLM_BASE_URL` | optioneel (lokale servers hebben er meestal geen) |
-| `anthropic` | officieel endpoint, tenzij `PITOOLBOX_LLM_BASE_URL` | verplicht |
-| `openai` | officieel endpoint, tenzij `PITOOLBOX_LLM_BASE_URL` | verplicht |
+| `PITOOLBOX_LLM_PROVIDER` | Endpoint (standaard) | Sleutel | Voorbeeldmodel (uit de docs, 2026-10) |
+|---|---|---|---|
+| `openai-compatible` | zelf zetten via `PITOOLBOX_LLM_BASE_URL` | optioneel | |
+| `anthropic` | `https://api.anthropic.com` (Messages API) | verplicht | |
+| `openai` | `https://api.openai.com/v1` (Responses API) | verplicht | |
+| `deepseek` | `https://api.deepseek.com` | verplicht | `deepseek-flash` |
+| `qwen` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (Singapore) | verplicht | `qwen3.7-plus` |
+| `kimi` (alias `moonshot`) | `https://api.moonshot.ai/v1` | verplicht | `kimi-k2.6` |
+| `glm` (alias `zhipu`) | `https://api.z.ai/api/paas/v4` | verplicht | `glm-5.3` |
+| `minimax` | `https://api.minimax.io/v1` | verplicht | `MiniMax-M3` |
+| `mistral` | `https://api.mistral.ai/v1` | verplicht | `mistral-small-latest` |
+| `groq` | `https://api.groq.com/openai/v1` | verplicht | `llama-3.3-70b-versatile` |
+| `openrouter` | `https://openrouter.ai/api/v1` | verplicht | `google/gemini-3-flash-preview` |
+| `xai` | `https://api.x.ai/v1` | verplicht | `grok-4.7` |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` | verplicht | `gemini-3.8-flash` |
+| `ollama` | `http://127.0.0.1:11434/v1` | optioneel | |
+| `lmstudio` | `http://localhost:1234/v1` | optioneel | |
+| `llamacpp` | `http://127.0.0.1:9931/v1` (`llama-server`, standaardpoort 9931) | optioneel | |
+| `vllm` | `http://localhost:8000/v1` (start met `--enable-auto-tool-choice --tool-call-parser ...`) | optioneel | |
 
-`openai-compatible` werkt met elke server met Chat Completions + tools, bijv. `http://127.0.0.1:11434/v1` (Ollama), `http://127.0.0.1:8080/v1` (llama.cpp), `http://127.0.0.1:1234/v1` (LM Studio), vLLM, `https://api.deepseek.com`, `https://api.moonshot.ai/v1`, `https://open.bigmodel.cn/api/paas/v4` en `https://api.minimax.io/v1`. `http://` mag alleen naar `localhost` of een IP-literal in loopback of privé-LAN; voor de rest is https verplicht. De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's; bronnen per provider in de moduledocstrings).
+De voorbeeldmodellen zijn alleen voorbeelden; er is geen standaard, kies zelf een model met tool calling. Alle presets behalve `anthropic` en `openai` gebruiken de OpenAI-compatibele adapter (Chat Completions). Endpoints en afwijkingen komen uit de officiële docs; de bron staat per preset in `src/pitoolbox/llm/presets.py`.
+
+`PITOOLBOX_LLM_BASE_URL` overschrijft het endpoint van een preset, bijvoorbeeld voor China: `https://dashscope.aliyuncs.com/compatible-mode/v1` (Qwen, Beijing; of je eigen workspace-URL `https://{WorkspaceId}.<regio>.maas.aliyuncs.com/compatible-mode/v1`), `https://api.moonshot.cn/v1` (Kimi), `https://open.bigmodel.cn/api/paas/v4` (GLM/Zhipu) en `https://api.minimax.cn/v1` (MiniMax). Een sleutel werkt meestal alleen in de regio waar je hem maakte. Bij een cloudpreset moet een eigen URL https zijn; bij een lokale preset mag http naar `localhost` of een IP-literal in loopback of privé-LAN (zoals bij `openai-compatible`). De sleutel staat alleen in `PITOOLBOX_LLM_API_KEY`, komt nooit in logs of foutmeldingen, en redirects worden niet gevolgd. Code: `src/pitoolbox/llm/` (httpx, geen vendor-SDK's).
+
+Bekende beperkingen: denkende modellen tellen hun redenering vaak mee in `max_tokens` (DeepSeek, Kimi, MiniMax, GLM); zet `PITOOLBOX_LLM_MAX_TOKENS` dan ruimer (Kimi adviseert minstens 16000). Open-source Qwen-modellen op DashScope (bijv. `qwen3.5-27b`) denken alleen met streaming en geven hier een fout; kies een commercieel Qwen-model. Quotum- of saldo-429's worden net als gewone 429's maximaal `PITOOLBOX_LLM_MAX_RETRIES` keer opnieuw geprobeerd.
 
 Voorbeeld met Ollama op de Pi of in je LAN:
 
 ```bash
-export PITOOLBOX_LLM_PROVIDER=openai-compatible
-export PITOOLBOX_LLM_BASE_URL=http://127.0.0.1:11434/v1
+export PITOOLBOX_LLM_PROVIDER=ollama          # of: openai-compatible + PITOOLBOX_LLM_BASE_URL
 export PITOOLBOX_LLM_MODEL=<model>
+uv run pitoolbox-agent
+```
+
+Voorbeeld met DeepSeek:
+
+```bash
+export PITOOLBOX_LLM_PROVIDER=deepseek
+export PITOOLBOX_LLM_MODEL=<model>             # bijv. deepseek-flash
+export PITOOLBOX_LLM_API_KEY=<sleutel>
 uv run pitoolbox-agent
 ```
 
@@ -408,10 +434,10 @@ Alles gaat via omgevingsvariabelen (`src/pitoolbox/config.py`). In je checkout z
 
 | Variabele | Standaard | Betekenis |
 |---|---|---|
-| `PITOOLBOX_LLM_PROVIDER` | **geen** (verplicht voor de agent) | `openai-compatible`, `anthropic` of `openai` |
+| `PITOOLBOX_LLM_PROVIDER` | **geen** (verplicht voor de agent) | preset (`deepseek`, `mistral`, `ollama`, ...) of `openai-compatible`, `anthropic`, `openai`; lijst: `pitoolbox-agent --list-providers` |
 | `PITOOLBOX_LLM_MODEL` | **geen** (verplicht voor de agent) | modelnaam bij de provider |
-| `PITOOLBOX_LLM_BASE_URL` | geen | verplicht bij `openai-compatible`; anders het officiële endpoint van de provider |
-| `PITOOLBOX_LLM_API_KEY` | geen | verplicht bij `anthropic`/`openai`, optioneel bij lokale servers |
+| `PITOOLBOX_LLM_BASE_URL` | geen | verplicht bij `openai-compatible`; bij een preset overschrijft het diens endpoint (bijv. China-regio) |
+| `PITOOLBOX_LLM_API_KEY` | geen | verplicht bij cloudpresets (ook `anthropic`/`openai`), optioneel bij lokale servers |
 | `PITOOLBOX_LLM_TIMEOUT_S` / `PITOOLBOX_LLM_MAX_RETRIES` / `PITOOLBOX_LLM_MAX_TOKENS` | `60` / `2` / `4096` | per aanvraag; opnieuw alleen bij 429/5xx/time-out/verbindingsfout |
 | `PITOOLBOX_AGENT_MAX_STEPS` / `PITOOLBOX_AGENT_MAX_CALLS_PER_STEP` | `8` / `8` | tool-rondes per beurt, tool calls per modelantwoord |
 | `PITOOLBOX_AGENT_TURN_TIMEOUT_S` / `PITOOLBOX_AGENT_MAX_RESULT_CHARS` | `300` / `8000` | tijd per beurt (tussen stappen gecontroleerd), lengte van een tool-resultaat naar het model |

@@ -11,6 +11,15 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 - Commit alleen als Stijn erom vraagt. Werkbranch: `fase-1` (alle fases tot nu toe staan erop).
 - **Code guidelines (2026-10-17):** alle code volgt [CODE_GUIDELINES.md](../CODE_GUIDELINES.md), de gedeelde template uit Stijns andere repo's (Ampeer, GDash, Launchpad), met een eigen deel "Project specifics". `scripts/gates.sh` draait dezelfde controles als CI (`.github/workflows/ci.yml`): ruff, format, mypy strict, pytest, `uv audit` en shellcheck. Een bestand dat over de grens ging (>500 regels) is opgesplitst in refactor-only commits; de publieke importpaden zijn gebleven.
 - **LLM-provider-neutraal.** Claude is **niet** de standaardprovider, en er is er helemaal geen (besluit van Stijn). `llm/providers.py` (fase 4) moet meerdere providers ondersteunen, ook lokale (Ollama, llama.cpp, LM Studio, vLLM) en Chinese (DeepSeek, Qwen, Kimi, GLM, MiniMax). Het plan is één OpenAI-compatibele adapter plus native adapters. De default staat in de config, nooit hardcoded.
+- **LLM-presets (2026-10-17, "integreer ook DeepSeek etc.").** `PITOOLBOX_LLM_PROVIDER` accepteert nu ook een providernaam; een preset (`llm/presets.py`) geeft het wire-formaat, het officiële endpoint (bron per regel) en of een sleutel verplicht is. Nog steeds geen default provider en geen default model. `PITOOLBOX_LLM_BASE_URL` overschrijft het endpoint (China-regio's); bij een cloudpreset alleen https. `pitoolbox-agent --list-providers` toont de lijst.
+
+  | Soort | Presets | Sleutel | Quirk in de adapter |
+  |---|---|---|---|
+  | wire-formaat | `openai-compatible`, `anthropic`, `openai` | optioneel / verplicht / verplicht | |
+  | cloud (Chat Completions, https) | `deepseek`, `qwen`, `kimi` (`moonshot`), `glm` (`zhipu`), `minimax`, `mistral`, `groq`, `openrouter`, `xai`, `gemini` | verplicht | `gemini`: thought signature (`tool_calls[].extra_content`) terug; `mistral`: `content`-lijst ongewijzigd terug |
+  | lokaal (http loopback) | `ollama` (:11434), `lmstudio` (:1234), `llamacpp` (:9931), `vllm` (:8000) | optioneel | |
+
+  Nog niet tegen de echte API's getest. Bekende beperkingen: zie README, "LLM-provider".
 
 ## Status per fase
 
@@ -19,10 +28,10 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 | 1 Kern + lokale MCP (USB) | klaar; **Flipper-deel op hardware getest** (USB, Momentum), Alfa nog niet (heeft root/caps nodig) | scope/policy/audit/runner, Flipper RPC + CLI-sjablonen, Alfa-wifi, status/emergency_stop, MCP stdio |
 | 2 Remote via Claude-app | klaar, **niet op hardware getest** | streamable HTTP op 127.0.0.1:8765/mcp, OAuth 2.1 (DCR, PKCE, wachtwoord + TOTP), cloudflared, systemd, [fase2-remote.md](fase2-remote.md) |
 | 3 Flipper via BLE | klaar; **op hardware getest** (koppelen, system_info, storage, ping/doorvoer); `ir_send` en reconnect-lijst nog open | bleak-transport, flow control, transport auto/usb/ble, keepalive, `pitoolbox-flipper ble-*`, [fase3-ble.md](fase3-ble.md) |
-| 4 Flipper als bediening | **spike klaar** ([fase4-spike.md](fase4-spike.md), advies: DataExchange); **providerlaag klaar** (`llm/`: openai-compatible, anthropic, openai; geen default); **agent-loop + `pitoolbox-agent` klaar** (alleen een mens bevestigt, `confirm_action` onzichtbaar voor het model, grenzen per beurt, beurt-audit) ; **FAP `pitoolbox_ui` + protocol v1 klaar** (bouwt tegen API 87.1, op hardware getest); **bridge klaar** (`PITOOLBOX_FLIPPER_UI=on`, "Flipper verplicht" in de kern, getest met een nagebootste FAP **en op hardware**: install, rooktest en valtest 20/20 over BLE) | **nog:** OK/Back en menu met de hand, spike-test 7; adapters + agent één keer tegen de echte API's en Ollama testen |
+| 4 Flipper als bediening | **spike klaar** ([fase4-spike.md](fase4-spike.md), advies: DataExchange); **providerlaag klaar** (`llm/`: openai-compatible, anthropic, openai, plus presets voor DeepSeek, Qwen, Kimi, GLM, MiniMax, Mistral, Groq, OpenRouter, xAI, Gemini en lokaal; geen default); **agent-loop + `pitoolbox-agent` klaar** (alleen een mens bevestigt, `confirm_action` onzichtbaar voor het model, grenzen per beurt, beurt-audit) ; **FAP `pitoolbox_ui` + protocol v1 klaar** (bouwt tegen API 87.1, op hardware getest); **bridge klaar** (`PITOOLBOX_FLIPPER_UI=on`, "Flipper verplicht" in de kern, getest met een nagebootste FAP **en op hardware**: install, rooktest en valtest 20/20 over BLE) | **nog:** OK/Back en menu met de hand, spike-test 7; adapters + agent één keer tegen de echte API's en Ollama testen |
 | 5 Klaar voor onderweg | **deploybestanden klaar, niet op hardware getest** (root + reboot nodig); README van nul staat er | `install.sh --onderweg`: .link-namen wlan0/wlan1 (op driver/USB-id), NM unmanaged `driver:mt7921u`, logrotate audit-log, tmpfiles captures; optioneel `--bluez-le`; `--dry-run`, backups; [fase5-onderweg.md](fase5-onderweg.md) |
 
-Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck): 1356 passed, 1 skipped in pytest zelf (de skip is de shellcheck-test als shellcheck niet op PATH staat; `gates.sh` haalt dan een vastgepinde shellcheck via uvx en draait die test alsnog). Op de Pi draait nu alles groen, zonder overslaan.
+Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck): 1426 passed, 1 skipped in pytest zelf (de skip is de shellcheck-test als shellcheck niet op PATH staat; `gates.sh` haalt dan een vastgepinde shellcheck via uvx en draait die test alsnog). Op de Pi draait nu alles groen, zonder overslaan.
 
 ## Nachtsessie 2026-10-17 (00:45–09:00)
 
