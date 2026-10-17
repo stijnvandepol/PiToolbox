@@ -26,37 +26,44 @@ zijn. Ctrl+C of Ctrl+D aan de prompt sluit af.
 Zonder LLM-configuratie (PITOOLBOX_LLM_PROVIDER/MODEL, ...) stopt het programma met de
 melding van `LLMConfigError` en exitcode 2. ``--list-providers`` toont de geldige waarden van
 PITOOLBOX_LLM_PROVIDER (presets en wire-formaten) en heeft geen configuratie nodig.
+
+Indeling: de weergave (events, meldingen, uitkomsten) staat in `_agent_cli_view`, de argumenten
+en ``--list-providers`` in `_agent_cli_args`. Vragen, bevestigen en de REPL staan hier, net als
+de namen die tests vervangen (`_input`, `_clock`, `_sleep`, `build_provider`, `build_runner`).
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import logging
 import sys
 import time
 from collections.abc import Sequence
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pitoolbox.agent.session import (
-    AgentEvent,
     AgentLimits,
     AgentSession,
-    AssistantText,
     ConfirmOutcome,
-    ConfirmStatus,
     PendingConfirmation,
-    ToolCallFinished,
-    ToolCallStarted,
     TurnResult,
     TurnStop,
 )
 from pitoolbox.agent.text import for_terminal
 from pitoolbox.app import build_runner
 from pitoolbox.config import Settings
+from pitoolbox.frontends._agent_cli_args import _parse_args, list_providers
+from pitoolbox.frontends._agent_cli_view import (
+    _STOP_NOTICES,
+    HELP,
+    RESET_HINT,
+    _compact,
+    _err,
+    _out,
+    _outcome_text,
+    print_event,
+)
+from pitoolbox.frontends._agent_cli_view import ARGS_PREVIEW as ARGS_PREVIEW
 from pitoolbox.llm.errors import LLMConfigError
-from pitoolbox.llm.presets import ALIASES, PRESETS
 from pitoolbox.llm.providers import build_provider
 
 if TYPE_CHECKING:
@@ -69,7 +76,6 @@ FRONTEND = "agent-cli"
 PROMPT = "> "
 CONFIRM_PROMPT = "Bevestigen? [j/N] "
 YES = frozenset({"j", "ja"})
-ARGS_PREVIEW = 160
 
 WAIT_POLL_S = 0.2  # wachten op de Flipper: zo vaak kijken
 
@@ -78,81 +84,13 @@ _input = input
 _clock = time.monotonic
 _sleep = time.sleep
 
-HELP = """\
-Commando's:
-  /stop   noodstop: captures stoppen, Flipper-actie afbreken, bevestigingen wissen
-  /new    nieuw gesprek (geschiedenis weg; open bevestigingen blijven staan)
-  /help   deze hulp
-  /exit   afsluiten (ook Ctrl+D)
-Ctrl+C tijdens een beurt breekt alleen de beurt af (geen noodstop)."""
 
-RESET_HINT = " Blijft dit gebeuren, typ dan /new (nieuw gesprek)."
-
-_STOP_NOTICES = {
-    TurnStop.MAX_TOKENS: "(antwoord afgekapt: maximum aantal tokens bereikt)",
-    TurnStop.REFUSAL: "(het model of een contentfilter weigerde)",
-    TurnStop.MAX_STEPS: "(gestopt: maximum aantal stappen per beurt bereikt; typ 'ga door')",
-    TurnStop.TIMEOUT: "(gestopt: tijdslimiet van de beurt bereikt)",
-    TurnStop.AWAITING_CONFIRMATION: "(gestopt: eerst de bevestiging hieronder)",
-    TurnStop.INTERRUPTED: "(beurt afgebroken; dit is geen noodstop, gebruik /stop)",
-}
-
-_CONFIRM_MESSAGES = {
-    ConfirmStatus.EXECUTED: "Uitgevoerd.",
-    ConfirmStatus.FAILED: "Uitgevoerd, maar met een fout.",
-    ConfirmStatus.DENIED: "Alsnog geweigerd door de policy (scope gewijzigd?). Niets verzonden.",
-    ConfirmStatus.EXPIRED: "Bevestiging verlopen of al gebruikt. Niets verzonden.",
-    ConfirmStatus.REJECTED: "Afgewezen. Niets verzonden.",
-    ConfirmStatus.ON_FLIPPER: (
-        "Niet uitgevoerd: de PiToolbox-app op de Flipper is verbonden. "
-        "Bevestig daar (OK = ja, Back = nee)."
-    ),
-    ConfirmStatus.CLEARED: "Gewist door een noodstop. Niets verzonden.",
-}
 ON_FLIPPER_NOTICE = (
     "  De PiToolbox-app op de Flipper is verbonden: bevestig daar (OK = ja, Back = nee)."
 )
 WAIT_NOTICE = "  Wacht op de Flipper... (Ctrl+C = niet wachten)"
 NO_WAIT_NOTICE = "  Niet meer gewacht; de uitkomst verschijnt hier zodra hij er is."
 DETACHED_NOTICE = "  De Flipper-app is niet meer verbonden; bevestig dan hier."
-
-
-def _out(text: str = "") -> None:
-    print(text, flush=True)
-
-
-def _err(text: str) -> None:
-    print(text, file=sys.stderr, flush=True)
-
-
-def _compact(value: Any, limit: int = ARGS_PREVIEW) -> str:
-    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-    text = for_terminal(text)
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def print_event(event: AgentEvent) -> None:
-    match event:
-        case AssistantText():
-            _out(for_terminal(event.text))
-        case ToolCallStarted():
-            args = (
-                "<ongeldige argumenten>" if event.arguments is None else _compact(event.arguments)
-            )
-            _out(f"  → {for_terminal(event.name) or '?'} {args}")
-        case ToolCallFinished():
-            _out(_finished_line(event))
-        case PendingConfirmation():
-            _out(f"  ! bevestiging nodig: {for_terminal(event.summary)}")
-
-
-def _finished_line(event: ToolCallFinished) -> str:
-    if event.ok:
-        return "  ← ok"
-    if event.error == "confirmation_required":
-        return "  ← wacht op jouw bevestiging"
-    detail = for_terminal(event.message or "")[:ARGS_PREVIEW]
-    return f"  ← fout: {for_terminal(event.error or '?')}{': ' + detail if detail else ''}"
 
 
 def ask_yes_no(question: str) -> bool:
@@ -163,13 +101,6 @@ def ask_yes_no(question: str) -> bool:
         _out()
         return False
     return answer.strip().lower() in YES
-
-
-def _outcome_text(outcome: ConfirmOutcome) -> str:
-    line = _CONFIRM_MESSAGES[outcome.status]
-    if outcome.status in (ConfirmStatus.EXECUTED, ConfirmStatus.FAILED) and outcome.result:
-        line += f" {_compact(outcome.result, 400)}"
-    return line
 
 
 def report_external(session: AgentSession) -> list[ConfirmOutcome]:
@@ -306,52 +237,6 @@ def repl(session: AgentSession) -> int:
             _out(f"Onbekend commando: {for_terminal(text)} (zie /help)")
         else:
             run_turn(session, text)
-
-
-def list_providers() -> None:
-    """Tabel van alle waarden voor PITOOLBOX_LLM_PROVIDER, zonder iets te verbinden."""
-    rows = [("naam", "formaat", "base-URL", "sleutel")]
-    for preset in PRESETS.values():
-        rows.append(
-            (
-                preset.name,
-                preset.kind.value,
-                preset.base_url or "(zelf zetten: PITOOLBOX_LLM_BASE_URL)",
-                "verplicht" if preset.requires_key else "optioneel",
-            )
-        )
-    widths = [max(len(row[i]) for row in rows) for i in range(3)]
-    for row in rows:
-        padded = [cell.ljust(width) for cell, width in zip(row[:3], widths, strict=True)]
-        _out("  ".join([*padded, row[3]]))
-    _out()
-    _out("Aliassen: " + ", ".join(f"{alias} = {name}" for alias, name in ALIASES.items()))
-    _out(
-        "PITOOLBOX_LLM_MODEL is altijd verplicht (er is geen standaardmodel). "
-        "PITOOLBOX_LLM_BASE_URL overschrijft de base-URL van een preset."
-    )
-
-
-def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="pitoolbox-agent",
-        description="PiToolbox-agent in de terminal (LLM uit PITOOLBOX_LLM_*)",
-    )
-    parser.add_argument(
-        "--scope", type=Path, help="pad naar scope.yaml (overschrijft PITOOLBOX_SCOPE_FILE)"
-    )
-    parser.add_argument(
-        "--audit-log",
-        type=Path,
-        help="pad naar het audit-logbestand (overschrijft PITOOLBOX_AUDIT_LOG)",
-    )
-    parser.add_argument("-v", "--verbose", action="store_true", help="logging op INFO (stderr)")
-    parser.add_argument(
-        "--list-providers",
-        action="store_true",
-        help="toon de geldige waarden van PITOOLBOX_LLM_PROVIDER en stop",
-    )
-    return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

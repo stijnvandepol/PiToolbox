@@ -519,6 +519,7 @@ src/pitoolbox/
     tools/                    # base, runner, flipper_tools, wifi_tools, system_tools
   frontends/mcp_server.py     # MCPServer (opvolger van FastMCP in mcp 2.x), stdio + HTTP
   frontends/agent_cli.py      # pitoolbox-agent (terminal)
+                              #   (_agent_cli_view.py: weergave; _agent_cli_args.py: argumenten)
   frontends/flipper_ui/       # bridge naar de Flipper-app: protocol, bridge, presets
                               #   (protocol_*.py en bridge_*.py: de delen per onderdeel)
   agent/ llm/                 # agent-loop; providers (openai-compatible, anthropic, openai)
