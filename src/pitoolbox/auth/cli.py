@@ -49,8 +49,12 @@ def _prompt_password() -> str | None:
     return password
 
 
-def _confirm_totp(secret: str) -> bool:
-    """Toon het geheim en vraag een geldige code ter bevestiging."""
+def _confirm_totp(secret: str) -> int | None:
+    """Toon het geheim en vraag een geldige code ter bevestiging.
+
+    Geeft de TOTP-teller van die code (of None). De aanroeper slaat hem op, zodat dezelfde code
+    daarna niet ook nog voor een login werkt (RFC 6238 sectie 5.2).
+    """
     _out()
     _out("Voeg dit toe aan je authenticator-app (SHA1, 6 cijfers, 30 s):")
     _out(f"  otpauth-URI : {otpauth_uri(secret)}")
@@ -58,10 +62,11 @@ def _confirm_totp(secret: str) -> bool:
     _out()
     for _ in range(CONFIRM_ATTEMPTS):
         code = _input("Huidige 6-cijferige code ter bevestiging: ")
-        if verify_totp(secret, code.replace(" ", ""), time.time()) is not None:
-            return True
+        counter = verify_totp(secret, code.replace(" ", ""), time.time())
+        if counter is not None:
+            return counter
         _err("Code onjuist, probeer het opnieuw.")
-    return False
+    return None
 
 
 def _cmd_init(store: AuthStore, args: argparse.Namespace) -> int:
@@ -72,10 +77,11 @@ def _cmd_init(store: AuthStore, args: argparse.Namespace) -> int:
     if password is None:
         return 1
     secret = generate_totp_secret()
-    if not _confirm_totp(secret):
+    counter = _confirm_totp(secret)
+    if counter is None:
         _err("Bevestiging mislukt; niets opgeslagen.")
         return 1
-    store.set_user(hash_password(password), secret)
+    store.set_user(hash_password(password), secret, last_totp_counter=counter)
     if args.force:
         # Een nieuw wachtwoord/geheim hoort oude sessies ongeldig te maken.
         store.revoke_all()
@@ -88,10 +94,11 @@ def _cmd_reset_totp(store: AuthStore, _args: argparse.Namespace) -> int:
         _err("Nog geen gebruiker; voer eerst 'init' uit.")
         return 1
     secret = generate_totp_secret()
-    if not _confirm_totp(secret):
+    counter = _confirm_totp(secret)
+    if counter is None:
         _err("Bevestiging mislukt; oud TOTP-geheim blijft geldig.")
         return 1
-    store.set_totp_secret(secret)
+    store.set_totp_secret(secret, last_totp_counter=counter)
     _out("Nieuw TOTP-geheim opgeslagen.")
     return 0
 

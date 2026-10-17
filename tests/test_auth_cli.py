@@ -52,6 +52,35 @@ def test_init_saves_user_and_never_prints_password(
     assert PASSWORD not in user.password_hash
 
 
+def test_init_confirmation_code_cannot_be_replayed_for_login(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = time.time()
+    code = totp(SECRET, now)
+    _answers(monkeypatch, [PASSWORD, PASSWORD], lambda: code)
+    assert cli.main(["init"]) == 0
+    counter = verify_totp(SECRET, code, now)
+    assert counter is not None
+    store = _store(db)
+    # Dit is de controle die /login doet: dezelfde (of een oudere) teller is verbruikt.
+    assert not store.accept_totp_counter(counter)
+    assert store.accept_totp_counter(counter + 1)
+
+
+def test_reset_totp_confirmation_code_cannot_be_replayed_for_login(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(db)
+    store.set_user("hash", "OLD")
+    now = time.time()
+    code = totp(SECRET, now)
+    _answers(monkeypatch, [], lambda: code)
+    assert cli.main(["reset-totp"]) == 0
+    counter = verify_totp(SECRET, code, now)
+    assert counter is not None
+    assert not store.accept_totp_counter(counter)
+
+
 def test_init_rejects_short_or_mismatching_password(
     db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -102,22 +102,31 @@ class AuthStore:
             locked_until=row["locked_until"],
         )
 
-    def set_user(self, password_hash: str, totp_secret: str) -> None:
-        """Maak of vervang de (enige) gebruiker; wist ook blokkade en TOTP-teller."""
+    def set_user(
+        self, password_hash: str, totp_secret: str, *, last_totp_counter: int = -1
+    ) -> None:
+        """Maak of vervang de (enige) gebruiker; wist ook de blokkade.
+
+        ``last_totp_counter`` is de teller van de code waarmee het geheim is bevestigd: die code
+        mag daarna niet nog eens werken (RFC 6238 sectie 5.2). -1: nog geen code gebruikt.
+        """
         with self._tx() as conn:
             conn.execute(
-                "INSERT INTO user (id, password_hash, totp_secret, created) VALUES (1, ?, ?, ?) "
+                "INSERT INTO user (id, password_hash, totp_secret, last_totp_counter, created) "
+                "VALUES (1, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, "
-                "totp_secret = excluded.totp_secret, last_totp_counter = -1, "
+                "totp_secret = excluded.totp_secret, "
+                "last_totp_counter = excluded.last_totp_counter, "
                 "failed_attempts = 0, locked_until = 0",
-                (password_hash, totp_secret, self._clock()),
+                (password_hash, totp_secret, last_totp_counter, self._clock()),
             )
 
-    def set_totp_secret(self, totp_secret: str) -> bool:
+    def set_totp_secret(self, totp_secret: str, *, last_totp_counter: int = -1) -> bool:
+        """Vervang het TOTP-geheim; ``last_totp_counter`` zoals bij :meth:`set_user`."""
         with self._tx() as conn:
             cur = conn.execute(
-                "UPDATE user SET totp_secret = ?, last_totp_counter = -1 WHERE id = 1",
-                (totp_secret,),
+                "UPDATE user SET totp_secret = ?, last_totp_counter = ? WHERE id = 1",
+                (totp_secret, last_totp_counter),
             )
             return cur.rowcount == 1
 

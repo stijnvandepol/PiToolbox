@@ -121,7 +121,7 @@ sudo -u pitoolbox bash -c 'set -a; . /etc/pitoolbox/pitoolbox.env; set +a; exec 
 
 1. Kies een wachtwoord (minimaal 12 tekens, twee keer invoeren). Gebruik een wachtwoordmanager: dit wachtwoord beschermt de toegang tot je Flipper en wifi-adapter.
 2. De CLI toont een `otpauth://`-URI en het geheim. Voer het geheim in je authenticator-app in (type: tijdgebaseerd/TOTP, SHA1, 6 cijfers, 30 s).
-3. Typ de huidige 6-cijferige code ter bevestiging. Pas daarna wordt alles opgeslagen.
+3. Typ de huidige 6-cijferige code ter bevestiging. Pas daarna wordt alles opgeslagen. Die code is daarmee verbruikt: log de eerste keer in met een volgende code.
 
 Overige subcommando's: `pitoolbox-auth status` (aantallen en blokkade), `pitoolbox-auth reset-totp` (nieuw TOTP-geheim) en `pitoolbox-auth revoke-all` (zie de beveiligingsnotities). Draai ze op dezelfde manier als hierboven.
 
@@ -316,7 +316,7 @@ sudo timedatectl set-ntp true     # NTP aanzetten
 date -u                           # vergelijk met je telefoon
 ```
 
-Een code werkt maar één keer. Wacht op de volgende code als je net een geldige code gebruikte. Na 5 foute pogingen is de login 15 minuten geblokkeerd (`pitoolbox-auth status`). Verloren authenticator: `pitoolbox-auth reset-totp` (vraagt een code van het nieuwe geheim ter bevestiging; het oude blijft geldig tot dat lukt, dus je hebt toegang tot de Pi nodig).
+Een code werkt maar één keer, ook de code waarmee je `init` of `reset-totp` bevestigde. Wacht op de volgende code als je net een geldige code gebruikte. Na 5 foute pogingen is de login 15 minuten geblokkeerd (`pitoolbox-auth status`). Verloren authenticator: `pitoolbox-auth reset-totp` (vraagt een code van het nieuwe geheim ter bevestiging; het oude blijft geldig tot dat lukt, dus je hebt toegang tot de Pi nodig).
 
 ### Tunnel valt uit of start niet
 

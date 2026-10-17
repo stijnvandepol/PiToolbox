@@ -94,6 +94,17 @@ def test_totp_counter_replay_protection(store: AuthStore) -> None:
     assert store.accept_totp_counter(5)
 
 
+def test_confirmed_totp_counter_is_recorded(store: AuthStore) -> None:
+    # Nieuwe gebruiker (INSERT) en vervanging (ON CONFLICT) leggen allebei de teller vast.
+    for _ in range(2):
+        store.set_user("hash", "SECRET", last_totp_counter=200)
+        assert not store.accept_totp_counter(200)
+        assert store.accept_totp_counter(201)
+    store.set_totp_secret("NEW", last_totp_counter=300)
+    assert not store.accept_totp_counter(300)
+    assert store.accept_totp_counter(301)
+
+
 def test_set_user_replaces_and_resets(store: AuthStore) -> None:
     store.set_user("h1", "S1")
     store.register_failed_attempt(5, 900)
