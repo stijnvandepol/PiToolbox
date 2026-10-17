@@ -525,7 +525,7 @@ Bronnen en licenties: [THIRD_PARTY.md](THIRD_PARTY.md).
 Deze lijsten werk je af op de echte Pi. De checklists van fase 4 en 5 staan bij hun documenten:
 
 - fase 5: [docs/fase5-onderweg.md §7](docs/fase5-onderweg.md#7-hardware--en-testchecklist);
-- fase 4, Flipper-app: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md) ("Hardwaretest") en [docs/fase4-spike.md](docs/fase4-spike.md) (tests 6 en 7);
+- fase 4, Flipper-app: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md) ("Hardwaretest") en [docs/fase4-spike.md](docs/fase4-spike.md) (test 7; test 6 vervalt);
 - fase 3, volledig: [docs/fase3-ble.md §9](docs/fase3-ble.md#9-hardware-testlijst).
 
 ### Fase 3
