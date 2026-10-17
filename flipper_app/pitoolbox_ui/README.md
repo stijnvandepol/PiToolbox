@@ -9,7 +9,7 @@ Een Flipper-app (FAP) waarmee je PiToolbox op de Pi bedient, zonder telefoon of 
 
 De app is een **dom invoerapparaat**. Hij stuurt alleen ids (actie, preset, bevestigings-handle), nooit toolnamen, argumenten of tekst. De Pi valideert alles en voert alles uit via de `ToolRunner` (frontend `flipper-ui`). Het protocol staat in [docs/fase4-protocol.md](../../docs/fase4-protocol.md).
 
-> **Status:** de app bouwt zonder waarschuwingen tegen mntm-012 (API 87.1). De bridge op de Pi is klaar (`PITOOLBOX_FLIPPER_UI=on`, zie de README in de root) en getest tegen een nagebootste app. Op hardware getest op 2026-10-17 (installeren, rooktest, valtest 20/20; zie [Hardwaretest](#hardwaretest)); OK/Back en het menu moeten nog met de hand. Na een `ir_send` gaat de app even dicht en weer open: de Infrared-app heeft de loader nodig.
+> **Status:** de app bouwt zonder waarschuwingen tegen mntm-012 (API 87.1). De bridge op de Pi is klaar (`PITOOLBOX_FLIPPER_UI=on`, zie de README in de root) en getest tegen een nagebootste app. Op hardware getest op 2026-10-17 (installeren, rooktest, valtest 20/20, OK/Back op een echte vraag, handmatige start, alle snelle acties en het statusscherm; zie [Hardwaretest](#hardwaretest)). Presets nog niet (er is nog geen presets-bestand). Na een `ir_send` gaat de app even dicht en weer open: de Infrared-app heeft de loader nodig.
 
 ## Bestanden
 
@@ -39,7 +39,7 @@ cd flipper_app/pitoolbox_ui
 ~/.venvs/ufbt/bin/ufbt          # -> dist/pitoolbox_ui.fap
 ```
 
-Laatste controle bij elke build: de regel `APPCHK … Target: 7, API: 87.1` in de uitvoer. ufbt bouwt met `-Wall -Wextra -Werror`, dus de build is alleen geslaagd zonder waarschuwingen. Gebouwd en gecontroleerd met ufbt 0.2.6: 0 waarschuwingen, `.text` ongeveer 8 KiB, `.fap` 24 KiB. `dist/` en `.vscode/` staan in `.gitignore`.
+Laatste controle bij elke build: de regel `APPCHK … Target: 7, API: 87.1` in de uitvoer. ufbt bouwt met `-Wall -Wextra -Werror`, dus de build is alleen geslaagd zonder waarschuwingen. Gebouwd en gecontroleerd met ufbt 0.2.6: 0 waarschuwingen, `.text` ongeveer 8 KiB, `.fap` ongeveer 25 KiB. `dist/` en `.vscode/` staan in `.gitignore`.
 
 ## Installeren
 
@@ -97,7 +97,9 @@ Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. Met 
 - `ui-droptest --rounds 20`: **20 van 20 geslaagd**, geen bevriezing of BusFault. Verbreking gezien na mediaan 2,4 s, app terug na mediaan 6,8 s (max 8,7 s), ping daarna ~97 ms.
 - Na de review-fixes (2026-10-17, 04:00): valtest opnieuw 20/20 (app terug mediaan 6,8 s, max 7,6 s); 5 minuten open en stil zonder verbreking; keepalive loopt door terwijl de app open is.
 - Duurtest 40 minuten over BLE, app open, elke 10 s STATUS: 240/240 afgeleverd, 0 verbrekingen, geheugen stabiel.
-- **Nog met de hand:** OK/Back op een echte bevestigingsvraag, de snelle acties en presets vanuit het menu, de handmatige start (verzoekbestand).
+- OK/Back op een echte bevestigingsvraag: `ui-test --confirm-check` door Stijn (2026-10-17, USB), geslaagd.
+- Handmatige start en het menu, met de bediening op afstand (2026-10-17, BLE, bridge in het testproces, lege scope): OK in Apps → Tools → PiToolbox → de app vraagt de Pi om hem te openen → gekoppeld in ~7 s; Snelle acties Status, Wifi-scan (zonder CAP_NET_ADMIN: nette foutmelding), Stop captures ("Geen actieve captures.") en NOODSTOP, het statusscherm, en Back tot de app dicht is. Daarbij gevonden en gerepareerd: de bridge verbond nooit zelf (handmatige start kon niet), de cursor in Snelle acties sprong terug naar boven, de statustekst verschilde van het statusscherm, en "Fout 6" werd "Mislukt".
+- **Nog open:** presets vanuit het menu (eerst een presets-bestand en een LLM-provider), spike-test 7 (vergrendelen over BLE).
 
 ### Op afstand (alleen voor ontwikkeling)
 
