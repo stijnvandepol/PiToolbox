@@ -229,6 +229,16 @@ def test_scan_iw_busy_hint(tmp_path: Path) -> None:
         make_adapter(r, tmp_path).scan("iw", 10, "abg")
 
 
+def test_scan_iw_permission_hint(tmp_path: Path) -> None:
+    # Op hardware gezien (2026-10-17, snelle actie Wifi-scan buiten systemd): EPERM van nl80211.
+    r = FakeRunner("managed")
+    r.responses[("iw", "dev", "wlan1", "scan")] = RunResult(
+        255, "", "command failed: Operation not permitted (-1)"
+    )
+    with pytest.raises(CommandFailed, match="CAP_NET_ADMIN"):
+        make_adapter(r, tmp_path).scan("iw", 10, "abg")
+
+
 def test_scan_unknown_method_or_band(tmp_path: Path) -> None:
     r = FakeRunner()
     with pytest.raises(InvalidState):

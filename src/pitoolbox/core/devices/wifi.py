@@ -80,6 +80,21 @@ def _filter_band(networks: list[dict[str, Any]], band: str) -> list[dict[str, An
     return [n for n in networks if keep(n)]
 
 
+def _hint(stderr: str) -> str:
+    """Korte uitleg bij bekende fouten van iw/ip, voor het scherm van de Flipper en de chat.
+
+    "Operation not permitted" is EPERM (-1) van nl80211: het proces mist CAP_NET_ADMIN. Onder
+    systemd geeft pitoolbox-mcp.service die als ambient capability (deploy/install.sh); bij
+    `uv run` vanuit je eigen shell heb je hem niet.
+    """
+    low = stderr.lower()
+    if "busy" in low:
+        return " (adapter bezig; probeer opnieuw)"
+    if "not permitted" in low:
+        return " (geen rechten: CAP_NET_ADMIN nodig, die krijgt de service via install.sh)"
+    return ""
+
+
 class AlfaAdapter:
     """Wijzigt en leest de staat van de Alfa-interface. Raakt NOOIT de uplink-interface aan."""
 
@@ -154,7 +169,8 @@ class AlfaAdapter:
     def _must_ok(self, argv: list[str]) -> None:
         res = self._runner.run(argv, timeout=15)
         if res.returncode != 0:
-            raise CommandFailed(f"{' '.join(argv)} faalde: {res.stderr.strip() or res.returncode}")
+            msg = res.stderr.strip() or str(res.returncode)
+            raise CommandFailed(f"{' '.join(argv)} faalde: {msg}{_hint(msg)}")
 
     def scan(self, method: str = "iw", duration_s: int = 10, band: str = "abg") -> dict[str, Any]:
         """Passieve scan. iw: managed mode; airodump: monitor mode (duurt `duration_s`)."""
@@ -184,8 +200,7 @@ class AlfaAdapter:
         res = self._runner.run(["iw", "dev", iface, "scan"], timeout=30)
         if res.returncode != 0:
             msg = res.stderr.strip() or str(res.returncode)
-            hint = " (adapter bezig; probeer opnieuw)" if "busy" in msg.lower() else ""
-            raise CommandFailed(f"iw dev {iface} scan faalde: {msg}{hint}")
+            raise CommandFailed(f"iw dev {iface} scan faalde: {msg}{_hint(msg)}")
         nets = _filter_band(parse_iw_scan(res.stdout), band)
         return {"method": "iw", "band": band, "aps": nets, "stations": []}
 
