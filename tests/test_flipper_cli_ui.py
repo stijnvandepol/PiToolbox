@@ -17,7 +17,13 @@ from unittest.mock import MagicMock
 import pytest
 from flipper_fakes import FAST_TIMING, FakeFap, FakeFlipperTransport, make_fap, wait_until
 
-from pitoolbox import flipper_cli, flipper_ui_cli
+from pitoolbox import (
+    flipper_cli,
+    flipper_ui_cli,
+    flipper_ui_droptest,
+    flipper_ui_harness,
+    flipper_ui_install,
+)
 from pitoolbox.config import Settings
 from pitoolbox.core.audit import AuditLog
 from pitoolbox.core.devices.flipper import FlipperDevice
@@ -67,7 +73,7 @@ DEVICE_TIMING = replace(FAST_TIMING, loader_free_wait_s=0.3, loader_poll_s=0.02)
 
 
 class UiLab:
-    """Eén nep-Flipper met FAP; vervangt de opbouw-hooks van flipper_ui_cli."""
+    """Eén nep-Flipper met FAP; vervangt de opbouw-hooks van de ui-commando's."""
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.fake = FakeFlipperTransport(start_in_rpc=True, kind="ble")
@@ -87,11 +93,11 @@ class UiLab:
         self.wifi = MagicMock()
         self.wifi.get_mode.return_value = "managed"
         monkeypatch.setattr(flipper_cli, "_load_settings", lambda: self.settings)
-        monkeypatch.setattr(flipper_ui_cli, "_make_runner", self.make_runner)
-        monkeypatch.setattr(flipper_ui_cli, "_make_device", self.make_device)
-        monkeypatch.setattr(flipper_ui_cli, "_disconnect", self.disconnect)
-        monkeypatch.setattr(flipper_ui_cli, "BRIDGE_TIMING", FAST_BRIDGE)
-        monkeypatch.setattr(flipper_ui_cli, "TIMING", FAST_UI)
+        monkeypatch.setattr(flipper_ui_harness, "_make_runner", self.make_runner)
+        monkeypatch.setattr(flipper_ui_install, "_make_device", self.make_device)
+        monkeypatch.setattr(flipper_ui_droptest, "_disconnect", self.disconnect)
+        monkeypatch.setattr(flipper_ui_harness, "BRIDGE_TIMING", FAST_BRIDGE)
+        monkeypatch.setattr(flipper_ui_harness, "TIMING", FAST_UI)
 
     def make_device(self, settings: Settings) -> FlipperDevice:
         self.device_settings.append(settings)
@@ -170,7 +176,7 @@ def test_ui_install_default_path_and_errors(
     lab: UiLab, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     missing = tmp_path / "dist" / "pitoolbox_ui.fap"
-    monkeypatch.setattr(flipper_ui_cli, "DEFAULT_FAP", missing)
+    monkeypatch.setattr(flipper_ui_install, "DEFAULT_FAP", missing)
     assert _run("ui-install") == 1
     assert "bestaat niet" in capsys.readouterr().err
     missing.parent.mkdir()
@@ -342,7 +348,7 @@ def test_ui_droptest_needs_address_and_confirmation(
     lab.settings = lab.settings.model_copy(update={"flipper_ble_address": None})
     assert _run("ui-droptest", "--yes") == 2
     assert "BLE-adres" in capsys.readouterr().err
-    monkeypatch.setattr(flipper_ui_cli, "_input", lambda prompt: "n")
+    monkeypatch.setattr(flipper_ui_droptest, "_input", lambda prompt: "n")
     assert _run("ui-droptest", "--address", "80:e1:26:20:f6:6b") == 1
     assert "Niet gestart" in capsys.readouterr().out
     assert lab.runner_settings == [] and lab.disconnects == []
@@ -352,7 +358,7 @@ def test_ui_droptest_confirmed_interactively(
     lab: UiLab, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     prompts: list[str] = []
-    monkeypatch.setattr(flipper_ui_cli, "_input", lambda p: prompts.append(p) or "ja")
+    monkeypatch.setattr(flipper_ui_droptest, "_input", lambda p: prompts.append(p) or "ja")
     assert _run("ui-droptest", "--rounds", "1", "--pause", "0") == 0
     assert len(prompts) == 1
     assert wait_until(lambda: not lab.fake.fap_running)
