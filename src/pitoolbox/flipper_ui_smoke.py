@@ -257,13 +257,16 @@ def _press_remotely(check: _Check, step: _CheckStep, shown_at: float) -> None:
     if wait > 0:
         harness._sleep(wait)
     _out(f"Vraag {step.number}/{CHECK_STEPS_TOTAL}: de Pi drukt {step.button} op afstand.")
+    # Tijd van vóór het drukken: de app reageert al terwijl gui_press nog bezig is (RELEASE),
+    # dus een tijd van erna zou ná de bevestiging liggen en een negatieve stap geven.
+    pressed_at = harness._clock()
     try:
         check.runner.ctx.flipper.gui_press(step.button.lower())
     except ToolboxError as exc:  # ook RemoteInputRefused (een DeviceError)
         raise StepFailed(
             f"{step.button} op afstand drukken mislukte bij vraag {step.number}: {exc}"
         ) from exc
-    check.timeline.mark(f"{step.button} op afstand gedrukt (vraag {step.number})", harness._clock())
+    check.timeline.mark(f"{step.button} op afstand gedrukt (vraag {step.number})", pressed_at)
 
 
 def _check_chat_refused(check: _Check, pending_id: str) -> None:

@@ -405,6 +405,7 @@ def test_ui_test_confirm_check_auto_presses_ok_then_back(
     positions = [out.index(label) for label in labels]
     assert positions == sorted(positions)
     assert "Rooktest geslaagd" in out and "druk nu" not in out
+    assert "+ -" not in out  # geen negatieve stap in de tijdlijn
     assert lab.fap.keys == ["OK", "BACK"]
     assert [kind for _, kind in lab.fake.gui_inputs] == ["PRESS", "SHORT", "RELEASE"] * 2
     reasons = [m.reason for m in lab.fap.of_type(proto.ConfirmClosed)]
