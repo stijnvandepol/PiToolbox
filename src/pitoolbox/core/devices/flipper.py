@@ -40,10 +40,11 @@ naar `<pad>.part`, controleert de MD5 op de Flipper en hernoemt dan; een mislukt
 de vorige app dus heel.
 
 **Opbouw.** `FlipperDevice` erft van lagen in eigen modules die dezelfde toestand en dezelfde
-lock delen: `_flipper_link` (toestand, operatiekader, keepalive), `_flipper_modes` (CLI/RPC-
-wissel), `_flipper_cli_actions` (Sub-GHz/NFC/RFID), `_flipper_app_channel` (gekoppelde app),
-`_flipper_install` (FAP installeren) en `_flipper_ir` (ir_send met handoff). Alles wat andere
-code nodig heeft, importeer je uit deze module.
+lock delen: `_flipper_link_core` (toestand, haken voor de gekoppelde app), `_flipper_link`
+(operatiekader, keepalive), `_flipper_modes` (CLI/RPC-wissel), `_flipper_cli_actions`
+(Sub-GHz/NFC/RFID), `_flipper_app_channel` (gekoppelde app), `_flipper_install` (FAP
+installeren) en `_flipper_ir` (ir_send met handoff). Alles wat andere code nodig heeft,
+importeer je uit deze module.
 """
 
 from __future__ import annotations

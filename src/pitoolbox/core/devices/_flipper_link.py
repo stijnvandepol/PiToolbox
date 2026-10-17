@@ -1,8 +1,9 @@
-"""Basis van `FlipperDevice`: toestand, operatiekader (lock, abort, reconnect) en keepalive.
+"""Basis van `FlipperDevice`: operatiekader (lock, abort, reconnect) en keepalive.
 
 Eén lock (`_lock`) rond alle device-I/O; `_gen_lock` beschermt de abort-generatie en de teller
-van wachtende threads. Alle toestand wordt hier aangemaakt; de andere `_flipper_*`-lagen bouwen
-hierop voort. Overzicht en bronnen: zie flipper.py.
+van wachtende threads. Alle toestand wordt aangemaakt in `_flipper_link_core` (`_LinkCore`, met
+de haken voor de gekoppelde app); de andere `_flipper_*`-lagen bouwen op `FlipperLink` voort.
+Overzicht en bronnen: zie flipper.py.
 """
 
 from __future__ import annotations
@@ -13,21 +14,17 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Literal, TypeVar
+from typing import TypeVar
 
-from pitoolbox.core.devices._flipper_cli import CliProfile
-from pitoolbox.core.devices._flipper_rpc.client import Main, RpcClient
+from pitoolbox.core.devices._flipper_link_core import _is_app_state, _LinkCore
+from pitoolbox.core.devices._flipper_rpc.client import RpcClient
 from pitoolbox.core.devices._flipper_rpc.framing import FrameError
-from pitoolbox.core.devices._flipper_rpc.pb import application_pb2, flipper_pb2
+from pitoolbox.core.devices._flipper_rpc.pb import flipper_pb2
 from pitoolbox.core.devices._flipper_transport import ByteTransport, TransportError
-from pitoolbox.core.devices._flipper_types import (
-    AppEvent,
-    AppEventSink,
-    DeviceBusy,
-    FlipperTiming,
-    _Attempt,
-)
+from pitoolbox.core.devices._flipper_types import DeviceBusy, _Attempt
 from pitoolbox.core.errors import Aborted, DeviceError, DeviceNotConnected, DeviceTimeout
+
+__all__ = ["FlipperLink", "_is_app_state"]
 
 # Loggernaam van flipper.py: alle logregels van FlipperDevice onder één naam.
 log = logging.getLogger("pitoolbox.core.devices.flipper")
@@ -35,99 +32,8 @@ log = logging.getLogger("pitoolbox.core.devices.flipper")
 T = TypeVar("T")
 
 
-class FlipperLink:
-    """Toestand en operatiekader die alle Flipper-acties delen (zie `FlipperDevice`)."""
-
-    def __init__(
-        self,
-        transport_factory: Callable[[], ByteTransport],
-        cli_profile: str = "auto",
-        *,
-        timing: FlipperTiming | None = None,
-        keepalive_s: float = 0.0,
-        usb_probe: Callable[[], bool] | None = None,
-    ) -> None:
-        """`keepalive_s` > 0: RPC-ping na zoveel seconden idle. `usb_probe` (alleen in 'auto'):
-        zit er nu een Flipper op USB? Dan schakelt een CLI-actie over BLE naar USB over."""
-        self._factory = transport_factory
-        self._profile_setting = cli_profile
-        self._timing = timing or FlipperTiming()
-        self._keepalive_s = keepalive_s
-        self._usb_probe = usb_probe
-        self._last_io = time.monotonic()
-        self._ka_thread: threading.Thread | None = None
-        self._ka_stop = threading.Event()
-        self._lock = threading.Lock()  # alle device-I/O
-        self._gen_lock = threading.Lock()
-        self._abort_gen = 0
-        self._waiters = 0  # threads die op `_lock` wachten (onder `_gen_lock` geteld)
-        self._op_abortable = False  # de lopende operatie is afbreekbaar (onder `_gen_lock`)
-        # RPC-gekoppelde app (PiToolbox-FAP): "off" | "active" | "suspended" (handoff in ir_send).
-        self._rpc_app_state: Literal["off", "active", "suspended"] = "off"
-        self._rpc_app_path: str | None = None
-        self._rpc_app_closing = False  # wij sluiten hem zelf: APP_CLOSED is voor wait_event
-        self._app_sink: AppEventSink | None = None
-        # Onderstaande toestand wordt alleen onder `_lock` gewijzigd; status() leest ze zonder.
-        self._transport: ByteTransport | None = None
-        self._mode = "unknown"  # "cli" | "rpc" | "unknown"
-        self._client: RpcClient | None = None
-        self._profile: CliProfile | None = None
-        self._device_info: dict[str, str] | None = None
-        self._app_active = False
-        self._maybe_rpc = False  # poort kan nog in een RPC-sessie staan die wij kwijt zijn
-        self._busy_op: str | None = None
-
-    # --- intern: gekoppelde app ---------------------------------------------------------
-
-    def _emit_app(self, event: AppEvent) -> None:
-        sink = self._app_sink
-        if sink is None:
-            return
-        try:
-            sink(event)
-        except Exception:
-            log.exception("app-sink faalde")
-
-    def _rpc_app_lost(self, reason: str, kind: Literal["closed", "lost"] = "lost") -> None:
-        """De gekoppelde app is weg (ook als hij voor een handoff dicht was)."""
-        if self._rpc_app_state == "off":
-            return
-        self._rpc_app_state = "off"
-        self._rpc_app_closing = False
-        log.info("PiToolbox-app %s: %s", "gesloten" if kind == "closed" else "kwijt", reason)
-        self._emit_app(AppEvent(kind, reason=reason))
-
-    def _on_unsolicited(self, frame: Main) -> bool:
-        """Event-hook van de RpcClient (draait in de lezende thread, met de lock)."""
-        content = frame.WhichOneof("content")
-        if content == "app_data_exchange_request" and frame.command_id == 0:
-            if self._rpc_app_state == "active":
-                self._emit_app(AppEvent("data", data=bytes(frame.app_data_exchange_request.data)))
-            else:
-                log.debug("DataExchange zonder gekoppelde app genegeerd")
-            return True
-        if (
-            content == "app_state_response"
-            and frame.app_state_response.state == application_pb2.APP_CLOSED
-            and self._rpc_app_state == "active"
-            and not self._rpc_app_closing
-            and not self._app_active
-        ):
-            self._rpc_app_lost("de app sloot zichzelf", kind="closed")
-            return True
-        return False
-
-    def _exit_app(self, client: RpcClient, timeout: float) -> None:
-        """app_exit_request + wachten op APP_CLOSED; nooit een uitzondering (opruimcode)."""
-        try:
-            main = flipper_pb2.Main()
-            main.app_exit_request.SetInParent()
-            client.request(main, timeout)
-            client.wait_event(lambda m: _is_app_state(m, application_pb2.APP_CLOSED), timeout)
-        except DeviceError as exc:
-            log.warning("app afsluiten mislukte: %s", exc)
-        finally:
-            self._app_active = False
+class FlipperLink(_LinkCore):
+    """Operatiekader en keepalive die alle Flipper-acties delen (zie `FlipperDevice`)."""
 
     # --- operatiekader ----------------------------------------------------------------
 
@@ -414,10 +320,3 @@ def _keepalive_main(
         except Exception:
             log.exception("keepalive-tick faalde")
         del device
-
-
-def _is_app_state(main: Main, state: int) -> bool:
-    return bool(
-        main.WhichOneof("content") == "app_state_response"
-        and main.app_state_response.state == state
-    )

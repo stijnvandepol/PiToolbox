@@ -494,7 +494,8 @@ src/pitoolbox/
     devices/flipper.py        # FlipperDevice: USB of BLE achter één interface
     devices/_flipper_transport.py  # ByteTransport-protocol en USB-transport (pyserial)
     devices/_flipper_types.py # fouttypes, AppEvent en FlipperTiming
-    devices/_flipper_link.py  # FlipperDevice-basis: toestand, lock/abort, reconnect, keepalive
+    devices/_flipper_link_core.py  # FlipperDevice-basis: toestand, haken gekoppelde app
+    devices/_flipper_link.py  # operatiekader: lock/abort, reconnect, keepalive
     devices/_flipper_modes.py # CLI/RPC-modewissel
     devices/_flipper_cli_actions.py  # Sub-GHz/NFC/RFID via de CLI
     devices/_flipper_app_channel.py  # kanaal naar de RPC-gekoppelde PiToolbox-app
