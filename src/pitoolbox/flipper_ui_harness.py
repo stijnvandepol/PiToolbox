@@ -1,7 +1,9 @@
 """Gedeeld gereedschap voor ``ui-test`` en ``ui-droptest`` (flipper_ui_cli.py): de bridge en
 runner opbouwen, gebeurtenissen van de bridge volgen en de app tot de handdruk brengen.
 
-**Niets hiervan zendt radio uit.** De runner laat alleen ``status`` toe (``TEST_ALLOWLIST``).
+**Niets hiervan zendt radio uit.** De runner laat alleen ``status`` toe (``TEST_ALLOWLIST``) en
+krijgt een lege scope (``scope_file`` in een eigen lege tijdelijke map, zie `_runner_settings`):
+twee lagen die elk een transmit weigeren.
 
 ``TIMING``, ``BRIDGE_TIMING``, ``_make_runner``, ``_clock`` en ``_sleep`` zijn vervangbaar in
 tests; de commando's lezen ze daarom via deze module (``harness.TIMING``), niet via een import
@@ -12,10 +14,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Settings
@@ -32,6 +36,7 @@ _sleep = time.sleep
 
 # Alleen deze tool mag de bridge in ui-test/ui-droptest aanroepen: niets zendt, niets wijzigt.
 TEST_ALLOWLIST = ["status"]
+SCOPE_DIR_PREFIX = "pitoolbox-ui-test-"
 
 
 @dataclass(frozen=True)
@@ -94,9 +99,23 @@ def _make_bridge(
     return FlipperUiBridge(runner, app_path=app_path, timing=BRIDGE_TIMING, observer=observer)
 
 
-def _runner_settings(settings: Settings, args: argparse.Namespace, transport: str) -> Settings:
+def _empty_scope_dir() -> tempfile.TemporaryDirectory[str]:
+    """Eigen lege map (mode 0700) voor `_runner_settings`; zolang hij bestaat, kan niemand
+    anders er een scope.yaml in zetten. Gebruik als context manager rond de hele test."""
+    return tempfile.TemporaryDirectory(prefix=SCOPE_DIR_PREFIX)
+
+
+def _runner_settings(
+    settings: Settings, args: argparse.Namespace, transport: str, scope_dir: str
+) -> Settings:
+    """Settings voor de test-runner: alleen ``status`` en een lege scope. ``scope_file`` wijst
+    naar een bestand dat niet bestaat in `scope_dir` (van `_empty_scope_dir`), dus de echte
+    scope.yaml van de gebruiker telt hier niet mee."""
     return _device_settings(settings, args, transport).model_copy(
-        update={"tool_allowlist": list(TEST_ALLOWLIST)}
+        update={
+            "tool_allowlist": list(TEST_ALLOWLIST),
+            "scope_file": Path(scope_dir) / "scope.yaml",
+        }
     )
 
 

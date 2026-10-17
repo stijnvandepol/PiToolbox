@@ -6,6 +6,7 @@ nagebootste FAP; het verbreken van BLE (D-Bus) is vervangen door het sluiten van
 
 from __future__ import annotations
 
+import argparse
 import json
 import threading
 from collections.abc import Iterator
@@ -28,10 +29,12 @@ from pitoolbox.config import Settings
 from pitoolbox.core.audit import AuditLog
 from pitoolbox.core.devices.flipper import FlipperDevice
 from pitoolbox.core.policy import PendingStore, Policy
-from pitoolbox.core.scope import Scope, ScopeStore
+from pitoolbox.core.scope import ScopeStore
 from pitoolbox.core.tools import build_registry
 from pitoolbox.core.tools.base import ToolContext
-from pitoolbox.core.tools.runner import ToolRunner
+from pitoolbox.core.tools.flipper_tools import IrSendArgs
+from pitoolbox.core.tools.runner import CONFIRM_ON_FLIPPER, CONFIRM_TOOL, ToolRunner
+from pitoolbox.flipper_ui_smoke import CHECK_BUTTON, CHECK_DEVICE, CHECK_FRONTEND, CHECK_TOOL
 from pitoolbox.frontends.flipper_ui import protocol as proto
 from pitoolbox.frontends.flipper_ui.bridge import BridgeTiming
 
@@ -87,6 +90,7 @@ class UiLab:
             flipper_ble_adapter="hci1",
         )
         self.runner_settings: list[Settings] = []
+        self.runners: list[ToolRunner] = []
         self.device_settings: list[Settings] = []
         self.disconnects: list[tuple[str, str | None]] = []
         self.on_disconnect: Any = None
@@ -105,7 +109,7 @@ class UiLab:
 
     def make_runner(self, settings: Settings) -> ToolRunner:
         self.runner_settings.append(settings)
-        scope_store = ScopeStore.fixed(Scope())
+        scope_store = ScopeStore(settings.scope_file)  # zoals app.build_runner
         captures = MagicMock()
         captures.list_active.return_value = []
         system = MagicMock()
@@ -119,10 +123,12 @@ class UiLab:
             wifi=self.wifi,
             captures=captures,
             system=system,
-            pending=PendingStore(ttl_s=60),
+            pending=PendingStore(ttl_s=settings.confirm_ttl_s),
         )
         policy = Policy(scope_store, settings.tool_allowlist)  # zoals app.build_runner
-        return ToolRunner(build_registry(), ctx, policy, AuditLog(settings.audit_log))
+        runner = ToolRunner(build_registry(), ctx, policy, AuditLog(settings.audit_log))
+        self.runners.append(runner)
+        return runner
 
     def disconnect(self, address: str, adapter: str | None) -> bool:
         self.disconnects.append((address, adapter))
@@ -287,6 +293,174 @@ def test_ui_test_other_action_is_refused_by_allowlist(
     lab.wifi.scan.assert_not_called()  # de policy liet wifi_scan niet door
 
 
+# --- ui-test --confirm-check ----------------------------------------------------------------
+
+CHECK_SCOPE = """\
+version: 1
+infrared:
+  - name: pitoolbox_confirm_check
+    file: /ext/infrared/tv.ir
+"""
+
+
+@pytest.fixture
+def ir_sends(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
+    """Elke aanroep van FlipperDevice.ir_send; de tests eisen dat dit leeg blijft."""
+    calls: list[tuple[Any, ...]] = []
+
+    def record(self: FlipperDevice, *args: Any) -> dict[str, Any]:
+        calls.append(args)
+        raise AssertionError("ir_send mag in ui-test nooit aangeroepen worden")
+
+    monkeypatch.setattr(FlipperDevice, "ir_send", record)
+    return calls
+
+
+def _chat_refused(lab: UiLab) -> bool:
+    # Tekst, geen JSON: de regel kan net geschreven worden terwijl we lezen.
+    return lab.audit_path.exists() and CONFIRM_ON_FLIPPER in lab.audit_path.read_text()
+
+
+def _answer_check_prompts(lab: UiLab, approvals: list[bool]) -> threading.Thread:
+    """Speelt de mens: wacht tot de chat geweigerd is, en beantwoordt dan de test-vragen."""
+
+    def press() -> None:
+        assert wait_until(lambda: _chat_refused(lab), timeout=5.0)
+        handled: set[int] = set()
+        for approve in approvals:
+            prompt = lab.fap.wait_for(
+                proto.ConfirmPrompt, lambda m: m.handle not in handled, timeout=5.0
+            )
+            handled.add(prompt.handle)
+            lab.fap.answer(prompt.handle, approve)
+
+    thread = threading.Thread(target=press, daemon=True)
+    thread.start()
+    return thread
+
+
+def _check_rows(lab: UiLab) -> list[dict[str, Any]]:
+    return [r for r in lab.audit() if r.get("tool") == CHECK_TOOL]
+
+
+def test_ui_test_confirm_check_ok_then_back(
+    lab: UiLab, ir_sends: list[tuple[Any, ...]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    thread = _answer_check_prompts(lab, [True, False])
+    assert _run("ui-test", "--confirm-check") == 0
+    thread.join(1.0)
+    out = capsys.readouterr().out
+    for label in (
+        "STATUS afgeleverd",
+        "vraag 1 op de Flipper (CONFIRM_PROMPT)",
+        "chat-bevestiging geweigerd (Flipper verplicht)",
+        "OK op vraag 1: bevestigd, policy weigert",
+        "vraag 1 gesloten (CONFIRM_CLOSED)",
+        "vraag 2 op de Flipper (CONFIRM_PROMPT)",
+        "Back op vraag 2: afgewezen",
+        "vraag 2 gesloten (CONFIRM_CLOSED)",
+        "app gesloten, loader vrij",
+    ):
+        assert label in out
+    assert "druk nu OK" in out and "druk nu Back" in out and "Rooktest geslaagd" in out
+    # De Flipper hoorde wat er gebeurde: OK = mislukt (geweigerd door de policy), Back = nee.
+    reasons = [m.reason for m in lab.fap.of_type(proto.ConfirmClosed)]
+    assert reasons == [proto.CloseReason.FAILED, proto.CloseReason.REJECTED]
+    prompts = lab.fap.of_type(proto.ConfirmPrompt)
+    assert [p.summary.split(":")[0] for p in prompts] == ["Test 1/2", "Test 2/2"]
+    # Zonder waarde: 60 s per vraag, de pending leeft 10 s langer.
+    used = lab.runner_settings[0]
+    assert used.confirm_ttl_s == 70 and used.tool_allowlist == ["status"]
+    rows = _check_rows(lab)
+    assert [(r["decision"], r.get("confirmed_on")) for r in rows] == [
+        ("deny", "flipper"),
+        ("rejected", "flipper"),
+    ]
+    assert "allowlist" in rows[0]["result"]
+    assert ir_sends == [] and lab.fake.sent_buttons == [] and lab.fake.app_starts == [APP]
+    assert lab.runners[0].ctx.pending.list() == []
+
+
+def test_ui_test_runner_has_an_empty_scope_of_its_own(lab: UiLab, tmp_path: Path) -> None:
+    lab.settings.scope_file.write_text(CHECK_SCOPE)  # de echte scope van de gebruiker
+    assert _run("ui-test") == 0
+    used = lab.runner_settings[0].scope_file
+    assert used != lab.settings.scope_file
+    assert used.parent.name.startswith(flipper_ui_harness.SCOPE_DIR_PREFIX)
+    assert not used.parent.exists()  # opgeruimd na de test
+
+
+@pytest.mark.parametrize(
+    ("approvals", "expected"),
+    [
+        ([False], "op vraag 1 kwam Back binnen, verwacht was OK"),
+        ([True, True], "op vraag 2 kwam OK binnen, verwacht was Back"),
+    ],
+)
+def test_ui_test_confirm_check_wrong_button(
+    lab: UiLab,
+    ir_sends: list[tuple[Any, ...]],
+    capsys: pytest.CaptureFixture[str],
+    approvals: list[bool],
+    expected: str,
+) -> None:
+    thread = _answer_check_prompts(lab, approvals)
+    assert _run("ui-test", "--confirm-check", "3") == 1
+    thread.join(1.0)
+    err = capsys.readouterr().err
+    assert "Rooktest MISLUKT" in err and expected in err and "niets uitgezonden" in err
+    assert "Wel gelukt" in err and "vraag 1 op de Flipper" in err
+    assert ir_sends == [] and lab.fake.sent_buttons == []
+    assert not lab.fake.fap_running
+
+
+def test_ui_test_confirm_check_timeout_says_where_to_look(
+    lab: UiLab, ir_sends: list[tuple[Any, ...]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run("ui-test", "--confirm-check", "1") == 1
+    err = capsys.readouterr().err
+    assert "geen antwoord op vraag 1 binnen 1 s" in err
+    assert "Kijk op de Flipper" in err and "Test 1/2" in err
+    assert "chat-bevestiging geweigerd" in err  # dat lukte wel
+    assert lab.runners[0].ctx.pending.list() == []  # de vraag bleef niet staan
+    assert ir_sends == [] and not lab.fake.fap_running
+
+
+def test_ui_test_confirm_check_never_transmits_even_if_in_users_scope(
+    lab: UiLab, ir_sends: list[tuple[Any, ...]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """OK op beide vragen, en de echte scope van de gebruiker bevat het test-apparaat zelfs:
+    de bevestigde test-actie komt nooit bij FlipperDevice.ir_send."""
+    lab.settings.scope_file.write_text(CHECK_SCOPE)
+    thread = _answer_check_prompts(lab, [True, True])
+    assert _run("ui-test", "--confirm-check", "3") == 1
+    thread.join(1.0)
+    capsys.readouterr()
+    confirmed = [r for r in _check_rows(lab) if r.get("confirmed")]
+    assert [r["decision"] for r in confirmed] == ["deny", "deny"]
+    assert ir_sends == [] and lab.fake.sent_buttons == [] and lab.fake.app_starts == [APP]
+
+
+def test_confirm_check_action_is_denied_by_each_layer_alone(
+    lab: UiLab, ir_sends: list[tuple[Any, ...]], tmp_path: Path
+) -> None:
+    """Dubbele zekerheid: de allowlist alleen weigert, en de lege scope alleen ook."""
+    users_scope = tmp_path / "users-scope.yaml"
+    users_scope.write_text(CHECK_SCOPE)
+    link = argparse.Namespace(adapter=None, address=None)
+    with flipper_ui_harness._empty_scope_dir() as scope_dir:
+        harness_settings = flipper_ui_harness._runner_settings(lab.settings, link, "ble", scope_dir)
+        only_allowlist = harness_settings.model_copy(update={"scope_file": users_scope})
+        only_empty_scope = harness_settings.model_copy(update={"tool_allowlist": []})
+        for settings, reason in ((only_allowlist, "allowlist"), (only_empty_scope, "scope.yaml")):
+            runner = lab.make_runner(settings)
+            args = IrSendArgs(device=CHECK_DEVICE, button=CHECK_BUTTON)
+            pending = runner.ctx.pending.create(CHECK_TOOL, args, CHECK_FRONTEND, "test")
+            raw = runner.call(CHECK_FRONTEND, CONFIRM_TOOL, {"pending_id": pending.id})
+            assert raw["error"] == "denied" and reason in raw["message"]
+    assert ir_sends == [] and lab.fake.sent_buttons == []
+
+
 # --- ui-droptest ----------------------------------------------------------------------------
 
 
@@ -371,6 +545,8 @@ def test_ui_droptest_confirmed_interactively(
         ["ui-droptest", "--rounds", "201"],
         ["ui-droptest", "--pause", "-1"],
         ["ui-test", "--wait-action", "x"],
+        ["ui-test", "--confirm-check", "0"],
+        ["ui-test", "--confirm-check", "111"],
         ["ui-test", "--transport", "wifi"],
         ["ui-install", "--address", "geen-mac"],
     ],

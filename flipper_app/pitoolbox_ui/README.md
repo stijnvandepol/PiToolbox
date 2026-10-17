@@ -79,15 +79,16 @@ In de spike crashte de Flipper met een BusFault toen BLE wegviel terwijl een tes
 
 ## Hardwaretest
 
-Stop eerst `pitoolbox-mcp` of `pitoolbox-agent` als die de Flipper gebruiken. Er wordt nooit iets uitgezonden: alleen de tool `status` is toegestaan.
+Stop eerst `pitoolbox-mcp` of `pitoolbox-agent` als die de Flipper gebruiken. Er wordt nooit iets uitgezonden: alleen de tool `status` is toegestaan, en de test draait met een lege scope (een eigen tijdelijke map, niet jouw `scope.yaml`).
 
 ```bash
 uv run pitoolbox-flipper ui-install                     # app erop (MD5-gecontroleerd)
 uv run pitoolbox-flipper ui-test [--wait-action 30]     # starten, HELLO, WELCOME, STATUS, sluiten
+uv run pitoolbox-flipper ui-test --confirm-check        # plus OK en Back op twee test-vragen
 uv run pitoolbox-flipper ui-droptest --rounds 20        # valtest: BLE-link N keer verbreken
 ```
 
-Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. `ui-droptest` verbreekt de BLE-link via BlueZ (D-Bus, geen root) terwijl de Pi STATUS-berichten stuurt. Daarna moet de Flipper op een ping antwoorden en de app opnieuw starten. De test stopt bij de eerste fout en zegt wat je van het scherm moet noteren.
+Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. Met `--confirm-check` test je "Flipper verplicht" met de hand. De Pi zet twee test-vragen klaar (`ir_send` naar `pitoolbox_confirm_check`, een apparaat dat nergens in scope staat). Bij vraag 1 ("Test 1/2: druk OK") controleert de test eerst dat `confirm_action` uit een chat geweigerd wordt (`confirm_on_flipper`). Daarna druk jij OK. De Pi moet dat als bevestigd op de Flipper zien, en de policy weigert de actie alsnog: hij staat niet in de allowlist en niet in de scope. In Status staat dan "Bevestiging: mislukt", en dat klopt. Bij vraag 2 ("Test 2/2: druk Back") druk je Back ("geweigerd"). Je hebt per vraag 60 s; met `--confirm-check 90` krijg je 90 s (hoogstens 110). Druk je de verkeerde knop of komt er niets binnen, dan zegt de test wat je op het scherm moet nakijken. `ui-droptest` verbreekt de BLE-link via BlueZ (D-Bus, geen root) terwijl de Pi STATUS-berichten stuurt. Daarna moet de Flipper op een ping antwoorden en de app opnieuw starten. De test stopt bij de eerste fout en zegt wat je van het scherm moet noteren.
 
 **Resultaat 2026-10-17** (mntm-012, Pi 4, BLE via hci1):
 

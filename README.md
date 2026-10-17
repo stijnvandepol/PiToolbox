@@ -30,7 +30,7 @@ Alle vijf fases zijn gebouwd en getest met nagebootste apparaten (`uv run pytest
 | Alfa (wifi-tools) | **nee** (heeft root of capabilities nodig) |
 | Remote via de Claude-app (fase 2) | **nee** |
 | Agent en LLM-providers (fase 4) | **nee**, nog niet tegen de echte API's of Ollama |
-| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | ja, over USB en BLE: installeren (`ui-install`), rooktest (`ui-test`), valtest 20/20 (`ui-droptest`), 5 minuten open zonder verbreking. Nog niet met de hand: OK/Back op een echte vraag, snelle acties en presets vanuit het menu |
+| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | ja, over USB en BLE: installeren (`ui-install`), rooktest (`ui-test`), valtest 20/20 (`ui-droptest`), 5 minuten open zonder verbreking. Nog niet met de hand: OK/Back op een echte vraag (test: `ui-test --confirm-check`), snelle acties en presets vanuit het menu |
 | Systeemconfig voor onderweg (fase 5) | **nee**: alleen de bestanden, `--dry-run` en de controles zonder root |
 
 ## Veiligheidsmodel
@@ -259,7 +259,7 @@ Daar staan ook de ontwerpkeuzes met bronnen, het terugdraaien en wat je doet als
 
 ### 10. De Flipper-app (optioneel)
 
-De app `pitoolbox_ui` bouw je met ufbt, tegen de SDK van exact de firmware op je Flipper. Daarna zet `uv run pitoolbox-flipper ui-install` hem op de SD-kaart in `/ext/apps/Tools/pitoolbox_ui.fap` (gecontroleerd op API en MD5), en test `uv run pitoolbox-flipper ui-test` hem van begin tot eind. Bouwen en installeren: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md). Daarna `PITOOLBOX_FLIPPER_UI=on` in `/etc/pitoolbox/pitoolbox.env` en `sudo systemctl restart pitoolbox-mcp`. Zie [Bediening op de Flipper](#bediening-op-de-flipper).
+De app `pitoolbox_ui` bouw je met ufbt, tegen de SDK van exact de firmware op je Flipper. Daarna zet `uv run pitoolbox-flipper ui-install` hem op de SD-kaart in `/ext/apps/Tools/pitoolbox_ui.fap` (gecontroleerd op API en MD5), en test `uv run pitoolbox-flipper ui-test` hem van begin tot eind. Met `ui-test --confirm-check` druk je zelf OK en Back op twee test-vragen; dat zendt nooit iets uit. Bouwen en installeren: [flipper_app/pitoolbox_ui/README.md](flipper_app/pitoolbox_ui/README.md). Daarna `PITOOLBOX_FLIPPER_UI=on` in `/etc/pitoolbox/pitoolbox.env` en `sudo systemctl restart pitoolbox-mcp`. Zie [Bediening op de Flipper](#bediening-op-de-flipper).
 
 ## Gebruik
 

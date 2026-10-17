@@ -24,6 +24,7 @@ from .flipper_ui_harness import (
     StepFailed,
     UiTiming,
     _bring_up,
+    _empty_scope_dir,
     _err,
     _Events,
     _make_bridge,
@@ -194,9 +195,14 @@ def cmd_droptest(args: argparse.Namespace, settings: Settings) -> int:
     if not _confirm_drop(args, address):
         _out("Niet gestart.")
         return 1
-    run_settings = _runner_settings(settings, args, "ble").model_copy(
-        update={"flipper_ble_address": address}
-    )
+    with _empty_scope_dir() as scope_dir:
+        run_settings = _runner_settings(settings, args, "ble", scope_dir).model_copy(
+            update={"flipper_ble_address": address}
+        )
+        return _run_droptest(args, run_settings, address)
+
+
+def _run_droptest(args: argparse.Namespace, run_settings: Settings, address: str) -> int:
     runner = harness._make_runner(run_settings)
     device: FlipperDevice = runner.ctx.flipper
     events = _Events()

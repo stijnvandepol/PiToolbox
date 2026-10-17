@@ -3,14 +3,16 @@
 - ``ui-install [--fap PAD] [--force]``: de FAP controleren (ELF, manifest, API van de firmware)
   en via de storage-RPC op ``PITOOLBOX_FLIPPER_UI_APP`` zetten, met voortgang en MD5-controle.
 - ``ui-test``: de app starten via de echte bridge, HELLO/WELCOME, een STATUS van de
-  ``status``-tool end-to-end afleveren, de app netjes sluiten; met tijden per stap.
+  ``status``-tool end-to-end afleveren, de app netjes sluiten; met tijden per stap. Met
+  ``--confirm-check`` daarna OK en Back op twee test-vragen ("Flipper verplicht").
 - ``ui-droptest [--rounds N]``: valtest over BLE. Terwijl de Pi STATUS-berichten stuurt, wordt de
   link via BlueZ verbroken (``org.bluez.Device1.Disconnect`` over D-Bus, geen root). Daarna moet
   de Flipper antwoorden en de app opnieuw starten. Stopt bij de eerste fout.
 
 **Niets hiervan zendt radio uit.** ui-test en ui-droptest draaien de bridge met een runner die
-alleen ``status`` toelaat (``tool_allowlist``): kiest iemand op de Flipper toch iets anders
-(wifi-scan, noodstop, preset), dan weigert de policy dat. **Eén eigenaar:** draait
+alleen ``status`` toelaat (``tool_allowlist``) en een lege scope heeft: kiest iemand op de
+Flipper toch iets anders (wifi-scan, noodstop, preset), of drukt hij OK op een test-vraag, dan
+weigert de policy dat. **Eén eigenaar:** draait
 ``pitoolbox-mcp`` of ``pitoolbox-agent`` met de Flipper, stop die dan eerst; twee processen
 drukken elkaars BLE-link weg.
 
@@ -31,11 +33,15 @@ from .flipper_cli_common import _mac_arg
 from .flipper_ui_droptest import cmd_droptest
 from .flipper_ui_harness import UiTiming
 from .flipper_ui_install import cmd_install
-from .flipper_ui_smoke import cmd_ui_test
+from .flipper_ui_smoke import CHECK_TTL_MARGIN_S, cmd_ui_test
+from .frontends.flipper_ui.protocol import MAX_TTL_S
 
 __all__ = ["UiTiming", "add_parsers", "run"]
 
 DROP_ROUNDS_MAX = 200
+CONFIRM_WAIT_DEFAULT_S = 60.0
+# Zo blijft de TTL van een test-vraag (wachttijd + marge) binnen de grens van het protocol.
+CONFIRM_WAIT_MAX_S = float(MAX_TTL_S - CHECK_TTL_MARGIN_S)
 
 
 # --- argumenten ------------------------------------------------------------------------------
@@ -68,6 +74,16 @@ def _wait_arg(value: str) -> float:
         raise argparse.ArgumentTypeError(f"geen getal: {value!r}") from exc
     if not 0 <= number <= 600:
         raise argparse.ArgumentTypeError("moet tussen 0 en 600 seconden liggen")
+    return number
+
+
+def _confirm_wait_arg(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"geen getal: {value!r}") from exc
+    if not 1 <= number <= CONFIRM_WAIT_MAX_S:
+        raise argparse.ArgumentTypeError(f"moet tussen 1 en {CONFIRM_WAIT_MAX_S:g} seconden liggen")
     return number
 
 
@@ -126,6 +142,18 @@ def _add_test_parser(sub: Any, parents: list[argparse.ArgumentParser], settings:
         default=0.0,
         metavar="S",
         help="daarna S seconden wachten tot je op de Flipper 'Status' kiest (standaard 0: niet)",
+    )
+    p_test.add_argument(
+        "--confirm-check",
+        type=_confirm_wait_arg,
+        nargs="?",
+        const=CONFIRM_WAIT_DEFAULT_S,
+        default=0.0,
+        metavar="S",
+        help=(
+            "daarna twee test-vragen: OK en dan Back op de Flipper, elk binnen S seconden "
+            f"(standaard {CONFIRM_WAIT_DEFAULT_S:g}); zendt nooit iets uit"
+        ),
     )
 
 
