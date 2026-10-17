@@ -37,6 +37,8 @@ Afwijkingen per preset (`Quirk`, gezet via `LLMConfig.quirks`; bronnen in `prese
   per call bewaren en ongewijzigd terugsturen; zonder geeft Gemini 3 een 400.
 - `CONTENT_PARTS` (Mistral): is `content` een lijst (thinking- en tekstblokken), dan die
   lijst ongewijzigd terugsturen in plaats van alleen de tekst.
+- `BASE_RESP` (MiniMax): een niet-nul `base_resp.status_code` in een 200-antwoord is een
+  fout (zie `_body_errors.py`).
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from pitoolbox.llm._base import HttpProvider
-from pitoolbox.llm._body_errors import openai_compat_body_error
+from pitoolbox.llm._body_errors import minimax_base_resp_error, openai_compat_body_error
 from pitoolbox.llm._common import (
     as_dict,
     as_int,
@@ -185,6 +187,10 @@ class OpenAICompatibleProvider(HttpProvider):
         return out
 
     def _body_error(self, data: dict[str, Any], clean: Callable[[str], str]) -> LLMError | None:
+        if Quirk.BASE_RESP in self.config.quirks:
+            err = minimax_base_resp_error(data, clean)
+            if err is not None:
+                return err
         return openai_compat_body_error(data, clean)
 
     def _parse(self, data: dict[str, Any]) -> Completion:

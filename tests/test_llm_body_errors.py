@@ -19,13 +19,14 @@ from pitoolbox.llm import (
     LLMRateLimitError,
     LLMResponseError,
     LLMServerError,
+    LLMTimeoutError,
     ProviderKind,
     StopReason,
     UserMessage,
     build_provider,
 )
 from pitoolbox.llm._base import HttpProvider
-from pitoolbox.llm.presets import Quirk
+from pitoolbox.llm.presets import PRESETS, Quirk
 
 KEY = "sk-test-geheim-1234567890"
 HISTORY = [UserMessage("hallo")]
@@ -205,3 +206,85 @@ def test_key_never_in_message() -> None:
     err = _fail(Script(body))
     assert KEY not in str(err) and "[geredigeerd]" in str(err)
     assert "\n" not in str(err)
+
+
+# --- MiniMax: base_resp (Quirk.BASE_RESP) ---
+
+MINIMAX = frozenset({Quirk.BASE_RESP})
+
+
+def _base_resp(code: int, msg: str = "melding") -> dict[str, Any]:
+    # Bij een fout zijn choices leeg of afwezig; base_resp staat op het hoogste niveau.
+    return {"id": "1", "choices": None, "base_resp": {"status_code": code, "status_msg": msg}}
+
+
+def test_minimax_preset_has_base_resp_quirk() -> None:
+    assert Quirk.BASE_RESP in PRESETS["minimax"].quirks
+
+
+def test_minimax_status_zero_is_normal() -> None:
+    body = {**OK_BODY, "base_resp": {"status_code": 0, "status_msg": ""}}
+    with _provider(Script(body), quirks=MINIMAX) as p:
+        assert p.complete(HISTORY).text == "hoi"
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (1000, LLMServerError),
+        (1001, LLMTimeoutError),
+        (1002, LLMRateLimitError),
+        (1013, LLMServerError),
+        (1024, LLMServerError),
+        (1033, LLMServerError),
+        (1039, LLMRateLimitError),
+        (1041, LLMRateLimitError),
+        (2045, LLMRateLimitError),
+    ],
+)
+def test_minimax_retryable_code_is_retried(code: int, expected: type[LLMError]) -> None:
+    script = Script(_base_resp(code), OK_BODY)
+    with _provider(script, quirks=MINIMAX) as p:
+        assert p.complete(HISTORY).text == "hoi"
+    assert script.count == 2
+    err = _fail(Script(*(_base_resp(code) for _ in range(3))), quirks=MINIMAX)
+    assert type(err) is expected and err.provider_code == str(code)
+
+
+def test_minimax_retry_stops_at_max_retries() -> None:
+    script = Script(*(_base_resp(1002) for _ in range(5)))
+    err = _fail(script, quirks=MINIMAX, max_retries=4)
+    assert type(err) is LLMRateLimitError and script.count == 5
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (1004, LLMAuthError),
+        (2049, LLMAuthError),
+        (1008, LLMBadRequestError),
+        (1026, LLMBadRequestError),
+        (1027, LLMBadRequestError),
+        (1042, LLMBadRequestError),
+        (2013, LLMBadRequestError),
+        (2056, LLMBadRequestError),
+        (9999, LLMResponseError),  # onbekende code
+    ],
+)
+def test_minimax_non_retryable_code_fails_immediately(code: int, expected: type[LLMError]) -> None:
+    script = Script(_base_resp(code), OK_BODY)
+    err = _fail(script, quirks=MINIMAX)
+    assert type(err) is expected and not err.retryable
+    assert script.count == 1
+    assert f"base_resp {code}" in str(err)
+
+
+def test_minimax_message_redacts_key() -> None:
+    err = _fail(Script(_base_resp(1004, f"token not match {KEY}")), quirks=MINIMAX)
+    assert KEY not in str(err)
+
+
+def test_base_resp_ignored_without_quirk() -> None:
+    body = {**OK_BODY, "base_resp": {"status_code": 1002, "status_msg": "rate limit"}}
+    with _provider(Script(body)) as p:
+        assert p.complete(HISTORY).text == "hoi"

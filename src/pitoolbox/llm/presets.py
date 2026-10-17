@@ -33,6 +33,8 @@ class Quirk(StrEnum):
     TOOL_CALL_EXTRA_CONTENT = "tool_call_extra_content"
     # Mistral: `content` als lijst (thinking + tekst) ongewijzigd terugsturen.
     CONTENT_PARTS = "content_parts"
+    # MiniMax: fouten staan als `base_resp.status_code` in een HTTP 200-antwoord.
+    BASE_RESP = "base_resp"
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,11 @@ _PRESET_LIST = (
     ProviderPreset("glm", _COMPAT, "https://api.z.ai/api/paas/v4", True),
     # https://platform.minimax.io/docs/guides/text-m3-function-call.md ("For international
     # users, use https://api.minimax.io/v1; for users in China, use https://api.minimax.cn/v1").
-    ProviderPreset("minimax", _COMPAT, "https://api.minimax.io/v1", True),
+    # Quirk: https://platform.minimax.io/docs/api-reference/text-chat-openai (alleen een
+    # 200-antwoord gedocumenteerd, met `base_resp` "Error status code and details").
+    ProviderPreset(
+        "minimax", _COMPAT, "https://api.minimax.io/v1", True, frozenset({Quirk.BASE_RESP})
+    ),
     # https://docs.mistral.ai/openapi.yaml (server https://api.mistral.ai, pad
     # /v1/chat/completions).
     # Quirk: https://docs.mistral.ai/studio-api/conversations/reasoning ("message.content is a

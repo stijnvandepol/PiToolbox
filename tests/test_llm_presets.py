@@ -161,6 +161,7 @@ def test_quirk_flags_per_preset() -> None:
     assert with_quirks == {
         "gemini": frozenset({Quirk.TOOL_CALL_EXTRA_CONTENT}),
         "mistral": frozenset({Quirk.CONTENT_PARTS}),
+        "minimax": frozenset({Quirk.BASE_RESP}),
     }
 
 
