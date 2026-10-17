@@ -17,6 +17,7 @@ from pitoolbox.core.tools import build_registry
 from pitoolbox.core.tools.base import ToolContext
 from pitoolbox.core.tools.runner import ToolRunner
 from pitoolbox.frontends import agent_cli
+from pitoolbox.llm.presets import PRESETS
 
 IR_POWER = {"device": "tv", "button": "Power"}
 
@@ -91,6 +92,39 @@ def test_no_provider_exits_2(
     assert agent_cli.main([]) == 2
     err = capsys.readouterr().err
     assert "Geen LLM-provider ingesteld" in err and "PITOOLBOX_LLM_PROVIDER" in err
+
+
+def test_list_providers_needs_no_config(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for name in [n for n in os.environ if n.startswith("PITOOLBOX_LLM_")]:
+        monkeypatch.delenv(name)
+
+    def no_build(_settings: Any) -> Any:
+        raise AssertionError("--list-providers bouwt geen provider of runner")
+
+    monkeypatch.setattr(agent_cli, "build_provider", no_build)
+    monkeypatch.setattr(agent_cli, "build_runner", no_build)
+    assert agent_cli.main(["--list-providers"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    for preset in PRESETS.values():
+        row = next(line for line in lines if line.startswith(preset.name + " "))
+        assert preset.kind.value in row
+        assert (preset.base_url or "PITOOLBOX_LLM_BASE_URL") in row
+        assert ("verplicht" if preset.requires_key else "optioneel") in row
+    assert any("moonshot = kimi" in line for line in lines)
+
+
+def test_unknown_provider_exits_2_and_lists_names(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("PITOOLBOX_LLM_PROVIDER", "deepsek")
+    monkeypatch.setenv("PITOOLBOX_LLM_MODEL", "voorbeeld-model")
+    monkeypatch.setenv("PITOOLBOX_LLM_API_KEY", "sk-test-geheim-1234567890")
+    assert agent_cli.main([]) == 2
+    err = capsys.readouterr().err
+    assert "deepseek" in err and "ollama" in err and "--list-providers" in err
+    assert "sk-test-geheim-1234567890" not in err
 
 
 def test_invalid_agent_setting_exits_2(
