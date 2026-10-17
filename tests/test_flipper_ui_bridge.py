@@ -525,7 +525,8 @@ def test_chat_confirm_allowed_again_after_app_closes(lab: Lab) -> None:
     )
     lab.fake.fap_exits()  # de gebruiker sluit de app
     assert wait_until(lambda: lab.store.physical_confirmer is None)
-    assert lab.bridge.state is BridgeState.IDLE
+    # Eerst gaat de lease los, daarna pas de toestand naar IDLE.
+    assert wait_until(lambda: lab.bridge.state is BridgeState.IDLE)
     # Het OK dat nog "onderweg" was, telt niet meer: de app is weg.
     ok = lab.runner.call("mcp", CONFIRM_TOOL, {"pending_id": raw["pending_id"]})
     assert ok["ok"] is True, ok
