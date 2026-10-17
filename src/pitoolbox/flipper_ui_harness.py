@@ -194,8 +194,11 @@ class _Timeline:
     def render(self) -> str:
         rows = []
         prev = self.started
+        width = max((len(label) for label, _ in self.steps), default=0)
         for label, at in self.steps:
-            rows.append(f"  {label:<44} +{at - prev:6.2f} s  (totaal {at - self.started:6.2f} s)")
+            rows.append(
+                f"  {label:<{width}} +{at - prev:6.2f} s  (totaal {at - self.started:6.2f} s)"
+            )
             prev = at
         return "\n".join(rows)
 

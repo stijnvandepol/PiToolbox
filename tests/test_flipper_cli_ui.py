@@ -363,6 +363,9 @@ def test_ui_test_confirm_check_ok_then_back(
     ):
         assert label in out
     assert "druk nu OK" in out and "druk nu Back" in out and "Rooktest geslaagd" in out
+    # De tijdkolom staat onder elkaar, ook met het langste label.
+    timeline = [line for line in out.splitlines() if "(totaal" in line]
+    assert len({line.index("(totaal") for line in timeline}) == 1
     # De Flipper hoorde wat er gebeurde: OK = mislukt (geweigerd door de policy), Back = nee.
     reasons = [m.reason for m in lab.fap.of_type(proto.ConfirmClosed)]
     assert reasons == [proto.CloseReason.FAILED, proto.CloseReason.REJECTED]
