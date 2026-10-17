@@ -556,7 +556,7 @@ Alles hieronder is alleen getest tegen nagebootste apparaten, behalve wat in [St
 
 **Flipper (USB)**
 - [x] `system_info` geeft `firmware_origin_fork`, en het juiste CLI-profiel wordt gekozen (`momentum`)
-- [ ] `storage_list /ext` en `storage_read` van een klein `.ir`-bestand werken
+- [x] `storage_list /ext` en `storage_read` van een klein `.ir`-bestand werken (2026-10-17: `/ext/infrared`, `Samsung.ir`)
 - [x] Omschakelen RPC ↔ CLI en terug, meerdere keren achter elkaar (bijv. `system_info` → `rfid_read` → `system_info`)
 - [ ] `subghz_rx` op 433.92 MHz met een eigen afstandsbediening: klopt `packet_count`, en worden pakketten goed gesplitst? (de splitsheuristiek is niet uit de bron geverifieerd)
 - [ ] `rfid_read` met een eigen tag: protocol, hex en infotekst
