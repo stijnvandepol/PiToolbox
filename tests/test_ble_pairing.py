@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from pitoolbox.core.devices import _ble_pairing as bp
+from pitoolbox.core.devices import _bluez_agent, _bluez_fastbus
 
 ADAPTER = "/org/bluez/hci0"
 ADDR = "AA:BB:CC:DD:EE:FF"
@@ -500,7 +501,7 @@ def test_sync_wrappers_use_the_bus_factory() -> None:
 
 
 async def test_real_bus_refuses_clearly_on_non_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bp, "sys", types.SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(_bluez_fastbus, "sys", types.SimpleNamespace(platform="win32"))
     with pytest.raises(bp.BlePairingError, match="alleen op Linux"):
         await bp.pair_async(ADDR, lambda: 1, 1.0)
     with pytest.raises(bp.BlePairingError, match="alleen op Linux"):
@@ -510,7 +511,7 @@ async def test_real_bus_refuses_clearly_on_non_linux(monkeypatch: pytest.MonkeyP
 def test_agent_interface_matches_bluez_signatures() -> None:
     """Alleen met dbus-fast (Linux): de gepubliceerde methoden volgen Agent.rst."""
     pytest.importorskip("dbus_fast")
-    iface = bp._build_agent_interface(make_agent())
+    iface = _bluez_agent._build_agent_interface(make_agent())
     assert iface.name == "org.bluez.Agent1"
     xml = iface.introspect().to_xml()
     methods = {

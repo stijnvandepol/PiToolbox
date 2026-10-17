@@ -38,163 +38,101 @@ Bronnen (alles hieronder is daaruit afgeleid):
 dbus-fast is alleen op Linux geinstalleerd (bleak-afhankelijkheid, marker sys_platform ==
 'linux'); daarom wordt het pas bij gebruik geimporteerd (importlib, zodat mypy/ruff ook op Windows
 schoon zijn). Alle logica praat tegen het kleine `BluezBus`-protocol, dat tests volledig faken.
+
+Opbouw: `_bluez_dbus` (namen, foutmeldingen, `BluezBus`, opzoekingen), `_bluez_agent` (de agent),
+`_bluez_fastbus` (de echte bus op dbus-fast), `_bluez_devices` (bekende apparaten, ontkoppelen,
+verbreken) en hier het koppelen zelf. Andere code importeert alles uit deze module.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib
 import logging
-import re
-import sys
-import threading
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
 
-from pitoolbox.core.errors import DeviceError
-from pitoolbox.core.scope import normalize_mac
+from pitoolbox.core.devices._bluez_agent import AgentRejected, PairingAgent
+from pitoolbox.core.devices._bluez_dbus import (
+    ADAPTER_IFACE,
+    AGENT_CAPABILITY,
+    AGENT_IFACE,
+    AGENT_MANAGER_IFACE,
+    AGENT_PATH,
+    BLUEZ_SERVICE,
+    DEVICE_IFACE,
+    ERR_CANCELED,
+    ERR_REJECTED,
+    PROPERTIES_IFACE,
+    ROOT_PATH,
+    BlePairingError,
+    BluezBus,
+    BluezDBusError,
+    BusFactory,
+    ManagedObjects,
+    _adapter_arg,
+    _call,
+    _mac,
+    adapter_path,
+    describe_bluez_error,
+    find_adapter,
+    find_device,
+    normalize_adapter,
+)
+from pitoolbox.core.devices._bluez_devices import (
+    PairedDevice,
+    _as_paired_device,
+    disconnect,
+    disconnect_async,
+    list_devices,
+    list_devices_async,
+    paired_devices,
+    paired_devices_async,
+    unpair,
+    unpair_async,
+)
+from pitoolbox.core.devices._bluez_fastbus import connect_bus
+
+__all__ = [
+    "ADAPTER_IFACE",
+    "AGENT_CAPABILITY",
+    "AGENT_IFACE",
+    "AGENT_MANAGER_IFACE",
+    "AGENT_PATH",
+    "BLUEZ_SERVICE",
+    "DEVICE_IFACE",
+    "ERR_CANCELED",
+    "ERR_REJECTED",
+    "PROPERTIES_IFACE",
+    "ROOT_PATH",
+    "AgentRejected",
+    "BlePairingError",
+    "BluezBus",
+    "BluezDBusError",
+    "BusFactory",
+    "ManagedObjects",
+    "PairResult",
+    "PairedDevice",
+    "PairingAgent",
+    "adapter_path",
+    "connect_bus",
+    "describe_bluez_error",
+    "disconnect",
+    "disconnect_async",
+    "find_adapter",
+    "find_device",
+    "list_devices",
+    "list_devices_async",
+    "normalize_adapter",
+    "pair",
+    "pair_async",
+    "paired_devices",
+    "paired_devices_async",
+    "unpair",
+    "unpair_async",
+]
 
 log = logging.getLogger(__name__)
-
-T = TypeVar("T")
-
-BLUEZ_SERVICE = "org.bluez"
-ROOT_PATH = "/org/bluez"
-ADAPTER_IFACE = "org.bluez.Adapter1"
-DEVICE_IFACE = "org.bluez.Device1"
-AGENT_IFACE = "org.bluez.Agent1"
-AGENT_MANAGER_IFACE = "org.bluez.AgentManager1"
-PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
-
-# Object-pad van onze tijdelijke agent ("freely definable", Agent.rst).
-AGENT_PATH = "/nl/pitoolbox/PairingAgent"
-# Zie de module-docstring: de Flipper toont de code, wij voeren hem in.
-AGENT_CAPABILITY = "KeyboardOnly"
-
-ERR_REJECTED = "org.bluez.Error.Rejected"
-ERR_CANCELED = "org.bluez.Error.Canceled"
-
-# {object path: {interface: {property: waarde}}} zoals GetManagedObjects (varianten uitgepakt).
-ManagedObjects = dict[str, dict[str, dict[str, Any]]]
-
-# Adapternamen zoals BlueZ/de kernel ze geven (hci0, hci1, ...); zie de module-docstring.
-_ADAPTER_NAME_RE = re.compile(r"hci[0-9]{1,3}")
-
-
-def normalize_adapter(value: str | None) -> str | None:
-    """Controleer een adapternaam (`hciN`); leeg of None = de standaardadapter van BlueZ.
-
-    Raises:
-        ValueError: geen geldige naam (er wordt nooit een willekeurig D-Bus-pad doorgegeven).
-    """
-    if value is None or not value.strip():
-        return None
-    name = value.strip()
-    if not _ADAPTER_NAME_RE.fullmatch(name):
-        raise ValueError(f"ongeldige Bluetooth-adapter {value!r} (verwacht hciN, bijv. hci1)")
-    return name
-
-
-def adapter_path(adapter: str) -> str:
-    return f"{ROOT_PATH}/{adapter}"
-
-
-# --- fouten ------------------------------------------------------------------------------
-
-
-class BlePairingError(DeviceError):
-    """Koppelen/ontkoppelen mislukt; `str(exc)` is een bruikbare Nederlandse melding."""
-
-    code = "ble_pairing_error"
-
-    def __init__(self, message: str, *, dbus_error: str | None = None) -> None:
-        super().__init__(message)
-        self.dbus_error = dbus_error
-
-
-class BluezDBusError(Exception):
-    """Een D-Bus-foutantwoord van BlueZ (of van de bus zelf), zonder dbus-fast-types."""
-
-    def __init__(self, name: str, text: str = "") -> None:
-        super().__init__(f"{name}: {text}" if text else name)
-        self.name = name
-        self.text = text
-
-
-class AgentRejected(Exception):
-    """Door de agent te weigeren aanvraag; wordt een D-Bus-fout met `error_name`."""
-
-    def __init__(self, error_name: str, text: str) -> None:
-        super().__init__(text)
-        self.error_name = error_name
-        self.text = text
-
-
-# Foutnamen uit de BlueZ-docs (Device.rst `Pair()`, Adapter.rst, AgentManager.rst) en de
-# standaardfouten van de D-Bus-daemon, vertaald naar een melding met de eerstvolgende stap.
-_ERRORS: dict[str, str] = {
-    "org.bluez.Error.AuthenticationFailed": (
-        "Koppelen mislukt: authenticatie mislukt. Klopt de code van het Flipper-scherm? Staat er "
-        "een oude koppeling op de Flipper of op de Pi, dan klopt de sleutel niet meer: verwijder "
-        "de koppeling aan beide kanten ('ble-unpair' hier, op de Flipper Settings > Bluetooth > "
-        "Unpair All Devices) en probeer opnieuw."
-    ),
-    "org.bluez.Error.AuthenticationCanceled": (
-        "Koppelen afgebroken (geen of geannuleerde code). Start 'ble-pair' opnieuw en voer de code "
-        "in zodra die op de Flipper staat."
-    ),
-    "org.bluez.Error.AuthenticationRejected": (
-        "De Flipper heeft het koppelen geweigerd. Staat Bluetooth aan (Settings > Bluetooth) en "
-        "is de Flipper niet al gekoppeld aan een telefoon of andere host?"
-    ),
-    "org.bluez.Error.AuthenticationTimeout": (
-        "Koppelen mislukt: time-out tijdens de authenticatie. Voer de code sneller in (de "
-        "Flipper wacht maar beperkt) en probeer opnieuw."
-    ),
-    "org.bluez.Error.ConnectionAttemptFailed": (
-        "Geen verbinding met de Flipper. Staat Bluetooth aan, ligt hij binnen bereik en is hij "
-        "niet verbonden met een telefoon (de officiele Flipper-app houdt de enige BLE-verbinding "
-        "vast)?"
-    ),
-    "org.bluez.Error.AlreadyExists": (
-        "Al gekoppeld of er loopt al een koppeling. Wil je opnieuw koppelen: eerst 'ble-unpair "
-        "<adres>' en op de Flipper 'Unpair All Devices'."
-    ),
-    "org.bluez.Error.InProgress": (
-        "Er loopt al een koppel- of verbindingspoging. Wacht even of herstart de bluetooth-service."
-    ),
-    "org.bluez.Error.NotReady": (
-        "De Bluetooth-adapter is niet klaar of staat uit (probeer 'rfkill unblock bluetooth' en "
-        "controleer 'systemctl status bluetooth')."
-    ),
-    "org.bluez.Error.DoesNotExist": "Het Bluetooth-apparaat is niet (meer) bekend bij BlueZ.",
-    "org.bluez.Error.NotAuthorized": (
-        "Geen rechten voor deze Bluetooth-actie. Zit de gebruiker in de groep 'bluetooth'?"
-    ),
-    "org.bluez.Error.InvalidArguments": "BlueZ weigert de aanvraag (ongeldige argumenten).",
-    "org.bluez.Error.Failed": "BlueZ meldde een algemene fout (Failed).",
-    "org.freedesktop.DBus.Error.AccessDenied": (
-        "De D-Bus-policy weigert toegang tot BlueZ. Zit de gebruiker in de groep 'bluetooth'?"
-    ),
-    "org.freedesktop.DBus.Error.ServiceUnknown": (
-        "BlueZ (org.bluez) draait niet. Start de service: 'sudo systemctl enable --now bluetooth'."
-    ),
-    "org.freedesktop.DBus.Error.NoReply": (
-        "BlueZ antwoordde niet op tijd (time-out op de D-Bus-aanroep)."
-    ),
-}
-
-
-def describe_bluez_error(error: BluezDBusError, context: str = "") -> str:
-    """Nederlandse melding bij een D-Bus-fout; onbekende fouten krijgen naam en tekst mee."""
-    base = _ERRORS.get(error.name)
-    if base is None:
-        base = f"Bluetooth-fout {error.name}" + (f": {error.text}" if error.text else "")
-    elif error.name == "org.bluez.Error.Failed" and error.text:
-        base = f"{base[:-1]}: {error.text}"
-    return f"{context}: {base}" if context else base
 
 
 # --- resultaattypes ----------------------------------------------------------------------
@@ -209,454 +147,6 @@ class PairResult:
     paired: bool
     bonded: bool
     trusted: bool
-
-
-@dataclass(frozen=True)
-class PairedDevice:
-    address: str
-    name: str | None
-    paired: bool
-    bonded: bool
-    trusted: bool
-    connected: bool
-
-
-# --- het bus-protocol (volledig te faken) ------------------------------------------------
-
-
-class BluezBus(Protocol):
-    """Dunne laag over dbus-fast; alles wat deze module van D-Bus nodig heeft."""
-
-    async def call(
-        self,
-        path: str,
-        interface: str,
-        member: str,
-        signature: str = "",
-        body: Sequence[Any] = (),
-    ) -> list[Any]:
-        """Methodeaanroep op org.bluez; geeft de body terug, of gooit `BluezDBusError`."""
-        ...
-
-    async def get_managed_objects(self) -> ManagedObjects: ...
-
-    async def set_property(
-        self, path: str, interface: str, name: str, signature: str, value: Any
-    ) -> None: ...
-
-    async def get_property(self, path: str, interface: str, name: str) -> Any:
-        """org.freedesktop.DBus.Properties.Get, uitgepakt; gooit `BluezDBusError`."""
-        ...
-
-    def export_agent(self, path: str, agent: PairingAgent) -> None: ...
-
-    def unexport_agent(self, path: str) -> None: ...
-
-    async def close(self) -> None: ...
-
-
-BusFactory = Callable[[], Awaitable[BluezBus]]
-
-
-# --- de agent --------------------------------------------------------------------------
-
-
-async def _call_in_daemon_thread(fn: Callable[[], T], timeout: float | None) -> T:
-    """Draai een blokkerende aanroep (bijv. `input()`) in een daemon-thread.
-
-    Bewust geen `run_in_executor`: `asyncio.run` wacht bij het afsluiten op de threads van de
-    standaard-executor, waardoor het proces bleef hangen tot de gebruiker op Enter drukte nadat
-    de koppeling al was afgebroken. Een daemon-thread blokkeert het afsluiten niet.
-    """
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future[T] = loop.create_future()
-
-    def _set_result(value: T) -> None:
-        if not fut.done():
-            fut.set_result(value)
-
-    def _set_exception(exc: Exception) -> None:
-        if not fut.done():
-            fut.set_exception(exc)
-
-    def runner() -> None:
-        try:
-            value = fn()
-        except Exception as exc:  # noqa: BLE001 - elke fout van de provider naar de event loop
-            with contextlib.suppress(RuntimeError):  # loop al gesloten
-                loop.call_soon_threadsafe(_set_exception, exc)
-        else:
-            with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(_set_result, value)
-
-    threading.Thread(target=runner, daemon=True, name="ble-passkey-prompt").start()
-    return await asyncio.wait_for(fut, timeout)
-
-
-class PairingAgent:
-    """Logica van de org.bluez.Agent1-agent; los van dbus-fast, dus eenvoudig te testen.
-
-    Alleen het apparaat dat we zelf koppelen (`target_path`) wordt bediend; elk ander apparaat
-    en elk onverwacht verzoek krijgt org.bluez.Error.Rejected (Agent.rst: `Possible errors`).
-    De code zelf wordt nooit gelogd.
-    """
-
-    def __init__(
-        self,
-        target_path: str,
-        passkey_provider: Callable[[], int],
-        *,
-        provider_timeout: float | None = None,
-    ) -> None:
-        self._target = target_path
-        self._provider = passkey_provider
-        self._timeout = provider_timeout
-        self.passkey_requested = False
-        self.cancelled = False
-        self.released = False
-
-    def _check_target(self, device: str) -> None:
-        if device != self._target:
-            log.warning("agent weigert verzoek voor onverwacht apparaat %s", device)
-            raise AgentRejected(ERR_REJECTED, "onverwacht apparaat")
-
-    async def request_passkey(self, device: str) -> int:
-        """`uint32 RequestPasskey(object device)`: de code die de gebruiker intikt (0..999999)."""
-        self._check_target(device)
-        self.passkey_requested = True
-        try:
-            value = await _call_in_daemon_thread(self._provider, self._timeout)
-        except TimeoutError as exc:
-            raise AgentRejected(ERR_CANCELED, "geen code ingevoerd binnen de tijd") from exc
-        except Exception as exc:  # EOF of een fout in de provider
-            raise AgentRejected(ERR_CANCELED, "code-invoer afgebroken") from exc
-        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 999_999:
-            raise AgentRejected(ERR_REJECTED, "ongeldige code (verwacht 0..999999)")
-        return value
-
-    def request_confirmation(self, device: str, passkey: int) -> None:
-        """Numerieke vergelijking verwachten we niet (KeyboardOnly): altijd weigeren."""
-        raise AgentRejected(ERR_REJECTED, "numerieke bevestiging niet ondersteund")
-
-    def display_passkey(self, device: str, passkey: int, entered: int) -> None:
-        """Alleen een weergaveverzoek (lege reactie volgens de docs); we tonen niets."""
-        self._check_target(device)
-
-    def request_authorization(self, device: str) -> None:
-        """Just-works-verzoek: alleen voor het apparaat dat de gebruiker zelf koos."""
-        self._check_target(device)
-
-    def authorize_service(self, device: str, uuid: str) -> None:
-        """Dienstautorisatie (BR/EDR-profielen): alleen voor het gekozen apparaat."""
-        self._check_target(device)
-
-    def request_pin_code(self, device: str) -> str:
-        """Legacy-PIN (pre-2.1): niet ondersteund."""
-        raise AgentRejected(ERR_REJECTED, "legacy PIN-koppeling niet ondersteund")
-
-    def display_pin_code(self, device: str, pincode: str) -> None:
-        raise AgentRejected(ERR_REJECTED, "legacy PIN-koppeling niet ondersteund")
-
-    def cancel(self) -> None:
-        """`Cancel()`: BlueZ trok de aanvraag in voor er een antwoord was."""
-        self.cancelled = True
-
-    def release(self) -> None:
-        """`Release()`: bluetoothd heeft de agent al afgemeld (geen UnregisterAgent nodig)."""
-        self.released = True
-
-
-def _build_agent_interface(agent: PairingAgent) -> Any:
-    """Maak het dbus-fast `ServiceInterface`-object voor org.bluez.Agent1.
-
-    De klasse wordt dynamisch gebouwd omdat dbus-fast niet op elk platform bestaat en omdat
-    dbus-fast de D-Bus-signatuur uit `__annotations__` leest: met `from __future__ import
-    annotations` zouden dat Python-typenamen zijn, dus zetten we de signaturen expliciet
-    (documentatie: dbus_method-decorator, "must each be annotated with a signature string").
-    """
-    service = importlib.import_module("dbus_fast.service")
-    errors = importlib.import_module("dbus_fast.errors")
-
-    def rejected(exc: AgentRejected) -> Exception:
-        return errors.DBusError(exc.error_name, exc.text)  # type: ignore[no-any-return]
-
-    def sig(fn: Callable[..., Any], **annotations: str) -> Callable[..., Any]:
-        fn.__annotations__ = dict(annotations)
-        return fn
-
-    async def request_passkey(self: Any, device: str) -> int:
-        try:
-            return await agent.request_passkey(device)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def request_confirmation(self: Any, device: str, passkey: int) -> None:
-        try:
-            agent.request_confirmation(device, passkey)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def display_passkey(self: Any, device: str, passkey: int, entered: int) -> None:
-        try:
-            agent.display_passkey(device, passkey, entered)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def request_authorization(self: Any, device: str) -> None:
-        try:
-            agent.request_authorization(device)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def authorize_service(self: Any, device: str, uuid: str) -> None:
-        try:
-            agent.authorize_service(device, uuid)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def request_pin_code(self: Any, device: str) -> str:
-        try:
-            return agent.request_pin_code(device)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def display_pin_code(self: Any, device: str, pincode: str) -> None:
-        try:
-            agent.display_pin_code(device, pincode)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
-
-    def cancel(self: Any) -> None:
-        agent.cancel()
-
-    def release(self: Any) -> None:
-        agent.release()
-
-    dbus_method = service.dbus_method
-    members: dict[str, Any] = {
-        "RequestPasskey": dbus_method(name="RequestPasskey")(
-            sig(request_passkey, device="o", **{"return": "u"})
-        ),
-        "RequestConfirmation": dbus_method(name="RequestConfirmation")(
-            sig(request_confirmation, device="o", passkey="u")
-        ),
-        "DisplayPasskey": dbus_method(name="DisplayPasskey")(
-            sig(display_passkey, device="o", passkey="u", entered="q")
-        ),
-        "RequestAuthorization": dbus_method(name="RequestAuthorization")(
-            sig(request_authorization, device="o")
-        ),
-        "AuthorizeService": dbus_method(name="AuthorizeService")(
-            sig(authorize_service, device="o", uuid="s")
-        ),
-        "RequestPinCode": dbus_method(name="RequestPinCode")(
-            sig(request_pin_code, device="o", **{"return": "s"})
-        ),
-        "DisplayPinCode": dbus_method(name="DisplayPinCode")(
-            sig(display_pin_code, device="o", pincode="s")
-        ),
-        "Cancel": dbus_method(name="Cancel")(sig(cancel)),
-        "Release": dbus_method(name="Release")(sig(release)),
-    }
-    cls = type("PitoolboxPairingAgent", (service.ServiceInterface,), members)
-    return cls(AGENT_IFACE)
-
-
-# --- echte bus (dbus-fast) --------------------------------------------------------------
-
-
-class _DbusFastBus:
-    """`BluezBus` bovenop dbus_fast.aio.MessageBus (system bus)."""
-
-    def __init__(self, bus: Any, modules: dict[str, Any]) -> None:
-        self._bus = bus
-        self._m = modules
-
-    @classmethod
-    async def connect(cls) -> _DbusFastBus:
-        if sys.platform != "linux":
-            raise BlePairingError(
-                "Bluetooth-koppeling werkt alleen op Linux met BlueZ (de Raspberry Pi); "
-                f"dit is {sys.platform}."
-            )
-        try:
-            modules = {
-                "aio": importlib.import_module("dbus_fast.aio"),
-                "constants": importlib.import_module("dbus_fast.constants"),
-                "message": importlib.import_module("dbus_fast.message"),
-                "signature": importlib.import_module("dbus_fast.signature"),
-                "root": importlib.import_module("dbus_fast"),
-            }
-        except ImportError as exc:
-            raise BlePairingError(
-                "dbus-fast is niet geinstalleerd (komt mee met bleak op Linux): draai 'uv sync'."
-            ) from exc
-        try:
-            bus = (
-                await modules["aio"]
-                .MessageBus(bus_type=modules["constants"].BusType.SYSTEM)
-                .connect()
-            )
-        except Exception as exc:  # socket-, auth- en policy-fouten van dbus-fast
-            raise BlePairingError(
-                f"Geen verbinding met de system D-Bus ({exc}). Draait dbus en BlueZ?"
-            ) from exc
-        return cls(bus, modules)
-
-    async def call(
-        self,
-        path: str,
-        interface: str,
-        member: str,
-        signature: str = "",
-        body: Sequence[Any] = (),
-    ) -> list[Any]:
-        message = self._m["message"].Message(
-            destination=BLUEZ_SERVICE,
-            path=path,
-            interface=interface,
-            member=member,
-            signature=signature,
-            body=list(body),
-        )
-        reply = await self._bus.call(message)
-        if reply.message_type == self._m["constants"].MessageType.ERROR:
-            text = str(reply.body[0]) if reply.body else ""
-            raise BluezDBusError(reply.error_name or "org.bluez.Error.Failed", text)
-        return list(reply.body)
-
-    async def get_managed_objects(self) -> ManagedObjects:
-        body = await self.call("/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects")
-        unpacked: ManagedObjects = self._m["root"].unpack_variants(body[0])
-        return unpacked
-
-    async def set_property(
-        self, path: str, interface: str, name: str, signature: str, value: Any
-    ) -> None:
-        variant = self._m["signature"].Variant(signature, value)
-        await self.call(path, PROPERTIES_IFACE, "Set", "ssv", [interface, name, variant])
-
-    async def get_property(self, path: str, interface: str, name: str) -> Any:
-        body = await self.call(path, PROPERTIES_IFACE, "Get", "ss", [interface, name])
-        return self._m["root"].unpack_variants(body[0])
-
-    def export_agent(self, path: str, agent: PairingAgent) -> None:
-        self._bus.export(path, _build_agent_interface(agent))
-
-    def unexport_agent(self, path: str) -> None:
-        self._bus.unexport(path)
-
-    async def close(self) -> None:
-        self._bus.disconnect()
-        with contextlib.suppress(Exception):
-            await self._bus.wait_for_disconnect()
-
-
-def _adapter_arg(adapter: str | None) -> str | None:
-    try:
-        return normalize_adapter(adapter)
-    except ValueError as exc:
-        raise BlePairingError(str(exc)) from exc
-
-
-async def connect_bus(bus_factory: BusFactory | None = None) -> BluezBus:
-    """De system bus via `bus_factory`, anders dbus-fast; gooit `BlePairingError`."""
-    if bus_factory is not None:
-        return await bus_factory()
-    return await _DbusFastBus.connect()
-
-
-# --- hulpfuncties op ManagedObjects ------------------------------------------------------
-
-
-def _mac(address: str) -> str:
-    try:
-        return normalize_mac(address)
-    except ValueError as exc:
-        raise BlePairingError(
-            f"Ongeldig Bluetooth-adres: {address!r} (verwacht AA:BB:CC:DD:EE:FF)"
-        ) from exc
-
-
-def find_adapter(objects: ManagedObjects, adapter: str | None = None) -> str:
-    """Objectpad van de adapter: de opgegeven `hciN`, anders de eerste ingeschakelde (zoals bleak:
-    manager.get_default_adapter). Een adapter die BlueZ niet kent of die uit staat is een fout
-    met de namen die er wel zijn."""
-    adapters = sorted(path for path, ifaces in objects.items() if ADAPTER_IFACE in ifaces)
-    known = ", ".join(path.rsplit("/", 1)[-1] for path in adapters) or "geen"
-    if adapter is not None:
-        path = adapter_path(adapter)
-        if path not in adapters:
-            raise BlePairingError(
-                f"Bluetooth-adapter {adapter} bestaat niet in BlueZ (bekend: {known}). Controleer "
-                "PITOOLBOX_FLIPPER_BLE_ADAPTER of --adapter en 'bluetoothctl list'; een adapter "
-                "waarvan de firmware niet start (dmesg) ziet BlueZ niet."
-            )
-        if not objects[path][ADAPTER_IFACE].get("Powered", False):
-            raise BlePairingError(
-                f"Bluetooth-adapter {adapter} staat uit. Zet hem aan met 'rfkill unblock "
-                "bluetooth' en 'bluetoothctl power on'."
-            )
-        return path
-    if not adapters:
-        raise BlePairingError(
-            "Geen Bluetooth-adapter gevonden in BlueZ (controleer 'bluetoothctl list' en of de "
-            "bluetooth-service draait)."
-        )
-    for path in adapters:
-        if objects[path][ADAPTER_IFACE].get("Powered", False):
-            return path
-    raise BlePairingError(
-        "De Bluetooth-adapter staat uit. Zet hem aan met 'rfkill unblock bluetooth' en "
-        "'bluetoothctl power on'."
-    )
-
-
-def _devices(objects: ManagedObjects) -> list[tuple[str, dict[str, Any]]]:
-    return [
-        (path, ifaces[DEVICE_IFACE])
-        for path, ifaces in sorted(objects.items())
-        if DEVICE_IFACE in ifaces
-    ]
-
-
-def find_device(objects: ManagedObjects, mac: str, adapter: str | None = None) -> str | None:
-    """Devicepad van `mac` (hoofdletters), optioneel alleen onder adapterpad `adapter`."""
-    for path, props in _devices(objects):
-        if str(props.get("Address", "")).upper() != mac:
-            continue
-        if adapter is not None and props.get("Adapter", adapter) != adapter:
-            continue
-        return path
-    return None
-
-
-def _as_paired_device(props: dict[str, Any]) -> PairedDevice:
-    name = props.get("Alias") or props.get("Name")
-    return PairedDevice(
-        address=str(props.get("Address", "")).upper(),
-        name=str(name) if name else None,
-        paired=bool(props.get("Paired", False)),
-        bonded=bool(props.get("Bonded", False)),
-        trusted=bool(props.get("Trusted", False)),
-        connected=bool(props.get("Connected", False)),
-    )
-
-
-async def _call(
-    bus: BluezBus,
-    context: str,
-    path: str,
-    interface: str,
-    member: str,
-    signature: str = "",
-    body: Sequence[Any] = (),
-) -> list[Any]:
-    """`bus.call` met vertaling van D-Bus-fouten naar `BlePairingError`."""
-    try:
-        return await bus.call(path, interface, member, signature, body)
-    except BluezDBusError as exc:
-        raise BlePairingError(describe_bluez_error(exc, context), dbus_error=exc.name) from exc
 
 
 async def _resolve_device(
@@ -836,103 +326,6 @@ async def pair_async(
             await bus.close()
 
 
-async def unpair_async(
-    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
-) -> bool:
-    """Verwijder het apparaat en zijn bonding uit BlueZ (Adapter1.RemoveDevice).
-
-    Geeft False terug als het apparaat niet bekend was (er viel niets te verwijderen). Met
-    `adapter` alleen het apparaat onder die adapter.
-    """
-    mac = _mac(address)
-    adapter = _adapter_arg(adapter)
-    bus = await connect_bus(bus_factory)
-    try:
-        objects = await bus.get_managed_objects()
-        only = find_adapter(objects, adapter) if adapter is not None else None
-        path = find_device(objects, mac, only)
-        if path is None:
-            return False
-        owner = str(objects[path][DEVICE_IFACE].get("Adapter") or find_adapter(objects))
-        await _call(bus, "Ontkoppelen", owner, ADAPTER_IFACE, "RemoveDevice", "o", [path])
-        return True
-    finally:
-        with contextlib.suppress(Exception):
-            await bus.close()
-
-
-async def disconnect_async(
-    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
-) -> bool:
-    """Verbreek de BLE-link met een apparaat (Device1.Disconnect; Device.rst: "Disconnects all
-    connected profiles and then terminates low-level ACL connection"). De bonding blijft staan.
-
-    Geeft False als het apparaat niet bekend of niet verbonden was. Werkt zonder root met de
-    D-Bus-policy van BlueZ (groep `bluetooth`), net als koppelen. Bedoeld voor de valtest
-    (`pitoolbox-flipper ui-droptest`); het proces dat de link had, ziet een gewone verbreking.
-    """
-    mac = _mac(address)
-    adapter = _adapter_arg(adapter)
-    bus = await connect_bus(bus_factory)
-    try:
-        objects = await bus.get_managed_objects()
-        only = find_adapter(objects, adapter) if adapter is not None else None
-        path = find_device(objects, mac, only)
-        if path is None or not objects[path][DEVICE_IFACE].get("Connected", False):
-            return False
-        await _call(bus, "Verbinding verbreken", path, DEVICE_IFACE, "Disconnect")
-        return True
-    finally:
-        with contextlib.suppress(Exception):
-            await bus.close()
-
-
-async def list_devices_async(
-    prefix: str = "",
-    *,
-    only_paired: bool = True,
-    bus_factory: BusFactory | None = None,
-    adapter: str | None = None,
-    service_uuids: Collection[str] = (),
-) -> list[PairedDevice]:
-    """Door BlueZ gekende apparaten waarvan de naam met `prefix` begint (hoofdletterongevoelig),
-    of die een van `service_uuids` in hun `UUIDs`-property hebben (Device.rst: "List of 128-bit
-    UUIDs that represents the available remote services"); zo vind je ook een hernoemde Flipper.
-
-    Met `adapter` alleen de apparaten onder die adapter (die moet dan bestaan).
-    """
-    adapter = _adapter_arg(adapter)
-    bus = await connect_bus(bus_factory)
-    try:
-        objects = await bus.get_managed_objects()
-    finally:
-        with contextlib.suppress(Exception):
-            await bus.close()
-    only = find_adapter(objects, adapter) if adapter is not None else None
-    wanted = prefix.casefold()
-    uuids = {u.lower() for u in service_uuids}
-    result = []
-    for _path, props in _devices(objects):
-        if only is not None and props.get("Adapter", only) != only:
-            continue
-        device = _as_paired_device(props)
-        if only_paired and not (device.paired or device.bonded):
-            continue
-        by_uuid = bool(uuids & {str(u).lower() for u in props.get("UUIDs", ())})
-        if wanted and not by_uuid and not (device.name or "").casefold().startswith(wanted):
-            continue
-        result.append(device)
-    return result
-
-
-async def paired_devices_async(
-    prefix: str = "", *, bus_factory: BusFactory | None = None, adapter: str | None = None
-) -> list[PairedDevice]:
-    return await list_devices_async(
-        prefix, only_paired=True, bus_factory=bus_factory, adapter=adapter
-    )
-
-
 # --- synchrone wrappers voor de CLI ------------------------------------------------------
 
 
@@ -948,40 +341,3 @@ def pair(
     return asyncio.run(
         pair_async(address, passkey_provider, timeout, bus_factory=bus_factory, adapter=adapter)
     )
-
-
-def unpair(
-    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
-) -> bool:
-    return asyncio.run(unpair_async(address, bus_factory=bus_factory, adapter=adapter))
-
-
-def disconnect(
-    address: str, *, bus_factory: BusFactory | None = None, adapter: str | None = None
-) -> bool:
-    return asyncio.run(disconnect_async(address, bus_factory=bus_factory, adapter=adapter))
-
-
-def list_devices(
-    prefix: str = "",
-    *,
-    only_paired: bool = True,
-    bus_factory: BusFactory | None = None,
-    adapter: str | None = None,
-    service_uuids: Collection[str] = (),
-) -> list[PairedDevice]:
-    return asyncio.run(
-        list_devices_async(
-            prefix,
-            only_paired=only_paired,
-            bus_factory=bus_factory,
-            adapter=adapter,
-            service_uuids=service_uuids,
-        )
-    )
-
-
-def paired_devices(
-    prefix: str = "", *, bus_factory: BusFactory | None = None, adapter: str | None = None
-) -> list[PairedDevice]:
-    return asyncio.run(paired_devices_async(prefix, bus_factory=bus_factory, adapter=adapter))

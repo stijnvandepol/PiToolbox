@@ -475,7 +475,11 @@ src/pitoolbox/
     devices/_flipper_install.py      # FAP installeren (ui-install)
     devices/_flipper_ir.py    # ir_send met handoff van de gekoppelde app
     devices/_flipper_ble.py   # BLE-transport (bleak), serial-service-UUID's, flow control
-    devices/_ble_pairing.py   # BlueZ-agent (D-Bus) voor koppelen met PIN
+    devices/_ble_pairing.py   # koppelen met PIN via BlueZ (D-Bus); publieke pairing-API
+    devices/_bluez_dbus.py    # BlueZ-namen, foutmeldingen, BluezBus-protocol, opzoekingen
+    devices/_bluez_agent.py   # de tijdelijke pairing-agent (org.bluez.Agent1)
+    devices/_bluez_fastbus.py # BluezBus op dbus-fast (system bus)
+    devices/_bluez_devices.py # bekende apparaten: lijst, ontkoppelen, verbreken
     devices/_flipper_rpc/     # framing, RPC-client, gegenereerde protobuf (pb/)
     devices/_flipper_cli.py   # vaste CLI-sjablonen + parsers per firmwareprofiel
     devices/wifi.py           # AlfaAdapter, CaptureManager, parsers
