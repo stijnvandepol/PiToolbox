@@ -22,7 +22,7 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 | 4 Flipper als bediening | **spike klaar** ([fase4-spike.md](fase4-spike.md), advies: DataExchange); **providerlaag klaar** (`llm/`: openai-compatible, anthropic, openai; geen default); **agent-loop + `pitoolbox-agent` klaar** (alleen een mens bevestigt, `confirm_action` onzichtbaar voor het model, grenzen per beurt, beurt-audit) ; **FAP `pitoolbox_ui` + protocol v1 klaar** (bouwt tegen API 87.1, niet op hardware); **bridge klaar** (`PITOOLBOX_FLIPPER_UI=on`, "Flipper verplicht" in de kern, getest met een nagebootste FAP **en op hardware**: install, rooktest en valtest 20/20 over BLE) | **nog:** OK/Back en menu met de hand, spike-test 7; adapters + agent één keer tegen de echte API's en Ollama testen |
 | 5 Klaar voor onderweg | **deploybestanden klaar, niet op hardware getest** (root + reboot nodig); nog: README van nul | `install.sh --onderweg`: .link-namen wlan0/wlan1 (op driver/USB-id), NM unmanaged `driver:mt7921u`, logrotate audit-log, tmpfiles captures; optioneel `--bluez-le`; `--dry-run`, backups; [fase5-onderweg.md](fase5-onderweg.md) |
 
-Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck; 1336 passed, 1 skipped op de Pi; de skip is shellcheck als die niet op PATH staat). Daarnaast `uv run ruff check src tests` en `uv run mypy`.
+Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck; 1345 passed, 1 skipped op de Pi; de skip is shellcheck als die niet op PATH staat). Daarnaast `uv run ruff check src tests` en `uv run mypy`.
 
 ## Open punten die Stijn nog moet aanleveren
 
@@ -47,6 +47,7 @@ Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck; 1
   - `confirm_action` uit een chat-frontend geeft `confirm_on_flipper`; de vraag verschijnt op de Flipper en verloopt na 60 s netjes (niemand drukte).
   - Stoppen: eerst de lease los, dan sluit de app. Direct daarna is de loader nog even bezet (zoals in spike-test 2); een paar seconden later is hij vrij.
   - Daarna de review-fixes en `pitoolbox-flipper ui-install/ui-test/ui-droptest`: installeren over BLE 24.560 B in 3,6 s (MD5 klopt); `ui-test` over BLE geslaagd; **valtest 20 van 20 geslaagd** (geen bevriezing of BusFault; app terug na mediaan 6,8 s). De use-after-free-fix in `ptb_rpc_detach` houdt dus.
+  - Na de laatste review-fixes (keepalive tijdens de bridge-lezer, noodstop knipt geen bridge-bericht meer door, time-out sluit alleen onze app, status niet meer "bezet", herstart wacht op onze sluitende app): `ui-test` geslaagd; **valtest opnieuw 20 van 20** (app terug mediaan 6,8 s, max 7,6 s); met de app open 5 minuten stil zonder verbreking; keepalive-pings lopen door (6 in 70 s bij `keepalive_s=10`) en `status` toont `busy: false`.
   - **Nog open (met de hand):** OK/Back op een echte vraag, snelle acties en presets vanuit het menu, de handmatige start, spike-test 7 (vergrendelen over BLE). Spike-test 6 (args-limiet) vervalt: de bridge geeft altijd `args:"RPC"` mee.
 - **TIJDELIJK:** `PITOOLBOX_UPLINK_IFACE=eth0` in `~/.zshenv`, omdat de Pi tijdens het ontwikkelen via ethernet aan het net hangt. Onderweg is de uplink `wlan0` (de standaard). **Weghalen vóór fase 5 / gebruik onderweg.** Dit niet in de code-default zetten.
 
