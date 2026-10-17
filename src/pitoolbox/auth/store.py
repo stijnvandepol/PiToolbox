@@ -8,24 +8,22 @@ Ontwerp:
 - Schema-versie via PRAGMA user_version.
 - Alle tijden komen uit een injecteerbare klok (unix-seconden) zodat tests kunnen vooruitspoelen.
 
-Indeling: het schema en de migratie staan in `_schema`, de rijtypen in `_rows`; deze module
-heeft de queries en is het publieke importpad voor alles.
+Indeling: het schema en de migratie staan in `_schema`, de rijtypen in `_rows`. `AuthStore`
+bouwt op `_StoreCore` (`_store_core`, bestanden, verbinding en transactie) en `_GrantStore`
+(`_grants`, autorisatiecodes en tokens). Deze module heeft de overige queries en is het publieke
+importpad voor alles.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
 import sqlite3
-import threading
-from collections.abc import Callable, Iterator
-from pathlib import Path
 from typing import Any
 
+from ._grants import _GrantStore
 from ._rows import AuthRequestRow, CodeRow, StoreStats, TokenRow, UserRow
-from ._schema import CLIENT_TABLES, migrate
+from ._schema import CLIENT_TABLES
 from .crypto import hash_token
 
 __all__ = [
@@ -40,53 +38,7 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 
-class AuthStore:
-    def __init__(self, path: Path, clock: Callable[[], float]) -> None:
-        self._path = Path(path)
-        self._clock = clock
-        self._lock = threading.RLock()
-        self._prepare_files()
-        with self._tx() as conn:
-            migrate(conn)
-
-    # --- infrastructuur ------------------------------------------------------------------
-
-    def _prepare_files(self) -> None:
-        parent = self._path.parent
-        if not parent.exists():
-            parent.mkdir(parents=True, mode=0o700)
-            # mkdir past de modus aan op umask; forceer 0700 op de nieuwe map zelf.
-            with contextlib.suppress(OSError):
-                parent.chmod(0o700)
-        if not self._path.exists():
-            fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
-            os.close(fd)
-        with contextlib.suppress(OSError):
-            self._path.chmod(0o600)
-
-    @contextlib.contextmanager
-    def _tx(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            conn = sqlite3.connect(self._path, timeout=5.0, isolation_level=None)
-            try:
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    yield conn
-                except BaseException:
-                    conn.execute("ROLLBACK")
-                    raise
-                else:
-                    conn.execute("COMMIT")
-            finally:
-                conn.close()
-
-    def schema_version(self) -> int:
-        with self._tx() as conn:
-            return int(conn.execute("PRAGMA user_version").fetchone()[0])
-
+class AuthStore(_GrantStore):
     # --- gebruiker -------------------------------------------------------------------------
 
     def get_user(self) -> UserRow | None:
@@ -241,138 +193,6 @@ class AuthStore:
                 "DELETE FROM auth_requests WHERE id_hash = ?", (hash_token(request_id),)
             )
             return cur.rowcount == 1
-
-    # --- autorisatiecodes --------------------------------------------------------------------
-
-    def add_code(self, code: str, row: CodeRow) -> None:
-        with self._tx() as conn:
-            conn.execute(
-                "INSERT INTO auth_codes (code_hash, client_id, scopes, code_challenge, "
-                "redirect_uri, redirect_uri_explicit, resource, subject, expires) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    hash_token(code),
-                    row.client_id,
-                    json.dumps(row.scopes),
-                    row.code_challenge,
-                    row.redirect_uri,
-                    int(row.redirect_uri_explicit),
-                    row.resource,
-                    row.subject,
-                    row.expires,
-                ),
-            )
-
-    def get_code(self, code: str) -> CodeRow | None:
-        with self._tx() as conn:
-            row = conn.execute(
-                "SELECT * FROM auth_codes WHERE code_hash = ?", (hash_token(code),)
-            ).fetchone()
-        if row is None:
-            return None
-        return CodeRow(
-            client_id=row["client_id"],
-            scopes=json.loads(row["scopes"]),
-            code_challenge=row["code_challenge"],
-            redirect_uri=row["redirect_uri"],
-            redirect_uri_explicit=bool(row["redirect_uri_explicit"]),
-            resource=row["resource"],
-            subject=row["subject"],
-            expires=row["expires"],
-            used=bool(row["used"]),
-            family_id=row["family_id"],
-        )
-
-    def consume_code(self, code: str, family_id: str) -> bool:
-        """Markeer een code als gebruikt (atomisch); False als hij al gebruikt/verlopen was."""
-        with self._tx() as conn:
-            cur = conn.execute(
-                "UPDATE auth_codes SET used = 1, family_id = ? "
-                "WHERE code_hash = ? AND used = 0 AND expires > ?",
-                (family_id, hash_token(code), self._clock()),
-            )
-            return cur.rowcount == 1
-
-    # --- tokens ------------------------------------------------------------------------------
-
-    def add_access_token(self, token: str, row: TokenRow) -> None:
-        with self._tx() as conn:
-            conn.execute(
-                "INSERT INTO access_tokens (token_hash, client_id, family_id, scopes, resource, "
-                "subject, expires) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    hash_token(token),
-                    row.client_id,
-                    row.family_id,
-                    json.dumps(row.scopes),
-                    row.resource,
-                    row.subject,
-                    row.expires,
-                ),
-            )
-
-    def add_refresh_token(self, token: str, row: TokenRow) -> None:
-        with self._tx() as conn:
-            conn.execute(
-                "INSERT INTO refresh_tokens (token_hash, client_id, family_id, scopes, resource, "
-                "subject, expires, rotated) VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
-                (
-                    hash_token(token),
-                    row.client_id,
-                    row.family_id,
-                    json.dumps(row.scopes),
-                    row.resource,
-                    row.subject,
-                    row.expires,
-                ),
-            )
-
-    @staticmethod
-    def _token_row(row: sqlite3.Row, *, refresh: bool) -> TokenRow:
-        return TokenRow(
-            client_id=row["client_id"],
-            family_id=row["family_id"],
-            scopes=json.loads(row["scopes"]),
-            resource=row["resource"],
-            subject=row["subject"],
-            expires=row["expires"],
-            rotated=bool(row["rotated"]) if refresh else False,
-        )
-
-    def get_access_token(self, token: str) -> TokenRow | None:
-        with self._tx() as conn:
-            row = conn.execute(
-                "SELECT * FROM access_tokens WHERE token_hash = ?", (hash_token(token),)
-            ).fetchone()
-        return None if row is None else self._token_row(row, refresh=False)
-
-    def get_refresh_token(self, token: str) -> TokenRow | None:
-        with self._tx() as conn:
-            row = conn.execute(
-                "SELECT * FROM refresh_tokens WHERE token_hash = ?", (hash_token(token),)
-            ).fetchone()
-        return None if row is None else self._token_row(row, refresh=True)
-
-    def rotate_refresh_token(self, token: str) -> bool:
-        """Markeer een refresh-token als geroteerd (atomisch); False bij hergebruik."""
-        with self._tx() as conn:
-            cur = conn.execute(
-                "UPDATE refresh_tokens SET rotated = 1 "
-                "WHERE token_hash = ? AND rotated = 0 AND expires > ?",
-                (hash_token(token), self._clock()),
-            )
-            return cur.rowcount == 1
-
-    def revoke_family(self, family_id: str) -> int:
-        """Verwijder alle access- en refresh-tokens van een familie; geeft het aantal rijen."""
-        with self._tx() as conn:
-            total = conn.execute(
-                "DELETE FROM access_tokens WHERE family_id = ?", (family_id,)
-            ).rowcount
-            total += conn.execute(
-                "DELETE FROM refresh_tokens WHERE family_id = ?", (family_id,)
-            ).rowcount
-            return total
 
     # --- onderhoud ---------------------------------------------------------------------------
 
