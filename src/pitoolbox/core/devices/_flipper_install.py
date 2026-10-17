@@ -44,6 +44,22 @@ class AppInstall:
 ProgressFn = Callable[[int, int], None]
 
 
+def _checked_fap_md5(path: str, data: bytes) -> str:
+    """Controleer pad en inhoud vóór er iets naar de Flipper gaat; geeft de MD5 van `data`.
+
+    Raises:
+        ValueError: ongeldig pad, of `data` is geen geldige PiToolbox-FAP.
+    """
+    if not _APP_PATH_RE.fullmatch(path) or ".." in path:
+        raise ValueError(f"ongeldig app-pad: {path!r}")
+    if not 0 < len(data) <= FAP_MAX_BYTES:
+        raise ValueError(f"FAP van {len(data)} bytes; toegestaan 1..{FAP_MAX_BYTES}")
+    info = inspect_fap(data)  # FapError is een ValueError
+    if info.name != FAP_APP_NAME:
+        raise ValueError(f"dit is niet de PiToolbox-app maar {info.name!r}")
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()
+
+
 class FlipperInstaller(FlipperAppChannel):
     """Schrijft de FAP in blokken, controleert de MD5 en hernoemt pas daarna."""
 
@@ -69,15 +85,7 @@ class FlipperInstaller(FlipperAppChannel):
             AppLocked: er is een app open.
             DeviceError: schrijven of controleren mislukt (de oude app blijft dan staan).
         """
-        if not _APP_PATH_RE.fullmatch(path) or ".." in path:
-            raise ValueError(f"ongeldig app-pad: {path!r}")
-        if not 0 < len(data) <= FAP_MAX_BYTES:
-            raise ValueError(f"FAP van {len(data)} bytes; toegestaan 1..{FAP_MAX_BYTES}")
-        info = inspect_fap(data)  # FapError is een ValueError
-        if info.name != FAP_APP_NAME:
-            raise ValueError(f"dit is niet de PiToolbox-app maar {info.name!r}")
-        expected = hashlib.md5(data, usedforsecurity=False).hexdigest()
-        chunks = [data[i : i + STORAGE_CHUNK] for i in range(0, len(data), STORAGE_CHUNK)]
+        expected = _checked_fap_md5(path, data)
         part = f"{path}.part"
 
         def op(gen: int, attempt: _Attempt) -> AppInstall:
@@ -96,17 +104,14 @@ class FlipperInstaller(FlipperAppChannel):
             self._mkdir_parents(client, path, cancel)
             attempt.committed = True  # vanaf hier geen stille herhaling na een reconnect
             try:
-                self._write_chunks(client, part, chunks, cancel, progress, len(data))
+                self._write_chunks(client, part, data, cancel, progress)
                 written = self._md5sum(client, part, cancel)
                 if written != expected:
                     raise DeviceError(
                         f"MD5 op de Flipper ({written or 'geen'}) wijkt af van het bestand "
                         f"({expected}); de oude app blijft staan"
                     )
-                rename = flipper_pb2.Main()
-                rename.storage_rename_request.old_path = part
-                rename.storage_rename_request.new_path = path
-                client.request(rename, self._timing.rpc_timeout_s, cancel=cancel)
+                self._rename(client, part, path, cancel)
             except BaseException:
                 self._delete_quietly(client, part)
                 raise
@@ -148,16 +153,17 @@ class FlipperInstaller(FlipperAppChannel):
         self,
         client: RpcClient,
         path: str,
-        chunks: list[bytes],
+        data: bytes,
         cancel: Callable[[], bool],
         progress: ProgressFn | None,
-        total: int,
     ) -> None:
+        """Schrijf `data` naar `path` in blokken van `STORAGE_CHUNK` (storage_write_request)."""
+        total = len(data)
         mains = []
-        for chunk in chunks:
+        for offset in range(0, total, STORAGE_CHUNK):
             main = flipper_pb2.Main()
             main.storage_write_request.path = path
-            main.storage_write_request.file.data = chunk
+            main.storage_write_request.file.data = data[offset : offset + STORAGE_CHUNK]
             mains.append(main)
 
         def on_chunk(done: int, _count: int) -> None:
@@ -165,6 +171,13 @@ class FlipperInstaller(FlipperAppChannel):
                 progress(min(done * STORAGE_CHUNK, total), total)
 
         client.request_chunked(mains, self._timing.rpc_timeout_s, cancel=cancel, on_chunk=on_chunk)
+
+    def _rename(self, client: RpcClient, old: str, new: str, cancel: Callable[[], bool]) -> None:
+        """storage_rename_request; een bestaand doel verdwijnt eerst (storage_external_api.c)."""
+        main = flipper_pb2.Main()
+        main.storage_rename_request.old_path = old
+        main.storage_rename_request.new_path = new
+        client.request(main, self._timing.rpc_timeout_s, cancel=cancel)
 
     def _delete_quietly(self, client: RpcClient, path: str) -> None:
         """Opruimen na een mislukte upload; nooit een fout (de link kan al weg zijn)."""
