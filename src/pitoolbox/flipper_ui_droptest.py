@@ -177,14 +177,29 @@ def _await_reconnect(
         if event.detail != "locked":
             notes.append(f"herstart mislukte eerst ({event.detail}); de bridge probeert opnieuw")
             continue
-        # De oude app sluit pas 2 s na "Verbinding met Pi verbroken"; de bridge geeft bij een
-        # bezette loader op (hij sluit nooit een app), dus hier zelf even wachten en opnieuw.
+        # De oude app sluit pas 2 s na "Verbinding met Pi verbroken". De bridge probeert het na
+        # een verloren link zelf `locked_retry_s` lang opnieuw en geeft daarna op (hij sluit nooit
+        # een app); hier wachten we tot de loader vrij is of tot de bridge onze app intussen al
+        # weer gestart heeft (dan is de loader bezet door ónze app, en dat is goed).
         notes.append("loader nog bezet bij herstart")
-        if not _wait_loader_free(setup.device, timing.locked_wait_s):
+        if not _wait_free_or_ours(setup.device, timing.locked_wait_s):
             raise StepFailed(
                 "de loader bleef bezet: de oude app sloot niet na het verbreken (hangt hij?)"
             )
-        setup.bridge.request_start()
+        setup.bridge.request_start()  # genegeerd als de bridge al bezig of verbonden is
+
+
+def _wait_free_or_ours(device: FlipperDevice, timeout: float) -> bool:
+    """Loader vrij, of bezet door de PiToolbox-app die de bridge net weer startte."""
+    deadline = harness._clock() + timeout
+    while True:
+        if device.rpc_app_state != "off":
+            return True
+        if _wait_loader_free(device, 0.0):
+            return True
+        if harness._clock() >= deadline:
+            return False
+        harness._sleep(harness.TIMING.poll_s)
 
 
 def cmd_droptest(args: argparse.Namespace, settings: Settings) -> int:
