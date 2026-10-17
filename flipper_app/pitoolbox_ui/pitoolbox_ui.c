@@ -272,6 +272,26 @@ static void ptb_on_not_ready(PtbApp* app) {
     }
 }
 
+
+/* Kort woord bij een ERROR-code (protocol.py ErrorCode), i.p.v. een nummer op het scherm.
+ * NULL: onbekende code, dan "Fout <n>". */
+static const char* ptb_error_title(uint8_t code) {
+    static const char* const titles[] = {
+        [1] = "Bezig",
+        [2] = "Te snel",
+        [3] = "Onbekende actie",
+        [4] = "Ongeldig bericht",
+        [5] = "Andere versie",
+        [6] = "Mislukt",
+        [7] = "Agent niet beschikbaar",
+        [8] = "Afgebroken",
+        [9] = "Time-out",
+        [10] = "Bevestiging ongeldig",
+        [11] = "Pi kent sessie niet",
+    };
+    return code < COUNT_OF(titles) ? titles[code] : NULL;
+}
+
 static void ptb_on_message(PtbApp* app, const PtbMsg* msg) {
     SceneManager* sm = app->scene_manager;
     if(msg->type == PtbMsgError && msg->error.code == PtbErrorNotReady) {
@@ -341,7 +361,12 @@ static void ptb_on_message(PtbApp* app, const PtbMsg* msg) {
     case PtbMsgError:
         if(msg->error.ref == 0 || (app->busy && msg->error.ref == app->active_ref)) {
             if(msg->error.ref) app->busy = false;
-            furi_string_printf(app->result, "Fout %u: %s", msg->error.code, msg->error.text);
+            const char* title = ptb_error_title(msg->error.code);
+            if(title) {
+                furi_string_printf(app->result, "%s: %s", title, msg->error.text);
+            } else {
+                furi_string_printf(app->result, "Fout %u: %s", msg->error.code, msg->error.text);
+            }
             scene_manager_handle_custom_event(sm, PtbEventResult);
         }
         break;
