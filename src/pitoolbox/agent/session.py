@@ -42,29 +42,27 @@ Ontwerpkeuzes:
 
 Indeling: de publieke typen staan in `types`, het uitvoeren van tool-calls in `_tool_calls`, de
 administratie van open bevestigingen in `_confirmations` en het begrenzen van de geschiedenis in
-`_history`. Deze module heeft de loop en is het publieke importpad voor alles.
+`_history`. `AgentSession` bouwt op `_SessionCore` (`_session_core`, toestand en audit) en
+`_HumanDecisions` (`_decisions`, bevestigen door een mens en de noodstop). Deze module heeft de
+loop en is het publieke importpad voor alles.
 """
 
 from __future__ import annotations
 
 import logging
-import secrets
-import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
 
-from pitoolbox.agent._confirmations import OpenConfirmations, confirm_status, reject
+from pitoolbox.agent._decisions import EMERGENCY_STOP_TOOL as EMERGENCY_STOP_TOOL
+from pitoolbox.agent._decisions import _HumanDecisions
 from pitoolbox.agent._history import history_cut
+from pitoolbox.agent._session_core import note
 from pitoolbox.agent._tool_calls import (
     MODEL_HIDDEN_TOOLS,
     Cancelled,
-    ToolCallExecutor,
     TurnState,
     check_cancel,
     model_tool_defs,
-    serialize_view,
 )
-from pitoolbox.agent.prompt import NOTE_PREFIX, SYSTEM_PROMPT
 from pitoolbox.agent.text import strip_think
 from pitoolbox.agent.types import (
     AgentEvent,
@@ -79,24 +77,8 @@ from pitoolbox.agent.types import (
     TurnResult,
     TurnStop,
 )
-from pitoolbox.core.tools.runner import (
-    CONFIRM_ON_FLIPPER,
-    CONFIRM_TOOL,
-    PendingResolved,
-    Resolution,
-)
 from pitoolbox.llm.errors import LLMError
-from pitoolbox.llm.types import (
-    Message,
-    StopReason,
-    ToolDef,
-    Usage,
-    UserMessage,
-)
-
-if TYPE_CHECKING:
-    from pitoolbox.core.tools.runner import ToolRunner
-    from pitoolbox.llm.providers import LLMProvider
+from pitoolbox.llm.types import StopReason, Usage, UserMessage
 
 __all__ = [
     "MODEL_HIDDEN_TOOLS",
@@ -118,8 +100,6 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-EMERGENCY_STOP_TOOL = "emergency_stop"
-
 _MODEL_STOPS = {
     StopReason.END_TURN: TurnStop.END_TURN,
     StopReason.OTHER: TurnStop.END_TURN,
@@ -129,11 +109,7 @@ _MODEL_STOPS = {
 }
 
 
-def note(text: str) -> str:
-    return f"{NOTE_PREFIX} {text}"
-
-
-class AgentSession:
+class AgentSession(_HumanDecisions):
     """Eén gesprek: geschiedenis, provider, runner en de bevestigingen die nog openstaan.
 
     Niet thread-safe: één frontend roept `run_turn`, `confirm`, `take_external` en
@@ -141,53 +117,6 @@ class AgentSession:
     (`OpenConfirmations.on_resolved`) draait in andere threads; die zet alleen iets in een eigen
     wachtrij. `close()` meldt hem af.
     """
-
-    def __init__(
-        self,
-        provider: LLMProvider,
-        runner: ToolRunner,
-        *,
-        frontend: str,
-        limits: AgentLimits | None = None,
-        system_prompt: str = SYSTEM_PROMPT,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.provider = provider
-        self.runner = runner
-        self.frontend = frontend
-        self.limits = limits or AgentLimits()
-        self.system_prompt = system_prompt
-        self._clock = clock
-        # Least privilege: tools buiten PITOOLBOX_TOOL_ALLOWLIST ziet het model niet eens (de
-        # runner zou ze toch weigeren).
-        self._tools = model_tool_defs(runner.allowed_specs())
-        self._history: list[Message] = []
-        self._notes: list[str] = []
-        self._session_id = secrets.token_hex(4)
-        self._turns = 0
-        self._confirmations = OpenConfirmations()
-        self._calls = ToolCallExecutor(runner, frontend, self.limits, clock, self._confirmations)
-        self._unsubscribe: Callable[[], None] | None = runner.subscribe_resolutions(
-            self._confirmations.on_resolved
-        )
-
-    def close(self) -> None:
-        """Meldt de luisteraar voor uitkomsten af (bij het weggooien van de sessie)."""
-        unsubscribe, self._unsubscribe = self._unsubscribe, None
-        if unsubscribe is not None:
-            unsubscribe()
-
-    @property
-    def history(self) -> tuple[Message, ...]:
-        return tuple(self._history)
-
-    @property
-    def tools(self) -> tuple[ToolDef, ...]:
-        return self._tools
-
-    @property
-    def open_confirmations(self) -> tuple[PendingConfirmation, ...]:
-        return self._confirmations.pending
 
     # --- een beurt ------------------------------------------------------------------------
 
@@ -349,125 +278,3 @@ class AgentSession:
         self._history.clear()
         self._audit_event("agent_history_reset", dropped_turns=dropped_turns)
         return dropped_turns
-
-    # --- alleen voor de frontend (na een expliciete menselijke keuze) ---------------------
-
-    def confirm(self, pending: PendingConfirmation, *, approved: bool) -> ConfirmOutcome:
-        """Voert een bevestiging uit of wijst hem af. Alleen aanroepen op menselijke invoer.
-
-        Gaat via `runner.call(self.frontend, "confirm_action", ...)`: dezelfde frontend-id als
-        de call die de pending maakte, dus binding, TTL en eenmalig gebruik blijven gelden.
-        """
-        known = self._confirmations.pop(pending.pending_id)
-        if known is None:
-            outcome = ConfirmOutcome(ConfirmStatus.EXPIRED, pending)
-        elif not approved:
-            outcome = reject(self.runner, self.frontend, known)
-        else:
-            raw = self.runner.call(self.frontend, CONFIRM_TOOL, {"pending_id": known.pending_id})
-            if raw.get("error") == CONFIRM_ON_FLIPPER:
-                # Niets gebeurd: de pending staat nog (de mens bevestigt op de Flipper).
-                self._confirmations.add(known)
-                return ConfirmOutcome(ConfirmStatus.ON_FLIPPER, known, raw)
-            outcome = ConfirmOutcome(confirm_status(raw), known, raw)
-        self._notes.append(self._confirm_note(outcome))
-        return outcome
-
-    def take_external(self) -> list[ConfirmOutcome]:
-        """Verwerk wat er buiten deze sessie met haar open bevestigingen gebeurde.
-
-        Uitgevoerd of afgewezen op de Flipper, gewist door een noodstop elders, of verlopen. Per
-        stuk een melding voor het model (zoals bij `confirm`); de frontend kan de uitkomsten
-        tonen. Eerst wordt de `PendingStore` opgeschoond, zodat een verlopen TTL ook meetelt.
-        """
-        if self._confirmations.pending:
-            self.runner.ctx.pending.list()  # verlopen pendings melden (lui opgeschoond)
-        outcomes: list[ConfirmOutcome] = []
-        for event in self._confirmations.take_resolved():
-            outcome = self._apply_resolution(event)
-            if outcome is not None:
-                outcomes.append(outcome)
-        return outcomes
-
-    def _apply_resolution(self, event: PendingResolved) -> ConfirmOutcome | None:
-        if event.resolution is Resolution.CONFIRMED:
-            return self.external_outcome(event.pending_id, approved=True, result=event.result)
-        if event.resolution is Resolution.REJECTED:
-            return self.external_outcome(event.pending_id, approved=False, result={"ok": True})
-        known = self._confirmations.drop(event.pending_id)
-        if known is None:
-            return None
-        status = (
-            ConfirmStatus.CLEARED
-            if event.resolution is Resolution.CLEARED
-            else ConfirmStatus.EXPIRED
-        )
-        outcome = ConfirmOutcome(status, known, None)
-        self._notes.append(self._confirm_note(outcome))
-        return outcome
-
-    def external_outcome(
-        self, pending_id: str, *, approved: bool, result: dict[str, Any] | None
-    ) -> ConfirmOutcome | None:
-        """Een pending van deze sessie is buiten de sessie afgehandeld (OK/Back op de Flipper).
-
-        Werkt alleen de eigen administratie bij en geeft het model in de volgende beurt een
-        melding, net als `confirm`. None als deze sessie de pending niet (meer) kent.
-        """
-        known = self._confirmations.pop(pending_id)
-        if known is None:
-            return None
-        if not approved:
-            status = (
-                ConfirmStatus.REJECTED
-                if result is not None and result.get("ok")
-                else ConfirmStatus.EXPIRED
-            )
-            outcome = ConfirmOutcome(status, known, None)
-        else:
-            outcome = ConfirmOutcome(confirm_status(result or {}), known, result)
-        self._notes.append(self._confirm_note(outcome))
-        return outcome
-
-    def _confirm_note(self, outcome: ConfirmOutcome) -> str:
-        what = f"{outcome.pending.tool}: {outcome.pending.summary}"
-        if outcome.status is ConfirmStatus.REJECTED:
-            return note(f"De gebruiker heeft afgewezen ({what}). Er is niets uitgevoerd.")
-        if outcome.status is ConfirmStatus.EXPIRED:
-            return note(f"Bevestiging verlopen of al gebruikt ({what}). Er is niets uitgevoerd.")
-        if outcome.status is ConfirmStatus.CLEARED:
-            return note(f"Bevestiging gewist door een noodstop ({what}). Er is niets uitgevoerd.")
-        result = serialize_view(outcome.result or {}, self.limits.max_result_chars)
-        if outcome.status is ConfirmStatus.DENIED:
-            return note(f"Bevestigd, maar alsnog geweigerd door de policy ({what}): {result}")
-        if outcome.status is ConfirmStatus.FAILED:
-            return note(f"Bevestigd en uitgevoerd, maar met een fout ({what}): {result}")
-        return note(f"De gebruiker heeft bevestigd en het is uitgevoerd ({what}): {result}")
-
-    def emergency_stop(self) -> dict[str, Any]:
-        """Noodstop op verzoek van de mens (`/stop`); het model hoort het in de volgende beurt."""
-        raw = self.runner.call(self.frontend, EMERGENCY_STOP_TOOL, {})
-        self._confirmations.clear()  # PendingStore is gewist; deze id's zijn waardeloos
-        self._notes.append(
-            note(
-                "De gebruiker heeft een noodstop uitgevoerd: "
-                f"{serialize_view(raw, self.limits.max_result_chars)}"
-            )
-        )
-        return raw
-
-    # --- audit ----------------------------------------------------------------------------
-
-    def _audit_event(self, event: str, **fields: Any) -> None:
-        """Beurtregel in de audit-log; nooit berichtinhoud of sleutels."""
-        try:
-            self.runner.audit.write(
-                event=event,
-                frontend=self.frontend,
-                session=self._session_id,
-                turn=self._turns,
-                **fields,
-            )
-        except OSError:
-            log.exception("audit-regel %s kon niet worden geschreven", event)
-        log.info("%s turn=%d %s", event, self._turns, fields)
