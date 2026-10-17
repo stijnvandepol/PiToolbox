@@ -16,8 +16,10 @@ Bronnen:
 - Stateless: `store: false`, en "preserve every item in the response's output array ...
   Replaying the complete output keeps reasoning items ... intact"
   (https://developers.openai.com/api/docs/guides/conversation-state?api-mode=responses);
-  in stateless mode bevatten reasoning-items standaard `encrypted_content`
-  (https://developers.openai.com/api/docs/guides/reasoning?api-mode=responses). Daarom
+  in stateless mode bevatten reasoning-items standaard `encrypted_content`: "reasoning items in
+  the response's `output` array include an `encrypted_content` property by default"; de oude
+  `include: ["reasoning.encrypted_content"]` "doesn't require it" (nagekeken 2026-10-17,
+  https://developers.openai.com/api/docs/guides/reasoning?api-mode=responses). Daarom
   bewaren we `output` in `ProviderState` en sturen die ongewijzigd terug. Geen
   `previous_response_id` (Ollama ondersteunt geen stateful Responses:
   https://docs.ollama.com/api/openai-compatibility).
