@@ -150,12 +150,35 @@ def _build_agent_interface(agent: PairingAgent) -> Any:
     service = importlib.import_module("dbus_fast.service")
     errors = importlib.import_module("dbus_fast.errors")
 
-    def rejected(exc: AgentRejected) -> Exception:
-        return errors.DBusError(exc.error_name, exc.text)  # type: ignore[no-any-return]
-
     def sig(fn: Callable[..., Any], **annotations: str) -> Callable[..., Any]:
         fn.__annotations__ = dict(annotations)
         return fn
+
+    dbus_method = service.dbus_method
+    members: dict[str, Any] = {
+        name: dbus_method(name=name)(sig(fn, **annotations))
+        for name, (fn, annotations) in _agent_methods(agent, errors.DBusError).items()
+    }
+    cls = type("PitoolboxPairingAgent", (service.ServiceInterface,), members)
+    return cls(AGENT_IFACE)
+
+
+def _agent_methods(
+    agent: PairingAgent, dbus_error: Any
+) -> dict[str, tuple[Callable[..., Any], dict[str, str]]]:
+    """De Agent1-methoden (met `self`, zoals dbus-fast ze aanroept) en hun D-Bus-signatuur.
+
+    Een `AgentRejected` van de agent wordt een `dbus_error` met dezelfde foutnaam en tekst.
+    """
+
+    def rejected(exc: AgentRejected) -> Exception:
+        return dbus_error(exc.error_name, exc.text)  # type: ignore[no-any-return]
+
+    def forward(method: Callable[..., T], *args: Any) -> T:
+        try:
+            return method(*args)
+        except AgentRejected as exc:
+            raise rejected(exc) from exc
 
     async def request_passkey(self: Any, device: str) -> int:
         try:
@@ -164,40 +187,22 @@ def _build_agent_interface(agent: PairingAgent) -> Any:
             raise rejected(exc) from exc
 
     def request_confirmation(self: Any, device: str, passkey: int) -> None:
-        try:
-            agent.request_confirmation(device, passkey)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
+        forward(agent.request_confirmation, device, passkey)
 
     def display_passkey(self: Any, device: str, passkey: int, entered: int) -> None:
-        try:
-            agent.display_passkey(device, passkey, entered)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
+        forward(agent.display_passkey, device, passkey, entered)
 
     def request_authorization(self: Any, device: str) -> None:
-        try:
-            agent.request_authorization(device)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
+        forward(agent.request_authorization, device)
 
     def authorize_service(self: Any, device: str, uuid: str) -> None:
-        try:
-            agent.authorize_service(device, uuid)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
+        forward(agent.authorize_service, device, uuid)
 
     def request_pin_code(self: Any, device: str) -> str:
-        try:
-            return agent.request_pin_code(device)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
+        return forward(agent.request_pin_code, device)
 
     def display_pin_code(self: Any, device: str, pincode: str) -> None:
-        try:
-            agent.display_pin_code(device, pincode)
-        except AgentRejected as exc:
-            raise rejected(exc) from exc
+        forward(agent.display_pin_code, device, pincode)
 
     def cancel(self: Any) -> None:
         agent.cancel()
@@ -205,31 +210,14 @@ def _build_agent_interface(agent: PairingAgent) -> Any:
     def release(self: Any) -> None:
         agent.release()
 
-    dbus_method = service.dbus_method
-    members: dict[str, Any] = {
-        "RequestPasskey": dbus_method(name="RequestPasskey")(
-            sig(request_passkey, device="o", **{"return": "u"})
-        ),
-        "RequestConfirmation": dbus_method(name="RequestConfirmation")(
-            sig(request_confirmation, device="o", passkey="u")
-        ),
-        "DisplayPasskey": dbus_method(name="DisplayPasskey")(
-            sig(display_passkey, device="o", passkey="u", entered="q")
-        ),
-        "RequestAuthorization": dbus_method(name="RequestAuthorization")(
-            sig(request_authorization, device="o")
-        ),
-        "AuthorizeService": dbus_method(name="AuthorizeService")(
-            sig(authorize_service, device="o", uuid="s")
-        ),
-        "RequestPinCode": dbus_method(name="RequestPinCode")(
-            sig(request_pin_code, device="o", **{"return": "s"})
-        ),
-        "DisplayPinCode": dbus_method(name="DisplayPinCode")(
-            sig(display_pin_code, device="o", pincode="s")
-        ),
-        "Cancel": dbus_method(name="Cancel")(sig(cancel)),
-        "Release": dbus_method(name="Release")(sig(release)),
+    return {
+        "RequestPasskey": (request_passkey, {"device": "o", "return": "u"}),
+        "RequestConfirmation": (request_confirmation, {"device": "o", "passkey": "u"}),
+        "DisplayPasskey": (display_passkey, {"device": "o", "passkey": "u", "entered": "q"}),
+        "RequestAuthorization": (request_authorization, {"device": "o"}),
+        "AuthorizeService": (authorize_service, {"device": "o", "uuid": "s"}),
+        "RequestPinCode": (request_pin_code, {"device": "o", "return": "s"}),
+        "DisplayPinCode": (display_pin_code, {"device": "o", "pincode": "s"}),
+        "Cancel": (cancel, {}),
+        "Release": (release, {}),
     }
-    cls = type("PitoolboxPairingAgent", (service.ServiceInterface,), members)
-    return cls(AGENT_IFACE)

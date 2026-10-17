@@ -49,8 +49,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from pitoolbox.core.devices._bluez_agent import AgentRejected, PairingAgent
 from pitoolbox.core.devices._bluez_dbus import (
@@ -230,8 +231,6 @@ async def pair_async(
     mac = _mac(address)
     adapter = _adapter_arg(adapter)
     bus = await connect_bus(bus_factory)
-    exported = False
-    registered = False
     try:
         _adapter, device_path = await _resolve_device(
             bus,
@@ -243,20 +242,39 @@ async def pair_async(
         props = (await bus.get_managed_objects())[device_path][DEVICE_IFACE]
 
         if props.get("Paired", False):
-            trusted = bool(props.get("Trusted", False)) or await _set_trusted(bus, device_path)
-            return PairResult(
-                address=mac,
-                name=_as_paired_device(props).name,
-                device_path=device_path,
-                already_paired=True,
-                paired=True,
-                bonded=bool(props.get("Bonded", False)),
-                trusted=trusted,
-            )
+            return await _already_paired_result(bus, mac, device_path, props)
 
         agent = PairingAgent(device_path, passkey_provider, provider_timeout=timeout)
-        bus.export_agent(AGENT_PATH, agent)
-        exported = True
+        async with _registered_agent(bus, agent):
+            await _pair_device(bus, device_path, agent, timeout)
+            return await _finish_pairing(bus, mac, device_path, props, disconnect_after)
+    finally:
+        with contextlib.suppress(Exception):
+            await bus.close()
+
+
+async def _already_paired_result(
+    bus: BluezBus, mac: str, device_path: str, props: dict[str, Any]
+) -> PairResult:
+    """Al gekoppeld: alleen Trusted zo nodig nog zetten."""
+    trusted = bool(props.get("Trusted", False)) or await _set_trusted(bus, device_path)
+    return PairResult(
+        address=mac,
+        name=_as_paired_device(props).name,
+        device_path=device_path,
+        already_paired=True,
+        paired=True,
+        bonded=bool(props.get("Bonded", False)),
+        trusted=trusted,
+    )
+
+
+@contextlib.asynccontextmanager
+async def _registered_agent(bus: BluezBus, agent: PairingAgent) -> AsyncIterator[None]:
+    """Exporteer en registreer onze agent; na afloop (ook bij een fout) altijd weer afgemeld."""
+    bus.export_agent(AGENT_PATH, agent)
+    registered = False
+    try:
         await _call(
             bus,
             "Agent registreren",
@@ -275,55 +293,63 @@ async def pair_async(
             await bus.call(ROOT_PATH, AGENT_MANAGER_IFACE, "RequestDefaultAgent", "o", [AGENT_PATH])
         except BluezDBusError as exc:
             log.warning("RequestDefaultAgent geweigerd: %s", describe_bluez_error(exc))
-
-        try:
-            await asyncio.wait_for(bus.call(device_path, DEVICE_IFACE, "Pair"), timeout)
-        except BluezDBusError as exc:
-            message = describe_bluez_error(exc, "Koppelen mislukt")
-            if agent.cancelled:
-                message += " (BlueZ trok het verzoek in)."
-            raise BlePairingError(message, dbus_error=exc.name) from exc
-        except TimeoutError as exc:
-            await _cancel_pairing(bus, device_path)
-            hint = (
-                "geen code ingevoerd"
-                if agent.passkey_requested
-                else "de Flipper vroeg geen code (staat Bluetooth aan en is hij niet verbonden "
-                "met een telefoon?)"
-            )
-            raise BlePairingError(
-                f"Koppelen mislukt: time-out na {timeout:.0f} s ({hint}).",
-                dbus_error="timeout",
-            ) from exc
-        except asyncio.CancelledError:
-            await _cancel_pairing(bus, device_path)
-            raise
-
-        trusted = await _set_trusted(bus, device_path)
-        final = (await bus.get_managed_objects()).get(device_path, {}).get(DEVICE_IFACE, props)
-        if disconnect_after and final.get("Connected", False):
-            # De Flipper staat maar een BLE-verbinding toe: laat hem vrij voor de service.
-            with contextlib.suppress(BluezDBusError):
-                await bus.call(device_path, DEVICE_IFACE, "Disconnect")
-        return PairResult(
-            address=mac,
-            name=_as_paired_device(final).name,
-            device_path=device_path,
-            already_paired=False,
-            paired=bool(final.get("Paired", True)),
-            bonded=bool(final.get("Bonded", False)),
-            trusted=trusted,
-        )
+        yield
     finally:
         if registered:
             # DoesNotExist (al afgemeld na Release()) en andere fouten negeren we hier bewust.
             with contextlib.suppress(Exception):
                 await bus.call(ROOT_PATH, AGENT_MANAGER_IFACE, "UnregisterAgent", "o", [AGENT_PATH])
-        if exported:
-            with contextlib.suppress(Exception):
-                bus.unexport_agent(AGENT_PATH)
         with contextlib.suppress(Exception):
-            await bus.close()
+            bus.unexport_agent(AGENT_PATH)
+
+
+async def _pair_device(
+    bus: BluezBus, device_path: str, agent: PairingAgent, timeout: float
+) -> None:
+    """Device1.Pair() binnen `timeout` (inclusief de tijd dat de gebruiker de code intikt)."""
+    try:
+        await asyncio.wait_for(bus.call(device_path, DEVICE_IFACE, "Pair"), timeout)
+    except BluezDBusError as exc:
+        message = describe_bluez_error(exc, "Koppelen mislukt")
+        if agent.cancelled:
+            message += " (BlueZ trok het verzoek in)."
+        raise BlePairingError(message, dbus_error=exc.name) from exc
+    except TimeoutError as exc:
+        await _cancel_pairing(bus, device_path)
+        hint = (
+            "geen code ingevoerd"
+            if agent.passkey_requested
+            else "de Flipper vroeg geen code (staat Bluetooth aan en is hij niet verbonden "
+            "met een telefoon?)"
+        )
+        raise BlePairingError(
+            f"Koppelen mislukt: time-out na {timeout:.0f} s ({hint}).",
+            dbus_error="timeout",
+        ) from exc
+    except asyncio.CancelledError:
+        await _cancel_pairing(bus, device_path)
+        raise
+
+
+async def _finish_pairing(
+    bus: BluezBus, mac: str, device_path: str, props: dict[str, Any], disconnect_after: bool
+) -> PairResult:
+    """Na Pair(): Trusted zetten, zo nodig de link vrijgeven en het resultaat opbouwen."""
+    trusted = await _set_trusted(bus, device_path)
+    final = (await bus.get_managed_objects()).get(device_path, {}).get(DEVICE_IFACE, props)
+    if disconnect_after and final.get("Connected", False):
+        # De Flipper staat maar een BLE-verbinding toe: laat hem vrij voor de service.
+        with contextlib.suppress(BluezDBusError):
+            await bus.call(device_path, DEVICE_IFACE, "Disconnect")
+    return PairResult(
+        address=mac,
+        name=_as_paired_device(final).name,
+        device_path=device_path,
+        already_paired=False,
+        paired=bool(final.get("Paired", True)),
+        bonded=bool(final.get("Bonded", False)),
+        trusted=trusted,
+    )
 
 
 # --- synchrone wrappers voor de CLI ------------------------------------------------------
