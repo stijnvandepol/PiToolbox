@@ -82,6 +82,7 @@ def _filter_band(networks: list[dict[str, Any]], band: str) -> list[dict[str, An
 
 def _hint(stderr: str) -> str:
     """Korte uitleg bij bekende fouten van iw/ip, voor het scherm van de Flipper en de chat.
+    Staat vóór de ruwe melding: het scherm van de Flipper kapt lange tekst af.
 
     "Operation not permitted" is EPERM (-1) van nl80211: het proces mist CAP_NET_ADMIN. Onder
     systemd geeft pitoolbox-mcp.service die als ambient capability (deploy/install.sh); bij
@@ -170,7 +171,7 @@ class AlfaAdapter:
         res = self._runner.run(argv, timeout=15)
         if res.returncode != 0:
             msg = res.stderr.strip() or str(res.returncode)
-            raise CommandFailed(f"{' '.join(argv)} faalde: {msg}{_hint(msg)}")
+            raise CommandFailed(f"{' '.join(argv)} faalde{_hint(msg)}: {msg}")
 
     def scan(self, method: str = "iw", duration_s: int = 10, band: str = "abg") -> dict[str, Any]:
         """Passieve scan. iw: managed mode; airodump: monitor mode (duurt `duration_s`)."""
@@ -200,7 +201,7 @@ class AlfaAdapter:
         res = self._runner.run(["iw", "dev", iface, "scan"], timeout=30)
         if res.returncode != 0:
             msg = res.stderr.strip() or str(res.returncode)
-            raise CommandFailed(f"iw dev {iface} scan faalde: {msg}{_hint(msg)}")
+            raise CommandFailed(f"iw dev {iface} scan faalde{_hint(msg)}: {msg}")
         nets = _filter_band(parse_iw_scan(res.stdout), band)
         return {"method": "iw", "band": band, "aps": nets, "stations": []}
 
