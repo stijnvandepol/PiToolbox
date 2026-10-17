@@ -1,9 +1,9 @@
 """De PiToolbox-app starten (protocol §8): op verzoek, na een verloren link, of als een
 handmatig geopende app daarom vraagt (verzoekbestand).
 
-Het verzoekbestand wordt alleen gepold als het device al verbonden is en in RPC staat; de
-bridge verbindt nooit zelf (zie de module-docstring van `bridge.py`). Starten en pollen lopen
-in de device-lane; de uitkomst gaat via `_post` terug naar de hoofdlus.
+Het verzoekbestand wordt gepold als het device in RPC staat; zonder verbinding opent de
+bridge er zelf één (zie de module-docstring van `bridge.py`). Starten en pollen lopen in de
+device-lane; de uitkomst gaat via `_post` terug naar de hoofdlus.
 """
 
 from __future__ import annotations
@@ -101,12 +101,21 @@ class _AppStarter(_FapOutput):
 
     def _poll_start_request(self) -> None:
         """Device-lane: verzoekbestand van een handmatig gestarte FAP (§8). Alleen als het
-        device verbonden is en in RPC staat, vrij is en er geen andere app open is; een oud
-        verzoek (> 30 s) telt niet."""
+        device in RPC staat, vrij is en er geen andere app open is; een oud verzoek (> 30 s)
+        telt niet.
+
+        Zonder verbinding opent de bridge er zelf een (een RPC-ping), met de backoff van
+        `_link_failed`: de FAP schrijft alleen een verzoek als er een RPC-sessie van een host
+        is, dus zonder link kan niemand de app handmatig openen. Een open link in CLI-modus
+        (een Sub-GHz/NFC/RFID-actie) blijft met rust: die zetten we niet terug naar RPC.
+        """
         if self.device.rpc_app_state != "off":
             return
         status = self.device.status()  # zonder lock en zonder te verbinden
-        if not status.get("connected") or status.get("mode") != "rpc":
+        if not status.get("connected"):
+            if not self._open_link():
+                return
+        elif status.get("mode") != "rpc":
             return
         try:
             if self.device.app_lock_status(idle_only=True):
@@ -137,6 +146,18 @@ class _AppStarter(_FapOutput):
                 "handmatig geopend", lock_wait_s=self.timing.manual_lock_wait_s
             )
         )
+
+    def _open_link(self) -> bool:
+        """Device-lane: verbinden en in RPC zetten (ping); bij een fout de backoff in."""
+        try:
+            self.device.ping()
+        except DeviceBusy:
+            return False
+        except (DeviceError, ToolboxError) as exc:
+            log.info("PiToolbox-app: geen verbinding met de Flipper (%s)", exc)
+            self._post(self._link_failed)
+            return False
+        return True
 
     def _link_ok(self) -> None:
         self._link_step = 0

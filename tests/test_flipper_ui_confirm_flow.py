@@ -356,15 +356,19 @@ def test_starting_has_a_deadline(tmp_path: Path) -> None:
         lab.bridge.stop()
 
 
-# --- #9: verzoekbestand alleen pollen over een bestaande RPC-sessie -----------------------------
+# --- #9: verzoekbestand pollen; zonder link verbindt de bridge één keer zelf -------------------
+# Oorspronkelijk verbond de bridge nooit zelf. Op hardware (2026-10-17) bleek dat een vers
+# gestarte service dan nooit een RPC-sessie heeft, zodat de FAP geen verzoek kan achterlaten.
+# Nu: één verbinding, die blijft staan (geen nieuwe open per poll); fouten volgen de backoff.
 
 
-def test_start_request_poll_never_connects(tmp_path: Path) -> None:
+def test_start_request_poll_opens_the_link_once(tmp_path: Path) -> None:
     lab = _lab(tmp_path)
     try:
         lab.bridge.start()
         time.sleep(0.4)  # vele poll-intervallen
-        assert lab.fake.opens == 0 and lab.fake.rpc_log == []
+        assert lab.fake.opens == 1
+        assert lab.device.status()["connected"] is True
     finally:
         lab.bridge.stop()
 

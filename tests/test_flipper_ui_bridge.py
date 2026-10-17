@@ -23,6 +23,7 @@ from llm_fakes import ScriptedProvider, reply, tool_call, use
 from pitoolbox.config import Settings
 from pitoolbox.core.audit import AuditLog
 from pitoolbox.core.devices.flipper import FlipperDevice
+from pitoolbox.core.errors import DeviceError
 from pitoolbox.core.policy import PendingStore, Policy
 from pitoolbox.core.scope import InfraredDevice, Scope, ScopeStore, WifiNetwork
 from pitoolbox.core.tools import build_registry
@@ -768,6 +769,42 @@ def test_manual_start_request_starts_app_and_is_deleted(tmp_path: Path) -> None:
         assert START_REQUEST_PATH not in lab.fake.files
     finally:
         lab.bridge.stop()
+
+
+def test_bridge_opens_the_link_itself_for_a_manual_start(tmp_path: Path) -> None:
+    # Een vers gestarte service heeft nog geen link; zonder RPC-sessie van de Pi kan de FAP
+    # geen verzoek achterlaten. De bridge moet dus zelf verbinden (hardwarevondst 2026-10-17).
+    now = 1_760_000_000
+    files = {START_REQUEST_PATH: f"PTBUI 1 {now - 5}\n".encode()}
+    lab = _make(tmp_path, files=files)
+    lab.fake.rtc_epoch = now
+    try:
+        assert lab.device.status()["connected"] is False
+        lab.bridge.start()
+        assert wait_until(lambda: lab.bridge.state is BridgeState.CONNECTED)
+        assert START_REQUEST_PATH not in lab.fake.files
+    finally:
+        lab.bridge.stop()
+
+
+def test_failing_link_backs_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lab = _make(tmp_path, timing=replace(FAST_BRIDGE, link_backoff_s=(0.2, 0.4)))
+    attempts: list[float] = []
+
+    def no_flipper() -> float:
+        attempts.append(time.monotonic())
+        raise DeviceError("geen Flipper")
+
+    monkeypatch.setattr(lab.device, "ping", no_flipper)
+    try:
+        lab.bridge.start()
+        time.sleep(1.0)
+    finally:
+        lab.bridge.stop()
+    # Zonder backoff zou elke start_poll_s (0,05 s) een poging zijn: ~20 in 1 s.
+    assert 2 <= len(attempts) <= 4, attempts
+    gaps = [b - a for a, b in itertools.pairwise(attempts)]
+    assert min(gaps) >= 0.18, gaps
 
 
 def test_manual_start_request_too_old_is_ignored(tmp_path: Path) -> None:

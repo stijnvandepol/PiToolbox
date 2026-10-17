@@ -24,10 +24,12 @@ threads posten alleen een callable naar die lus:
   (bevestigingen), `flipper-ui-device` (app starten, verzoekbestand pollen) en `flipper-ui-aux`
   (STATUS samenstellen). De noodstop draait altijd meteen in een eigen thread.
 
-Het verzoekbestand (§8) wordt alleen gepold als het device al verbonden is en in RPC staat
-(`device.status()`, zonder lock): de bridge verbindt nooit zelf (geen reconnect-storm over BLE)
-en zet USB niet elke paar seconden van CLI naar RPC. Zonder RPC-sessie van de Pi schrijft de
-FAP ook geen verzoek (`rpc_get_sessions_count`), dus er valt dan niets te missen.
+Het verzoekbestand (§8) wordt gepold als het device in RPC staat (`device.status()`, zonder
+lock). Zonder verbinding opent de bridge er zelf één (RPC-ping, daarna keepalive): zonder
+RPC-sessie van de Pi schrijft de FAP geen verzoek (`rpc_get_sessions_count`), en een vers
+gestarte service kreeg anders nooit een sessie (hardware, 2026-10-17). Mislukt verbinden, dan
+`link_backoff_s` (geen reconnect-storm over BLE). Een open link in CLI-modus blijft met rust:
+USB gaat niet elke paar seconden van CLI naar RPC.
 
 De device-lock serialiseert alles wat de Flipper raakt; de Flipper doet toch maar één
 RPC-opdracht tegelijk. De sink van het device en de luisteraar van de `PendingStore` worden
