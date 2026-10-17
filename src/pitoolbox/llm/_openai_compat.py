@@ -29,6 +29,9 @@ Bronnen:
   assistant-bericht incl. `reasoning_details` bewaren, en `content` niet wijzigen.
   Daarom bewaren we die velden in `ProviderState` en laten we `content` ongemoeid.
 
+Fouten in een HTTP 200-antwoord (OpenRouter `error`, `finish_reason` "error" of
+"network_error") worden een gewone `LLMError` met retries; zie `_body_errors.py`.
+
 Afwijkingen per preset (`Quirk`, gezet via `LLMConfig.quirks`; bronnen in `presets.py`):
 - `TOOL_CALL_EXTRA_CONTENT` (Gemini): `tool_calls[].extra_content` (de thought signature)
   per call bewaren en ongewijzigd terugsturen; zonder geeft Gemini 3 een 400.
@@ -38,10 +41,11 @@ Afwijkingen per preset (`Quirk`, gezet via `LLMConfig.quirks`; bronnen in `prese
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pitoolbox.llm._base import HttpProvider
+from pitoolbox.llm._body_errors import openai_compat_body_error
 from pitoolbox.llm._common import (
     as_dict,
     as_int,
@@ -52,7 +56,7 @@ from pitoolbox.llm._common import (
     require_list,
 )
 from pitoolbox.llm.config import ProviderKind
-from pitoolbox.llm.errors import LLMResponseError
+from pitoolbox.llm.errors import LLMError, LLMResponseError
 from pitoolbox.llm.presets import Quirk
 from pitoolbox.llm.types import (
     AssistantMessage,
@@ -179,6 +183,9 @@ class OpenAICompatibleProvider(HttpProvider):
         if extra_content is not None:
             out["extra_content"] = extra_content
         return out
+
+    def _body_error(self, data: dict[str, Any], clean: Callable[[str], str]) -> LLMError | None:
+        return openai_compat_body_error(data, clean)
 
     def _parse(self, data: dict[str, Any]) -> Completion:
         choices = require_list(data, "choices", "choices")
