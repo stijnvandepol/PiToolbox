@@ -151,9 +151,9 @@ Presets staan in de Pi-config, als lijst van `{id, label, prompt}`. Alleen `id` 
 
 ### Door de Pi
 
-1. `app_lock_status_request`. Is `locked = true`, dan doet de Pi niets: hij **sluit nooit een app van de gebruiker**, ook niet via GUI-input. Spike test 2: direct na een `APP_CLOSED` kan `locked` nog één keer `true` zijn, dus hooguit 0,5 s wachten en opnieuw kijken.
-2. `StartRequest{name: "/ext/apps/Tools/pitoolbox_ui.fap", args: "RPC"}`. Bij `ERROR_APP_SYSTEM_LOCKED` (de gebruiker was net eerder) geeft de Pi het op.
-3. Wachten op `APP_STARTED` en dan op HELLO (3 s).
+1. `app_lock_status_request`. Is `locked = true`, dan doet de Pi niets: hij **sluit nooit een app van de gebruiker**, ook niet via GUI-input. Spike test 2: direct na een `APP_CLOSED` kan `locked` nog één keer `true` zijn, dus hooguit 1,5 s wachten en elke 0,25 s opnieuw kijken (`FlipperTiming.loader_free_wait_s`/`loader_poll_s`).
+2. `StartRequest{name: "/ext/apps/Tools/pitoolbox_ui.fap", args: "RPC"}`. Bij `ERROR_APP_SYSTEM_LOCKED` (de gebruiker was net eerder) geeft de Pi het op. Uitzondering: na een **verloren link** probeert de bridge het `locked_retry_s` (10 s) lang opnieuw, omdat de bezette loader dan nog onze eigen, sluitende app kan zijn (§10). Er wordt nooit een app gesloten.
+3. Wachten op `APP_STARTED` en dan op HELLO (`hello_timeout_s`, 10 s: de FAP probeert HELLO 3x per 3 s, §5).
 
 ### Handmatig (vanuit het Apps-menu)
 
@@ -164,7 +164,7 @@ Een FAP die je zelf start, krijgt geen `"RPC %08lX"` en heeft dus geen kanaal na
    - Wel een sessie: hij schrijft `/ext/apps_data/pitoolbox_ui/start_request` met de inhoud `PTBUI 1 <furi_hal_rtc_get_timestamp>\n`. Dat gaat atomair: eerst `.tmp` schrijven, dan hernoemen. Hij toont "Pi wordt gevraagd de app te openen..." en **sluit na 1,5 s zichzelf**, zodat de loader vrij is.
 2. De bridge op de Pi pollt alleen als er geen FAP-sessie is, er geen tool loopt **en de Pi al een RPC-sessie heeft** (`FlipperDevice.status()`: verbonden en in RPC, zonder lock gelezen), elke 3 s, met `storage_stat` op dat pad. De bridge verbindt dus nooit zelf (geen reconnect-storm over BLE) en zet USB niet steeds van CLI naar RPC. Er valt dan ook niets te missen: zonder RPC-sessie van de Pi schrijft de FAP geen verzoek (stap 1). Dat is één klein frame, ongeveer 100 ms over BLE, dus ongeveer 3 % van de link. `ERROR_STORAGE_NOT_EXIST` betekent niets te doen.
 3. Is het bestand er, dan leest de Pi het (≤ 64 B), wist het **meteen**, en controleert inhoud en versheid. Daarvoor vergelijkt hij de tijdstempel met `system_get_datetime_request`, omgerekend met `calendar.timegm` op dezelfde manier als `datetime_datetime_to_timestamp`. Het verschil moet ≤ 30 s zijn. Een oud verzoek (de Pi was niet verbonden toen je de app startte) wordt dus genegeerd, en de app springt niet uren later ongevraagd open.
-4. Daarna volgt dezelfde route als "Door de Pi". De lock-check mag 3 s lang elke 0,5 s herhaald worden, omdat de handmatige instance nog aan het sluiten is. Is de loader dan bezet, dan heeft de gebruiker intussen iets anders geopend: opgeven.
+4. Daarna volgt dezelfde route als "Door de Pi". De lock-check mag 3 s lang (`manual_lock_wait_s`) elke 0,25 s herhaald worden, omdat de handmatige instance nog aan het sluiten is. Is de loader dan bezet, dan heeft de gebruiker intussen iets anders geopend: opgeven.
 
 Overwogen en afgewezen (bron: mntm-012):
 
@@ -235,11 +235,11 @@ FlipperUiBridge
 
 ### Nog niet op hardware getest
 
-Handshake en snelle acties over BLE; `storage_delete` en de datumaanvraag op Momentum; de timing van de `ir_send`-handoff (hoe lang de loader bezet blijft na APP_CLOSED); het gedrag als de app hangt; de valtest (20x); of OK/Back op de echte app de vraag-flow volgt.
+Wel getest (2026-10-17, USB en BLE): de handshake, STATUS via de status-tool, de valtest (20/20, twee keer), keepalive met de app open. Nog niet: `storage_delete` en de datumaanvraag op Momentum (handmatige start); de timing van de `ir_send`-handoff (hoe lang de loader bezet blijft na APP_CLOSED); een app die echt hangt; of OK/Back en de snelle acties op de echte app de vraag-flow volgen.
 
 ## 11. Testen
 
 - `uv run pytest tests/test_flipper_ui_bridge.py tests/test_flipper_ui_confirm_flow.py`: de bridge end-to-end tegen een nagebootste FAP. `test_flipper_ui_confirm_flow.py` dekt de regressies uit de review: geen nieuwe vraag zolang CLOSED niet afgeleverd is, opnieuw groeten op `NOT_READY`, CLOSED(`verlopen`) bij een antwoord op een net verlopen handle, opnieuw vragen na een verlopen handle/volle rij/`BUSY`, de noodstop tijdens het starten, pollen zonder te verbinden, een begrensde `stop()`, en dat `pitoolbox-agent` de uitkomst van OK op de Flipper hoort.
 - `uv run pytest tests/test_flipper_ui_protocol.py`: roundtrip van elk type, vaste vectoren, grootste berichten ≤ 512 B, modelgrenzen, strikte decoder (34 foutgevallen), fuzz (5000 willekeurige berichten, mutaties en inkortingen: alleen `ProtocolError`, en wat geaccepteerd wordt is canoniek), tekstconversie, seq (duplicaat, gat, wrap), rate limit, reassembly (andere volgorde, duplicaat, conflict, ontbrekend deel, limieten), handles (eenmalig, TTL, instance, intrekken) en de koppeling snelle actie → echte tool.
 - C ↔ Python: `ptb_proto.c` op de host gecompileerd (gcc, `-Wall -Wextra -Werror`) en vergeleken met de Python-codec op 14.200 berichten: 0 verschillen. Dat script staat niet in de repo.
-- Hardware: zie [fase4-spike.md](fase4-spike.md) en de README van de FAP. Een valtest (BLE weg terwijl de FAP verstuurt, 20 keer) is nodig voordat de FAP als stabiel geldt.
+- Hardware: `pitoolbox-flipper ui-install`, `ui-test` en `ui-droptest` (zie de README van de FAP, met de resultaten). De valtest (BLE weg terwijl de Pi verstuurt, 20 keer) is twee keer 20/20 geslaagd.

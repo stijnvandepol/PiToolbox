@@ -26,11 +26,11 @@ Alle vijf fases zijn gebouwd en getest met nagebootste apparaten (`uv run pytest
 | Onderdeel | Op hardware getest? |
 |---|---|
 | Flipper over USB (Momentum `mntm-012`) | ja: `system_info`, storage, `subghz_rx` op 433,92 en 290 MHz, `rfid_read` en `nfc_read` **zonder** tag, wisselen tussen RPC en CLI. Nog niet: een echte tag of afstandsbediening, `ir_send` |
-| Flipper over Bluetooth LE | ja: koppelen, `system_info`, storage, ping en doorvoer. Nog niet: `ir_send`, herverbinden, keepalive |
+| Flipper over Bluetooth LE | ja: koppelen, `system_info`, storage, ping en doorvoer, keepalive, herverbinden na een verbroken link (valtest 20/20). Nog niet: `ir_send` |
 | Alfa (wifi-tools) | **nee** (heeft root of capabilities nodig) |
 | Remote via de Claude-app (fase 2) | **nee** |
 | Agent en LLM-providers (fase 4) | **nee**, nog niet tegen de echte API's of Ollama |
-| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | **nee**: de app bouwt, de bridge is getest tegen een nagebootste app |
+| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | ja, over USB en BLE: installeren (`ui-install`), rooktest (`ui-test`), valtest 20/20 (`ui-droptest`), 5 minuten open zonder verbreking. Nog niet met de hand: OK/Back op een echte vraag, snelle acties en presets vanuit het menu |
 | Systeemconfig voor onderweg (fase 5) | **nee**: alleen de bestanden, `--dry-run` en de controles zonder root |
 
 ## Veiligheidsmodel

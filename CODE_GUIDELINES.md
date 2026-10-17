@@ -219,7 +219,7 @@ Run locally:      uv sync, then uv run pitoolbox-mcp (stdio), uv run pitoolbox-a
 
 Run tests:        scripts/gates.sh runs every gate CI runs (ruff check, which
                   enforces the §3 limits, ruff format --check, mypy strict, pytest,
-                  uv audit) and names the ones it skipped. Judge a gate by its exit code.
+                  uv audit, shellcheck) and names the ones it skipped. Judge a gate by its exit code.
 
 Build:            Python: nothing to build. Flipper app: ufbt in
                   flipper_app/pitoolbox_ui (warnings are errors; API must
