@@ -56,8 +56,8 @@ def test_provider_without_model_fails() -> None:
 
 
 def test_unknown_provider_lists_choices() -> None:
-    with pytest.raises(LLMConfigError, match="openai-compatible, anthropic, openai"):
-        LLMConfig.from_settings(_settings(llm_provider="gemini", llm_model="x"))
+    with pytest.raises(LLMConfigError, match="openai-compatible, anthropic, openai, deepseek"):
+        LLMConfig.from_settings(_settings(llm_provider="bestaat-niet", llm_model="x"))
 
 
 def test_openai_compatible_requires_base_url() -> None:

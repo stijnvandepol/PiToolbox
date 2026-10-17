@@ -72,10 +72,11 @@ class Settings(BaseModel):
     # Bewust GEEN standaardprovider of -model: zonder deze twee weigert de agent te starten.
     # Validatie gebeurt in `pitoolbox.llm.config.LLMConfig.from_settings`, niet hier, zodat
     # een fout in de LLM-instellingen de MCP-server niet raakt.
-    llm_provider: str | None = None  # "openai-compatible" | "anthropic" | "openai"
+    # Preset (deepseek, ollama, ...) of wire-formaat; lijst: `pitoolbox-agent --list-providers`.
+    llm_provider: str | None = None
     llm_model: str | None = None
-    # Verplicht voor openai-compatible (bijv. http://127.0.0.1:11434/v1); voor anthropic en
-    # openai standaard het officiële endpoint van die provider.
+    # Verplicht voor openai-compatible (bijv. http://127.0.0.1:11434/v1); bij een preset
+    # standaard het officiële endpoint van die provider (dit overschrijft het).
     llm_base_url: str | None = None
     # SecretStr: verschijnt als '**********' in repr/logs; alleen de HTTP-laag leest hem uit.
     llm_api_key: SecretStr | None = None

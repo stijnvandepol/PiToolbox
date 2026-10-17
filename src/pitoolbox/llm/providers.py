@@ -15,6 +15,9 @@ Adapters:
 - `anthropic`: Messages API.
 - `openai`: Responses API.
 
+Benoemde providers (deepseek, qwen, kimi, glm, minimax, mistral, groq, openrouter, xai,
+gemini, ollama, lmstudio, llamacpp, vllm) zijn presets op deze drie adapters: zie `presets.py`.
+
 Welke provider en welk model: alleen uit PITOOLBOX_LLM_PROVIDER / PITOOLBOX_LLM_MODEL.
 Zonder die twee geeft `build_provider` een `LLMConfigError` met de te zetten variabelen.
 
