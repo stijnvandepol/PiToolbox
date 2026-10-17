@@ -38,7 +38,7 @@ from pitoolbox.frontends.flipper_ui.protocol import (
     QuickAction,
     QuickActionPlan,
     quick_action_plan,
-    to_display_text,
+    to_text_box,
 )
 
 log = logging.getLogger(LOG_NAME)
@@ -197,7 +197,8 @@ class _ActionFlow(_FapOutput):
 
         def on_event(event: AgentEvent) -> None:
             if isinstance(event, ToolCallStarted):
-                text = to_display_text(f"tool: {event.name}", max_len=MAX_PROGRESS)
+                # De FAP toont PROGRESS op een eigen regel onder "Bezig..." in zijn TextBox.
+                text = to_text_box(f"tool: {event.name}", max_len=MAX_PROGRESS, multiline=False)
                 self._post(lambda: self._send_progress(instance, ref, text))
 
         result = session.run_turn(preset.prompt, on_event, cancel=job.cancelled.is_set)

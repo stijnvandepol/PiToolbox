@@ -31,6 +31,8 @@ Strikt decoderen betekent aan beide kanten hetzelfde: verkeerde magic of versie,
 
 **Regels op het scherm.** De FAP toont het resultaat in een TextBox van de firmware. Die breekt een regel af zodra het volgende teken niet meer in 120 pixels past, ook midden in een woord (`text_box_seek_next_line` in Momentum mntm-012). Daarom breekt de Pi de tekst zelf af vóór het opsplitsen in delen (`to_text_box` in `protocol_text.py`): op spaties, en alleen in een woord dat breder is dan een hele regel na `/`, `-` of `_`, of anders midden in het woord. De breedte per teken komt uit het font van de firmware (`_font_widths.py`, gegenereerd door `scripts/gen_flipper_font_widths.py`). Een Momentum-assetpack met een eigen font maakt die breedtes onjuist; dan breekt de TextBox weer zelf af.
 
+PROGRESS en ERROR zijn één regel (geen `\n`), maar de FAP toont ze ook in die TextBox: PROGRESS op een eigen regel onder "Bezig...", ERROR als `<titel>: <tekst>` (`ptb_error_title` in `pitoolbox_ui.c`; de Pi kent dezelfde titels, `_ERROR_TITLES` in `bridge_text.py`, en een test vergelijkt ze met de C-bron). Daar vult de Pi elke regel op met spaties tot hij vol is. De spatie is het smalste teken (2 px), dus daarna past het eerste teken van het volgende woord niet meer en begint de TextBox precies daar een nieuwe regel. Het opvullen kost tekens van de 120 (ERROR) of 64 (PROGRESS): een lange foutmelding wordt daardoor eerder afgekapt met `...`. Tekst die de FAP zelf samenstelt (het statusscherm) breekt de Pi niet af.
+
 ## 3. Berichten
 
 `ref` verwijst naar de `seq` van het FAP-bericht waar het antwoord bij hoort. `ref = 0` betekent "geen antwoord" (de Pi begon zelf).

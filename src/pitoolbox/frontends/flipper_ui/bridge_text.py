@@ -1,5 +1,5 @@
 """Tekst voor het scherm van de Flipper: antwoorden op snelle acties, de bevestigingsvraag,
-de noodstop en het STATUS-bericht. Puur: alleen uit de resultaten van de tools."""
+de noodstop, foutmeldingen en het STATUS-bericht. Puur: alleen uit de resultaten van de tools."""
 
 from __future__ import annotations
 
@@ -8,13 +8,17 @@ from typing import Any
 
 from pitoolbox.agent.session import TurnStop
 from pitoolbox.frontends.flipper_ui.protocol import (
+    MAX_ERROR_TEXT,
     MAX_SUMMARY,
     MAX_TOOL_NAME,
     MAX_UPLINK,
+    ErrorCode,
     LastResult,
     Link,
     Status,
+    text_width,
     to_display_text,
+    to_text_box,
 )
 
 # --- tekst voor het scherm --------------------------------------------------------------------
@@ -32,6 +36,34 @@ def _prompt_text(summary: str, tool: str, frontend: str) -> str:
     origin = frontend.split(":", 1)[0]
     text = to_display_text(f"{summary}\n(van {origin})", max_len=MAX_SUMMARY, multiline=True)
     return text if text.strip() else to_display_text(tool, max_len=MAX_SUMMARY) or "transmit"
+
+
+# Dezelfde woorden als `ptb_error_title` in pitoolbox_ui.c. De FAP toont een ERROR in zijn
+# TextBox als "<titel>: <tekst>" (onbekende code: "Fout <n>: "); de Pi moet weten hoe breed
+# dat begin is om de tekst erachter op woordgrenzen af te breken.
+_ERROR_TITLES = {
+    ErrorCode.BUSY: "Bezig",
+    ErrorCode.RATE_LIMITED: "Te snel",
+    ErrorCode.UNKNOWN_ACTION: "Onbekende actie",
+    ErrorCode.INVALID_MESSAGE: "Ongeldig bericht",
+    ErrorCode.UNSUPPORTED_VERSION: "Andere versie",
+    ErrorCode.TOOL_FAILED: "Mislukt",
+    ErrorCode.AGENT_UNAVAILABLE: "Agent niet beschikbaar",
+    ErrorCode.CANCELLED: "Afgebroken",
+    ErrorCode.TIMEOUT: "Time-out",
+    ErrorCode.CONFIRM_INVALID: "Bevestiging ongeldig",
+    ErrorCode.NOT_READY: "Pi kent sessie niet",
+}
+
+
+def _error_screen_text(code: ErrorCode, text: str) -> str:
+    """De tekst van een ERROR, afgebroken voor de TextBox achter "<titel>: " van de FAP.
+
+    ERROR is één regel in het protocol, dus `to_text_box` vult de regels op met spaties.
+    """
+    title = _ERROR_TITLES.get(code)
+    prefix = f"{title}: " if title else f"Fout {int(code)}: "
+    return to_text_box(text, max_len=MAX_ERROR_TEXT, multiline=False, prefix_px=text_width(prefix))
 
 
 def _dict(value: Any) -> dict[str, Any]:

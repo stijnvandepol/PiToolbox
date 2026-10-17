@@ -11,10 +11,13 @@ from functools import partial
 from typing import Any
 
 from pitoolbox.frontends.flipper_ui.bridge_core import _BridgeCore, _Fap
-from pitoolbox.frontends.flipper_ui.bridge_text import _result, _status_message
+from pitoolbox.frontends.flipper_ui.bridge_text import (
+    _error_screen_text,
+    _result,
+    _status_message,
+)
 from pitoolbox.frontends.flipper_ui.bridge_types import FRONTEND, BridgeState
 from pitoolbox.frontends.flipper_ui.protocol import (
-    MAX_ERROR_TEXT,
     Error,
     ErrorCode,
     Message,
@@ -25,7 +28,6 @@ from pitoolbox.frontends.flipper_ui.protocol import (
     SeqCounter,
     Status,
     chunk_result,
-    to_display_text,
 )
 
 
@@ -53,7 +55,7 @@ class _FapOutput(_BridgeCore):
     def _send_error(
         self, ref: int, code: ErrorCode, text: str, *, instance: int | None = -1
     ) -> None:
-        clean = to_display_text(text, max_len=MAX_ERROR_TEXT)
+        clean = _error_screen_text(code, text)
         if instance == -1 and self._fap is None:
             instance = None
         self._send(lambda seq: Error(seq=seq, ref=ref, code=code, text=clean), instance=instance)

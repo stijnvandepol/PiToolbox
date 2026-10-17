@@ -18,6 +18,9 @@ Gedrag nagebootst uit de firmwarebronnen (flipperzero-firmware 3fb1d517):
   schermstream geeft ERROR_VIRTUAL_DISPLAY_ALREADY_STARTED als hij al loopt, stuurt na de start
   meteen een frame (`gui_add_framebuffer_callback` vraagt een redraw, gui.c) en daarna één per
   `set_screen`; stoppen geeft altijd OK; een nieuwe sessie begint zonder stream.
+* De TextBox van Momentum mntm-012 (`text_box_seek_next_line` in text_box.c) en de titel die
+  de PiToolbox-app vóór een ERROR zet (`ptb_error_title`, gelezen uit pitoolbox_ui.c):
+  `text_box_lines` en `fap_error_titles`.
 
 De uitvoer van subghz/rfid/nfc komt uit tests/fixtures/flipper/*.txt (zelf geschreven op basis
 van de printf-formaten; de decoder-tekst van Sub-GHz is synthetisch). De `*_momentum_*`-fixtures
@@ -51,6 +54,7 @@ from pitoolbox.core.devices._flipper_rpc.pb import (
 from pitoolbox.core.devices._flipper_screen import FRAME_BYTES
 from pitoolbox.core.devices.flipper import FlipperTiming, TransportError
 from pitoolbox.frontends.flipper_ui import protocol as proto
+from pitoolbox.frontends.flipper_ui._font_widths import ADVANCE, TEXT_BOX_WIDTH
 
 FIXTURES = Path(__file__).parent / "fixtures" / "flipper"
 ETX_MARKER = "---ETX---"
@@ -1422,3 +1426,41 @@ def make_fap(
         struct.pack("<IIIIIIIIII", n, 1, 0, 0, off, size, 0, 0, 1, 0) for n, off, size in sections
     )
     return bytes(header) + filler + meta + names + table
+
+
+# --- scherm van de FAP ------------------------------------------------------------------------
+
+FAP_SOURCE = Path(__file__).resolve().parents[1] / "flipper_app/pitoolbox_ui/pitoolbox_ui.c"
+
+
+def text_box_lines(text: str) -> list[str]:
+    """Regels zoals de TextBox van de firmware ze maakt (`text_box_seek_next_line`): per teken
+    de breedte optellen; een nieuwe regel bij '\\n' of zodra het volgende teken niet past."""
+    lines: list[str] = []
+    i = 0
+    while True:
+        start, width = i, 0
+        while i < len(text) and text[i] != "\n":
+            if width + ADVANCE[text[i]] > TEXT_BOX_WIDTH:
+                break
+            width += ADVANCE[text[i]]
+            i += 1
+        lines.append(text[start:i])
+        if i < len(text) and text[i] == "\n":
+            i += 1
+        if i >= len(text):
+            return lines
+
+
+def fap_error_titles() -> dict[int, str]:
+    """De tabel uit `ptb_error_title` in pitoolbox_ui.c: foutcode -> titel vóór de tekst."""
+    source = FAP_SOURCE.read_text(encoding="utf-8")
+    body = source[source.index("ptb_error_title(uint8_t code)") :]
+    body = body[: body.index("};")]
+    return {int(code): title for code, title in re.findall(r'\[(\d+)\] = "([^"]*)"', body)}
+
+
+def fap_error_line(code: int, text: str) -> str:
+    """Wat de FAP in zijn TextBox zet voor een ERROR (`ptb_on_message`, pitoolbox_ui.c)."""
+    title = fap_error_titles().get(code)
+    return f"{title}: {text}" if title else f"Fout {code}: {text}"

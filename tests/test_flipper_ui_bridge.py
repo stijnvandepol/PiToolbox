@@ -17,7 +17,14 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from flipper_fakes import FAST_TIMING, FakeFap, FakeFlipperTransport, wait_until
+from flipper_fakes import (
+    FAST_TIMING,
+    FakeFap,
+    FakeFlipperTransport,
+    fap_error_line,
+    text_box_lines,
+    wait_until,
+)
 from llm_fakes import ScriptedProvider, reply, tool_call, use
 
 from pitoolbox.config import Settings
@@ -434,7 +441,15 @@ def test_preset_without_llm_is_agent_unavailable(tmp_path: Path) -> None:
     try:
         lab.connect()
         ref = lab.fap.action(proto.ActionKind.PRESET, 1)
-        assert lab.error(ref).code is proto.ErrorCode.AGENT_UNAVAILABLE
+        error = lab.error(ref)
+        assert error.code is proto.ErrorCode.AGENT_UNAVAILABLE
+        # Zoals de TextBox van de FAP het toont: achter de titel, afgebroken tussen woorden.
+        shown = text_box_lines(fap_error_line(error.code, error.text))
+        assert [line.rstrip(" ") for line in shown] == [
+            "Agent niet beschikbaar: Geen",
+            "LLM ingesteld op de Pi",
+            "(PITOOLBOX_LLM_*)",
+        ]
         ref = lab.fap.action(proto.ActionKind.PRESET, 2)
         assert lab.error(ref).code is proto.ErrorCode.UNKNOWN_ACTION
     finally:
@@ -480,6 +495,29 @@ def test_preset_runs_agent_turn_with_progress(tmp_path: Path) -> None:
         assert getattr(first, "text", "") == "Hoe staat het ervoor?"
         turns = [r for r in lab.audit() if r.get("event") == "agent_turn_end"]
         assert turns and turns[-1]["frontend"] == FRONTEND
+    finally:
+        lab.bridge.stop()
+
+
+def test_progress_with_a_long_tool_name_breaks_after_an_underscore(tmp_path: Path) -> None:
+    def slow_reply(_messages: Sequence[Any]) -> Any:
+        time.sleep(0.3)  # tijd genoeg om PROGRESS te versturen
+        return reply("Die tool bestaat niet.")
+
+    name = "flipper_subghz_verzonnen_lange_toolnaam"
+    provider = ScriptedProvider([use(tool_call(name)), slow_reply])
+    presets = [PresetConfig(id=1, label="Test", prompt="Probeer iets.")]
+    lab = _make(tmp_path, provider=provider, presets=presets)
+    try:
+        lab.connect()
+        ref = lab.fap.action(proto.ActionKind.PRESET, 1)
+        assert lab.fap.result_text(ref) == "Die tool bestaat niet."
+        [progress] = [m.text for m in lab.fap.of_type(proto.Progress) if m.ref == ref]
+        # De FAP toont "Bezig...\n<progress>"; PROGRESS is één regel, dus opgevuld met spaties.
+        assert [line.rstrip(" ") for line in text_box_lines(progress)] == [
+            "tool: flipper_subghz_",
+            "verzonnen_lange_toolnaam",
+        ]
     finally:
         lab.bridge.stop()
 
