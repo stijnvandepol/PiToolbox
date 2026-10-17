@@ -99,7 +99,8 @@ Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. Met 
 - Duurtest 40 minuten over BLE, app open, elke 10 s STATUS: 240/240 afgeleverd, 0 verbrekingen, geheugen stabiel.
 - OK/Back op een echte bevestigingsvraag: `ui-test --confirm-check` door Stijn (2026-10-17, USB), geslaagd.
 - Handmatige start en het menu, met de bediening op afstand (2026-10-17, BLE, bridge in het testproces, lege scope): OK in Apps → Tools → PiToolbox → de app vraagt de Pi om hem te openen → gekoppeld in ~7 s; Snelle acties Status, Wifi-scan (zonder CAP_NET_ADMIN: nette foutmelding), Stop captures ("Geen actieve captures.") en NOODSTOP, het statusscherm, en Back tot de app dicht is. Daarbij gevonden en gerepareerd: de bridge verbond nooit zelf (handmatige start kon niet), de cursor in Snelle acties sprong terug naar boven, de statustekst verschilde van het statusscherm, en "Fout 6" werd "Mislukt".
-- **Nog open:** presets vanuit het menu (eerst een presets-bestand en een LLM-provider), spike-test 7 (vergrendelen over BLE).
+- Presets (2026-10-17, BLE, op afstand): presetlijst van de Pi, preset kiezen → agent (tegen een nagebootste OpenAI-compatibele LLM op 127.0.0.1) → tool `status` → antwoord op het scherm; audit met `agent_turn_start/end`, de sleutel staat er niet in. Gezien: de TextBox breekt midden in woorden af (de firmware wrapt per teken); de Pi gaat de tekst daarom zelf op woordgrenzen afbreken.
+- **Nog open:** presets met een echte LLM-provider, spike-test 7 (vergrendelen over BLE).
 
 ### Op afstand (alleen voor ontwikkeling)
 
