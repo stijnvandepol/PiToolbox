@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from conftest import MakeCtx
+from flipper_fakes import FAST_TIMING, FakeFap, FakeFlipperTransport, wait_until
 
+from pitoolbox.core.devices.flipper import FlipperDevice
 from pitoolbox.core.errors import DeviceNotConnected
 from pitoolbox.core.scope import Scope, ScopeStore
 from pitoolbox.core.tools import system_tools
@@ -131,16 +135,34 @@ class _BrokenPending:
 def test_status_does_not_report_bridge_poll_as_busy(
     make_ctx: MakeCtx, tmp_path: Path, fixed_scope: Scope
 ) -> None:
-    """De lezer van de Flipper-bridge wijkt voor elke tool-call: geen "bezet" naar het model."""
+    """De lezer van de Flipper-bridge wijkt voor elke tool-call: geen "bezet" naar het model.
+    Met een echt device waarop de lezer continu pollt; een echte operatie blijft "bezet"."""
     ctx = make_ctx(tmp_path, fixed_scope)
-    ctx.flipper.status.return_value = {
-        "connected": True,
-        "busy": True,
-        "operation": "poll_app_events",
-        "ui_app": "active",
-    }
-    out = call(ctx, "status")["flipper"]
-    assert out["busy"] is False and out["operation"] is None and out["ui_app"] == "active"
-    ctx.flipper.status.return_value = {"connected": True, "busy": True, "operation": "ir_send"}
-    out = call(ctx, "status")["flipper"]
+    fake = FakeFlipperTransport(start_in_rpc=True, kind="ble")
+    fake.attach_fap(FakeFap())
+    device = FlipperDevice(lambda: fake, timing=FAST_TIMING)
+    ctx.flipper = device
+    device.start_rpc_app(fake.fap_path)
+    stop = threading.Event()
+
+    def reader() -> None:
+        while not stop.is_set():
+            if not device.poll_app_events(0.2):
+                time.sleep(0.001)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        assert wait_until(device._lock.locked)
+        for _ in range(5):
+            out = call(ctx, "status")["flipper"]
+            assert out["busy"] is False and out["operation"] is None
+            assert out["ui_app"] == "active"
+            time.sleep(0.02)
+    finally:
+        stop.set()
+        thread.join()
+    with device._operation("ir_send"):
+        out = call(ctx, "status")["flipper"]
     assert out["busy"] is True and out["operation"] == "ir_send"
+    device.close()

@@ -168,7 +168,9 @@ class FlipperLink:
     ) -> Iterator[int]:
         """`abortable=False`: een abort() (noodstop) breekt deze operatie niet af (berichten
         van de bridge). `blocking=False`: alleen als niemand de lock heeft of erop wacht, anders
-        `DeviceBusy`. `touch_io=False`: telt niet als verkeer voor de keepalive (alleen lezen)."""
+        `DeviceBusy`; zo'n operatie (de bridge-lezer) wijkt voor elke andere en telt daarom niet
+        als bezet (`status()`, `idle_only`). `touch_io=False`: telt niet als verkeer voor de
+        keepalive (alleen lezen)."""
         # De generatie wordt vóór het wachten op de lock vastgelegd: een abort() terwijl deze
         # call nog in de rij staat, breekt hem dus ook af.
         gen = self._abort_gen
@@ -183,7 +185,7 @@ class FlipperLink:
         elif self._waiters or not self._lock.acquire(blocking=False):
             raise DeviceBusy(f"Flipper is bezet; {name} overgeslagen")
         try:
-            self._busy_op = name
+            self._busy_op = name if blocking else None
             with self._gen_lock:
                 self._op_abortable = abortable
             try:

@@ -319,6 +319,22 @@ def test_keepalive_keeps_pinging_while_the_reader_polls() -> None:
         device.close()
 
 
+def test_reader_does_not_make_the_device_look_busy() -> None:
+    """De lezer van de bridge wijkt voor elke tool-call: geen "bezet" in status(), en een
+    `idle_only`-actie wacht hoogstens één leesslice in plaats van over te slaan."""
+    device, _fake, _fap, _sink = make()
+    device.start_rpc_app(FAP)
+    with bridge_reader(device, 0.2):
+        assert wait_until(device._lock.locked)
+        samples = []
+        for _ in range(20):
+            samples.append(device.status())
+            time.sleep(0.01)
+        assert device.app_lock_status(idle_only=True) is True  # onze app houdt de loader
+    assert not any(s["busy"] for s in samples)
+    assert {s["operation"] for s in samples} == {None}
+
+
 def test_cli_actions_refused_while_app_open() -> None:
     device, fake, _fap, _sink = make(ble=False)  # USB: CLI bestaat, maar de app houdt de loader
     device.start_rpc_app(FAP)
