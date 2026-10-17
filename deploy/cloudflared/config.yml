@@ -35,7 +35,8 @@ originRequest:
 # routes die de MCP-server en zijn eigen OAuth-server nodig hebben.
 #
 # LET OP: controleer dat dit alle routes dekt die pitoolbox.auth registreert
-# (de OAuth-routes van de MCP-SDK: /authorize, /token, /register, /revoke, plus onze /login-routes).
+# (de OAuth-routes van de MCP-SDK: /authorize, /token, /register; ons eigen /revoke, zie
+# src/pitoolbox/auth/revoke.py; plus onze /login-routes).
 # Staat er een route in de code die hier niet in zit, dan is die niet bereikbaar via de tunnel.
 ingress:
   # 1. MCP-endpoint en OAuth-server. `(/|$)` laat /mcp, /mcp/ en /login/... toe, maar niet
