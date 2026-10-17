@@ -4,10 +4,13 @@
   en via de storage-RPC op ``PITOOLBOX_FLIPPER_UI_APP`` zetten, met voortgang en MD5-controle.
 - ``ui-test``: de app starten via de echte bridge, HELLO/WELCOME, een STATUS van de
   ``status``-tool end-to-end afleveren, de app netjes sluiten; met tijden per stap. Met
-  ``--confirm-check`` daarna OK en Back op twee test-vragen ("Flipper verplicht").
+  ``--confirm-check`` daarna OK en Back op twee test-vragen ("Flipper verplicht"); met ``--auto``
+  drukt de Pi die knoppen zelf op afstand (ontwikkelaarsmodus, zie flipper_remote_cli.py).
 - ``ui-droptest [--rounds N]``: valtest over BLE. Terwijl de Pi STATUS-berichten stuurt, wordt de
   link via BlueZ verbroken (``org.bluez.Device1.Disconnect`` over D-Bus, geen root). Daarna moet
   de Flipper antwoorden en de app opnieuw starten. Stopt bij de eerste fout.
+- ``remote screen``, ``remote press KNOP``: ontwikkelaarsmodus, het scherm lezen en knoppen
+  drukken op afstand (flipper_remote_cli.py).
 
 **Niets hiervan zendt radio uit.** ui-test en ui-droptest draaien de bridge met een runner die
 alleen ``status`` toelaat (``tool_allowlist``) en een lege scope heeft: kiest iemand op de
@@ -27,7 +30,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from . import flipper_ui_install
+from . import flipper_remote_cli, flipper_ui_install
 from .config import Settings
 from .flipper_cli_common import _mac_arg
 from .flipper_ui_droptest import cmd_droptest
@@ -100,6 +103,7 @@ def add_parsers(sub: Any, common: argparse.ArgumentParser, settings: Settings) -
     _add_install_parser(sub, parents, settings)
     _add_test_parser(sub, parents, settings)
     _add_droptest_parser(sub, parents)
+    flipper_remote_cli.add_parsers(sub, parents, settings)
 
 
 def _add_install_parser(
@@ -155,6 +159,11 @@ def _add_test_parser(sub: Any, parents: list[argparse.ArgumentParser], settings:
             f"(standaard {CONFIRM_WAIT_DEFAULT_S:g}); zendt nooit iets uit"
         ),
     )
+    p_test.add_argument(
+        "--auto",
+        action="store_true",
+        help="met --confirm-check: de Pi drukt OK en Back zelf op afstand (ontwikkelaarsmodus)",
+    )
 
 
 def _add_droptest_parser(sub: Any, parents: list[argparse.ArgumentParser]) -> None:
@@ -183,4 +192,4 @@ def run(args: argparse.Namespace, settings: Settings) -> int | None:
         return cmd_ui_test(args, settings)
     if args.command == "ui-droptest":
         return cmd_droptest(args, settings)
-    return None
+    return flipper_remote_cli.run(args, settings)

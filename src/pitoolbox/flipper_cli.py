@@ -8,7 +8,9 @@ Subcommando's:
 - ``ble-test``: de fase-3-meetscript: verbinden, system_info, opslaglijst, ping-latency en
   downloadsnelheid, optioneel naast USB;
 - ``ui-install``, ``ui-test``, ``ui-droptest``: de PiToolbox-app op de Flipper installeren, een
-  rooktest en de valtest (fase 4, zie flipper_ui_cli.py).
+  rooktest en de valtest (fase 4, zie flipper_ui_cli.py);
+- ``remote screen``, ``remote press``: ontwikkelaarsmodus, het scherm lezen en knoppen drukken op
+  afstand (flipper_remote_cli.py; nooit een tool).
 
 Elk subcommando kent ``--adapter hciN`` (standaard PITOOLBOX_FLIPPER_BLE_ADAPTER, anders de
 standaardadapter van BlueZ), handig als er meerdere Bluetooth-adapters zijn.

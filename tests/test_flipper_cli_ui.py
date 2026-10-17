@@ -27,7 +27,7 @@ from pitoolbox import (
 )
 from pitoolbox.config import Settings
 from pitoolbox.core.audit import AuditLog
-from pitoolbox.core.devices.flipper import FlipperDevice
+from pitoolbox.core.devices.flipper import FlipperDevice, RemoteInputRefused
 from pitoolbox.core.policy import PendingStore, Policy
 from pitoolbox.core.scope import ScopeStore
 from pitoolbox.core.tools import build_registry
@@ -71,6 +71,7 @@ FAST_UI = flipper_ui_cli.UiTiming(
     traffic_gap_s=0.02,
     traffic_s=0.05,
     traffic_step_s=0.01,
+    auto_press_s=0.15,
 )
 DEVICE_TIMING = replace(FAST_TIMING, loader_free_wait_s=0.3, loader_poll_s=0.02)
 
@@ -382,6 +383,58 @@ def test_ui_test_confirm_check_ok_then_back(
     assert "allowlist" in rows[0]["result"]
     assert ir_sends == [] and lab.fake.sent_buttons == [] and lab.fake.app_starts == [APP]
     assert lab.runners[0].ctx.pending.list() == []
+    assert lab.fake.gui_inputs == []  # zonder --auto drukt de Pi nooit zelf
+
+
+def test_ui_test_confirm_check_auto_presses_ok_then_back(
+    lab: UiLab, ir_sends: list[tuple[Any, ...]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    lab.fap.confirm_arm_s = 0.1  # een te vroege OK telt niet: --auto moet wachten
+    assert _run("ui-test", "--confirm-check", "3", "--auto") == 0
+    out = capsys.readouterr().out
+    labels = [
+        "vraag 1 op de Flipper (CONFIRM_PROMPT)",
+        "chat-bevestiging geweigerd (Flipper verplicht)",
+        "OK op afstand gedrukt (vraag 1)",
+        "OK op vraag 1: bevestigd, policy weigert",
+        "vraag 2 op de Flipper (CONFIRM_PROMPT)",
+        "Back op afstand gedrukt (vraag 2)",
+        "Back op vraag 2: afgewezen",
+        "app gesloten, loader vrij",
+    ]
+    positions = [out.index(label) for label in labels]
+    assert positions == sorted(positions)
+    assert "Rooktest geslaagd" in out and "druk nu" not in out
+    assert lab.fap.keys == ["OK", "BACK"]
+    assert [kind for _, kind in lab.fake.gui_inputs] == ["PRESS", "SHORT", "RELEASE"] * 2
+    reasons = [m.reason for m in lab.fap.of_type(proto.ConfirmClosed)]
+    assert reasons == [proto.CloseReason.FAILED, proto.CloseReason.REJECTED]
+    rows = _check_rows(lab)
+    assert [(r["decision"], r.get("confirmed_on")) for r in rows] == [
+        ("deny", "flipper"),
+        ("rejected", "flipper"),
+    ]
+    assert ir_sends == [] and lab.fake.sent_buttons == []
+
+
+def test_ui_test_auto_reports_a_refused_press(
+    lab: UiLab, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuse(self: FlipperDevice, key: str, *, long: bool = False) -> None:
+        raise RemoteInputRefused("andere app open")
+
+    monkeypatch.setattr(FlipperDevice, "gui_press", refuse)
+    assert _run("ui-test", "--confirm-check", "3", "--auto") == 1
+    err = capsys.readouterr().err
+    assert "OK op afstand drukken mislukte bij vraag 1: andere app open" in err
+    assert lab.runners[0].ctx.pending.list() == []
+    assert not lab.fake.fap_running
+
+
+def test_ui_test_auto_needs_confirm_check(lab: UiLab, capsys: pytest.CaptureFixture[str]) -> None:
+    assert _run("ui-test", "--auto") == 2
+    assert "--auto werkt alleen samen met --confirm-check" in capsys.readouterr().err
+    assert lab.runners == []
 
 
 def test_ui_test_runner_has_an_empty_scope_of_its_own(lab: UiLab, tmp_path: Path) -> None:

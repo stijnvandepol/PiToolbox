@@ -9,6 +9,11 @@ moet ``confirm_action`` uit een chat geweigerd worden (``confirm_on_flipper``), 
 mens OK. Vraag 2: de mens drukt Back. De test-actie is ``ir_send`` naar een apparaat dat nergens
 in scope staat; ook na OK weigert de policy hem bij de nieuwe controle, twee keer: de allowlist
 (alleen ``status``) en de lege scope. Er kan dus niets uitgezonden worden.
+
+``--confirm-check --auto``: de Pi drukt die knoppen zelf, op afstand via de GUI-RPC
+(`FlipperDevice.gui_press`), pas nadat de bridge CONFIRM_PROMPT voor die vraag meldde en de
+vraag gewapend is. De tijdlijn zegt dat er op afstand gedrukt is. Dat mag alleen hier, in deze
+testopzet: met invoer op afstand kan de Pi zelf "Flipper verplicht" bevestigen.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from . import flipper_ui_harness as harness
 from .config import Settings
+from .core.errors import ToolboxError
 from .core.tools.flipper_tools import IrSendArgs
 from .core.tools.runner import (
     CONFIRM_ON_FLIPPER,
@@ -81,6 +87,9 @@ _NO_ANSWER_HELP = (
 
 
 def cmd_ui_test(args: argparse.Namespace, settings: Settings) -> int:
+    if args.auto and not args.confirm_check:
+        _err("--auto werkt alleen samen met --confirm-check.")
+        return 2
     with _empty_scope_dir() as scope_dir:
         run_settings = _runner_settings(settings, args, args.transport, scope_dir)
         if args.confirm_check > 0:
@@ -114,7 +123,7 @@ def _run_ui_test(args: argparse.Namespace, run_settings: Settings) -> int:
         if args.wait_action > 0:
             _wait_for_action(events, timeline, args.wait_action)
         if args.confirm_check > 0:
-            _confirm_check(_Check(runner, events, timeline, args.confirm_check))
+            _confirm_check(_Check(runner, events, timeline, args.confirm_check, args.auto))
         bridge.stop()
         bridge = None
         if device.rpc_app_state != "off" or not _wait_loader_free(device, harness.TIMING.exit_s):
@@ -186,6 +195,7 @@ class _Check:
     events: _Events
     timeline: _Timeline
     wait_s: float
+    auto: bool = False  # --auto: de Pi drukt de knoppen op afstand
 
 
 def _confirm_check(check: _Check) -> None:
@@ -218,10 +228,13 @@ def _check_step(check: _Check, resolutions: _Resolutions, step: _CheckStep) -> N
         check.timeline.mark(f"vraag {step.number} op de Flipper (CONFIRM_PROMPT)", prompt.at)
         if step.try_chat_first:
             _check_chat_refused(check, pending.id)
-        _out(
-            f"Vraag {step.number}/{CHECK_STEPS_TOTAL}: druk nu {step.button} op de Flipper "
-            f"(binnen {check.wait_s:g} s)."
-        )
+        if check.auto:
+            _press_remotely(check, step, prompt.at)
+        else:
+            _out(
+                f"Vraag {step.number}/{CHECK_STEPS_TOTAL}: druk nu {step.button} op de Flipper "
+                f"(binnen {check.wait_s:g} s)."
+            )
         found = resolutions.wait(pending.id, check.wait_s)
         if found is None:
             raise StepFailed(
@@ -235,6 +248,22 @@ def _check_step(check: _Check, resolutions: _Resolutions, step: _CheckStep) -> N
     if closed is None:
         raise StepFailed(f"de Flipper kreeg na vraag {step.number} geen CONFIRM_CLOSED")
     check.timeline.mark(f"vraag {step.number} gesloten (CONFIRM_CLOSED)", closed.at)
+
+
+def _press_remotely(check: _Check, step: _CheckStep, shown_at: float) -> None:
+    """--auto: de knop van deze stap op afstand drukken. Pas `auto_press_s` na CONFIRM_PROMPT:
+    eerder telt OK op de Flipper niet (PTB_CONFIRM_ARM_MS in ptb_confirm_view.h)."""
+    wait = shown_at + harness.TIMING.auto_press_s - harness._clock()
+    if wait > 0:
+        harness._sleep(wait)
+    _out(f"Vraag {step.number}/{CHECK_STEPS_TOTAL}: de Pi drukt {step.button} op afstand.")
+    try:
+        check.runner.ctx.flipper.gui_press(step.button.lower())
+    except ToolboxError as exc:  # ook RemoteInputRefused (een DeviceError)
+        raise StepFailed(
+            f"{step.button} op afstand drukken mislukte bij vraag {step.number}: {exc}"
+        ) from exc
+    check.timeline.mark(f"{step.button} op afstand gedrukt (vraag {step.number})", harness._clock())
 
 
 def _check_chat_refused(check: _Check, pending_id: str) -> None:

@@ -54,6 +54,9 @@ class UiTiming:
     traffic_gap_s: float = 0.3  # STATUS-berichten tijdens de valtest (~3/s, onder de 5/s)
     traffic_s: float = 1.0  # minimaal zo lang verkeer vóór de val
     traffic_step_s: float = 0.35  # plus (ronde % 4) x dit: de val valt elke keer anders
+    # ui-test --auto: zo lang na CONFIRM_PROMPT drukken; de app telt OK pas na 1 s
+    # (PTB_CONFIRM_ARM_MS, ptb_confirm_view.h), plus marge voor het tekenen.
+    auto_press_s: float = 1.5
 
 
 TIMING = UiTiming()
