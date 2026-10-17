@@ -24,6 +24,7 @@ from pitoolbox.frontends.flipper_ui.bridge_text import (
     _result,
     _status_text,
     _wifi_text,
+    llm_error_text,
 )
 from pitoolbox.frontends.flipper_ui.bridge_types import FRONTEND, LOG_NAME
 from pitoolbox.frontends.flipper_ui.presets import PresetConfig
@@ -202,7 +203,7 @@ class _ActionFlow(_FapOutput):
         result = session.run_turn(preset.prompt, on_event, cancel=job.cancelled.is_set)
         if result.stop is TurnStop.LLM_ERROR:
             code = (result.error or "fout").split(":", 1)[0]
-            raise _ActionFailed(ErrorCode.TOOL_FAILED, f"Fout van het model ({code})")
+            raise _ActionFailed(ErrorCode.TOOL_FAILED, llm_error_text(code))
         text = result.text or ""
         notice = _TURN_NOTICES.get(result.stop)
         if notice:

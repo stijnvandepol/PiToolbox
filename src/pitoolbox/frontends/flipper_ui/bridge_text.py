@@ -50,6 +50,26 @@ def _error_text(raw: Mapping[str, Any]) -> str:
     return f"{raw.get('error', 'fout')}: {raw.get('message', '')}".rstrip(": ")
 
 
+# Wat de gebruiker op de Flipper ziet bij een LLM-fout (codes uit pitoolbox.llm.errors); de
+# code zelf blijft tussen haakjes staan voor diagnose. Op hardware gezien (2026-10-17): alleen
+# "Fout van het model (llm_auth)" zegt een gebruiker te weinig.
+_LLM_ERROR_TEXT = {
+    "llm_config": "LLM niet (goed) ingesteld",
+    "llm_auth": "API-sleutel geweigerd",
+    "llm_bad_request": "verzoek geweigerd door de provider",
+    "llm_rate_limited": "te veel verzoeken; probeer het later",
+    "llm_server_error": "provider tijdelijk niet beschikbaar",
+    "llm_timeout": "provider reageert niet (time-out)",
+    "llm_connection": "geen verbinding met de provider",
+    "llm_bad_response": "onverwacht antwoord van de provider",
+}
+
+
+def llm_error_text(code: str) -> str:
+    """Korte uitleg bij een LLM-foutcode, voor het scherm van de Flipper."""
+    return f"Model: {_LLM_ERROR_TEXT.get(code, 'fout')} ({code})"
+
+
 def _status_text(status: Mapping[str, Any], *, pending: int) -> str:
     lines = [_uplink_line(status.get("uplink")), _power_line(status.get("power"))]
     flipper = status.get("flipper")

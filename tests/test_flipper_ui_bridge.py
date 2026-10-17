@@ -440,6 +440,26 @@ def test_preset_without_llm_is_agent_unavailable(tmp_path: Path) -> None:
         lab.bridge.stop()
 
 
+def test_preset_llm_error_is_explained_on_the_flipper(tmp_path: Path) -> None:
+    # Op hardware gezien: "Fout van het model (llm_auth)" zegt een gebruiker te weinig.
+    from pitoolbox.llm import LLMAuthError
+
+    provider = ScriptedProvider()
+    provider.add(LLMAuthError("HTTP 401: invalid key"))
+    lab = _make(
+        tmp_path, presets=[PresetConfig(id=1, label="Kort", prompt="hoi")], provider=provider
+    )
+    try:
+        lab.connect()
+        ref = lab.fap.action(proto.ActionKind.PRESET, 1)
+        error = lab.error(ref)
+        assert error.code is proto.ErrorCode.TOOL_FAILED
+        assert error.text == "Model: API-sleutel geweigerd (llm_auth)"
+        assert "invalid key" not in error.text  # servertekst hoort niet op het scherm
+    finally:
+        lab.bridge.stop()
+
+
 def test_preset_runs_agent_turn_with_progress(tmp_path: Path) -> None:
     def slow_reply(_messages: Sequence[Any]) -> Any:
         time.sleep(0.3)  # het model "denkt": tijd genoeg om PROGRESS te versturen
