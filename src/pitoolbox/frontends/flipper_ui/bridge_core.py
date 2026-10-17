@@ -109,6 +109,7 @@ class _BridgeCore:
         self._locked_until = 0.0  # tot hier opnieuw proberen als de loader bezet is
         self._restart_step = 0
         self._next_poll = 0.0
+        self._poll_busy = False  # er loopt al een poll-job (er mag er maar één tegelijk zijn)
         self._link_step = 0
         self._next_expire = 0.0
         # Per bridge, niet per FAP-sessie (§4): een nieuwe HELLO geeft geen nieuwe burst.

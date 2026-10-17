@@ -99,6 +99,16 @@ class _AppStarter(_FapOutput):
             self._restart_at = None
             self._restart_step = 0  # een volgend verlies begint zijn vensters opnieuw
 
+    def _poll_job(self) -> None:
+        """Device-lane: één poll; meldt zich daarna altijd af bij de hoofdlus."""
+        try:
+            self._poll_start_request()
+        finally:
+            self._post(self._poll_done)
+
+    def _poll_done(self) -> None:
+        self._poll_busy = False
+
     def _poll_start_request(self) -> None:
         """Device-lane: verzoekbestand van een handmatig gestarte FAP (§8). Alleen als het
         device in RPC staat, vrij is en er geen andere app open is; een oud verzoek (> 30 s)
@@ -148,11 +158,15 @@ class _AppStarter(_FapOutput):
         )
 
     def _open_link(self) -> bool:
-        """Device-lane: verbinden en in RPC zetten (ping); bij een fout de backoff in."""
+        """Device-lane: verbinden en in RPC zetten (ping); bij een fout de backoff in.
+
+        Niet meer na `stop()`: een BLE-verbinding kan tientallen seconden duren en houdt dan de
+        device-lock vast, terwijl de bridge al weg is.
+        """
+        if self._stopping.is_set():
+            return False
         try:
             self.device.ping()
-        except DeviceBusy:
-            return False
         except (DeviceError, ToolboxError) as exc:
             log.info("PiToolbox-app: geen verbinding met de Flipper (%s)", exc)
             self._post(self._link_failed)

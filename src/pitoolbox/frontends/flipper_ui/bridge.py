@@ -263,9 +263,11 @@ class FlipperUiBridge(_Intake):
         if self._restart_at is not None and now >= self._restart_at:
             self._restart_at = None
             self._request_start("herstart na verloren verbinding", retry=True)
-        elif now >= self._next_poll:
+        elif now >= self._next_poll and not self._poll_busy:
+            # Eén poll tegelijk: een mislukte BLE-verbinding duurt langer dan start_poll_s, en
+            # opgestapelde jobs zouden de backoff van `_link_failed` omzeilen.
             self._next_poll = now + self.timing.start_poll_s
-            self._lanes["device"].submit(self._poll_start_request)
+            self._poll_busy = self._lanes["device"].submit(self._poll_job)
 
     # --- app-gebeurtenissen ---------------------------------------------------------------
 

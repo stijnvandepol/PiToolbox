@@ -788,23 +788,37 @@ def test_bridge_opens_the_link_itself_for_a_manual_start(tmp_path: Path) -> None
 
 
 def test_failing_link_backs_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    lab = _make(tmp_path, timing=replace(FAST_BRIDGE, link_backoff_s=(0.2, 0.4)))
+    # Een mislukte BLE-verbinding duurt langer dan start_poll_s (0,05 s hier): de polls mogen
+    # zich niet opstapelen, anders volgt de ene poging direct op de andere (review 2026-10-17).
+    lab = _make(tmp_path, timing=replace(FAST_BRIDGE, link_backoff_s=(0.3,)))
     attempts: list[float] = []
 
-    def no_flipper() -> float:
+    def slow_failure() -> float:
         attempts.append(time.monotonic())
+        time.sleep(0.2)
         raise DeviceError("geen Flipper")
 
-    monkeypatch.setattr(lab.device, "ping", no_flipper)
+    monkeypatch.setattr(lab.device, "ping", slow_failure)
     try:
         lab.bridge.start()
-        time.sleep(1.0)
+        time.sleep(1.6)
     finally:
         lab.bridge.stop()
-    # Zonder backoff zou elke start_poll_s (0,05 s) een poging zijn: ~20 in 1 s.
+    # Per poging 0,2 s bezig + 0,3 s backoff: hooguit ~4 in 1,6 s (zonder fix: ~8).
     assert 2 <= len(attempts) <= 4, attempts
     gaps = [b - a for a, b in itertools.pairwise(attempts)]
-    assert min(gaps) >= 0.18, gaps
+    assert min(gaps) >= 0.45, gaps
+
+
+def test_no_link_is_opened_after_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lab = _make(tmp_path)
+    pings: list[float] = []
+    monkeypatch.setattr(lab.device, "ping", lambda: pings.append(0.0) or 0.0)
+    lab.bridge.start()
+    lab.bridge.stop()
+    pings.clear()
+    assert lab.bridge._open_link() is False
+    assert pings == []
 
 
 def test_manual_start_request_too_old_is_ignored(tmp_path: Path) -> None:
