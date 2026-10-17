@@ -263,6 +263,8 @@ async def test_unknown_tool_is_an_error(harness: Harness) -> None:
         result = await client.call_tool("bestaat_niet", {})
     assert result.is_error is True
     assert harness.calls == []
+    # Ook een onbekende tool komt in de audit-log (de runner weigert, niet de SDK).
+    assert [(r["tool"], r["decision"]) for r in harness.audit()] == [("bestaat_niet", "deny")]
 
 
 async def test_out_of_scope_is_denied(harness: Harness) -> None:
@@ -372,6 +374,9 @@ async def test_unlisted_tool_cannot_be_called(tmp_path: Path, make_ctx: Any) -> 
         result = await client.call_tool("control_tool", {})
     assert result.is_error is True
     assert harness.calls == []
+    # Review 2026-10-17: de weigering moet in de audit-log staan, ook al staat de tool niet
+    # in tools/list.
+    assert [(r["tool"], r["decision"]) for r in harness.audit()] == [("control_tool", "deny")]
 
 
 async def test_confirm_flow_with_allowlist_without_confirm_action(

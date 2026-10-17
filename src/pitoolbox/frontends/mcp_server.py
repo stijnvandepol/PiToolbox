@@ -147,13 +147,37 @@ def _make_tool(runner: ToolRunner, spec: ToolSpec, frontend: Frontend) -> Tool:
     )
 
 
+class _AuditedServer(MCPServer):
+    """MCPServer waarbij een aanroep van een tool die niet in `tools/list` staat (buiten de
+    allowlist, of onbekend) toch langs de runner gaat: die weigert hem en schrijft de weigering
+    in de audit-log. Zonder dit zegt de SDK "Unknown tool" en ziet de audit-log niets van een
+    client die tools probeert die hij niet hoort te kennen."""
+
+    def __init__(self, runner: ToolRunner, frontend: Frontend, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._runner = runner
+        self._frontend = frontend
+        self._listed = frozenset(spec.name for spec in runner.allowed_specs())
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Any = None
+    ) -> CallToolResult | Any:
+        if name in self._listed:
+            return await super().call_tool(name, arguments, context)
+        who = self._frontend() if callable(self._frontend) else self._frontend
+        result = await anyio.to_thread.run_sync(
+            functools.partial(self._runner.call, who, name, arguments)
+        )
+        return _to_call_result(result)
+
+
 def build_server(
     runner: ToolRunner, frontend: Frontend = "mcp", auth: AuthBundle | None = None
 ) -> MCPServer:
     """Bouwt een MCPServer met één MCP-tool per `runner.allowed_specs()`-entry.
 
-    Least privilege: een tool buiten PITOOLBOX_TOOL_ALLOWLIST staat niet in `tools/list` (en
-    een aanroep ervan bereikt de runner niet); de runner dwingt de allowlist zelf ook af.
+    Least privilege: een tool buiten PITOOLBOX_TOOL_ALLOWLIST staat niet in `tools/list`. Een
+    aanroep ervan gaat toch naar de runner (`_AuditedServer`), die hem weigert en audit.
 
     Met `auth` worden de OAuth-routes van de SDK (authorize/token/register/revoke + metadata),
     de protected-resource-metadata, de 401-met-resource_metadata en onze /login-routes actief.
@@ -161,8 +185,12 @@ def build_server(
     """
     tools = [_make_tool(runner, spec, frontend) for spec in runner.allowed_specs()]
     if auth is None:
-        return MCPServer(name=SERVER_NAME, instructions=INSTRUCTIONS, tools=tools)
-    server = MCPServer(
+        return _AuditedServer(
+            runner, frontend, name=SERVER_NAME, instructions=INSTRUCTIONS, tools=tools
+        )
+    server = _AuditedServer(
+        runner,
+        frontend,
         name=SERVER_NAME,
         instructions=INSTRUCTIONS,
         tools=tools,
