@@ -98,3 +98,19 @@ Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. Met 
 - Na de review-fixes (2026-10-17, 04:00): valtest opnieuw 20/20 (app terug mediaan 6,8 s, max 7,6 s); 5 minuten open en stil zonder verbreking; keepalive loopt door terwijl de app open is.
 - Duurtest 40 minuten over BLE, app open, elke 10 s STATUS: 240/240 afgeleverd, 0 verbrekingen, geheugen stabiel.
 - **Nog met de hand:** OK/Back op een echte bevestigingsvraag, de snelle acties en presets vanuit het menu, de handmatige start (verzoekbestand).
+
+### Op afstand (alleen voor ontwikkeling)
+
+Om hardwaretests zonder mens te kunnen draaien, kan de Pi knoppen indrukken en het scherm lezen via de officiële GUI-RPC (`gui.proto`: `SendInputEventRequest`, de schermstream). Geen reverse engineering, geen extra afhankelijkheid.
+
+```bash
+uv run pitoolbox-flipper remote screen [--png scherm.png] [--scale 4]   # scherm als tekst (en PNG)
+uv run pitoolbox-flipper remote press ok [--long] [--times 3]           # up/down/left/right/ok/back
+uv run pitoolbox-flipper ui-test --confirm-check --auto                 # OK en Back drukt de Pi zelf
+```
+
+Beide kennen `--transport`, `--address` en `--adapter` zoals de andere commando's. Een klik is PRESS, SHORT (of LONG met `--long`), RELEASE, zoals de officiële Python-client. Eén schermbeeld kost over BLE ongeveer een seconde (1 KiB); de stream stopt altijd weer, ook na een time-out of fout.
+
+**De wachter.** Vóór elke klik vraagt de Pi de loader opnieuw. Drukken mag alleen als er geen app open is (bureaublad, menu, Apps-browser: dat zijn geen apps voor de loader) of als de open app de PiToolbox-app is die **dit proces** via RPC startte. Staat er een andere app open, dan weigert de Pi: een OK op afstand in Sub-GHz of Infrared kan uitzenden. Elke klik staat als WARNING in de log (`invoer op afstand: OK`). Gevolgen: met `remote press` navigeer je vanaf het bureaublad, bijvoorbeeld naar Apps → Tools → PiToolbox voor de handmatige start (de handmatige app sluit zichzelf na 1,5 s, dus daarna is de loader weer vrij). Binnen de PiToolbox-app drukken kan alleen het proces dat hem startte: `ui-test --confirm-check --auto`. Die drukt OK op vraag 1 en Back op vraag 2, pas nadat de bridge CONFIRM_PROMPT voor die vraag meldde, en dan nog 1,5 s later (de app telt OK pas na `PTB_CONFIRM_ARM_MS`, 1 s). De tijdlijn zegt "OK op afstand gedrukt". Let op: één klik vanaf een vrije loader kan een app openen die je met een sneltoets op het bureaublad hebt ingesteld; de volgende klik weigert dan.
+
+**Waarom alleen voor ontwikkeling.** Met invoer op afstand kan de Pi zelf OK drukken op een "Flipper verplicht"-vraag, en dan bewijst die bevestiging niets meer. In `ui-test` mag het, want daar laat de runner alleen `status` toe en is de scope leeg: niets kan uitzenden. In het product nooit: er is geen tool voor, en een test (`tests/test_flipper_remote.py`) controleert dat de tools, de runner, MCP, de agent en de bridge `gui_press`/`gui_screen` niet kunnen bereiken.
