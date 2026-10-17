@@ -1,7 +1,7 @@
 """Tests voor core/devices/_ble_pairing.py met een volledig nagebootste D-Bus-laag.
 
-Er wordt nergens dbus-fast geimporteerd (alleen de laatste test, die zichzelf overslaat als het
-pakket ontbreekt, zoals op Windows).
+Er wordt nergens dbus-fast geimporteerd (alleen de twee agent-interfacetests, die zichzelf overslaan
+als het pakket ontbreekt, zoals op Windows).
 """
 
 from __future__ import annotations
@@ -528,6 +528,35 @@ def test_agent_interface_matches_bluez_signatures() -> None:
     assert methods["RequestPinCode"] == (["o"], ["s"])
     assert methods["Cancel"] == ([], [])
     assert methods["Release"] == ([], [])
+
+
+def test_agent_interface_turns_rejections_into_dbus_errors() -> None:
+    """Alleen met dbus-fast: een weigering van de agent wordt de D-Bus-fout met die naam."""
+    errors = pytest.importorskip("dbus_fast.errors")
+    agent = make_agent()
+    iface = _bluez_agent._build_agent_interface(agent)
+    other = f"{ADAPTER}/dev_11_22_33_44_55_66"
+    calls: list[Callable[[], None]] = [
+        lambda: iface.RequestConfirmation(DEV, 123456),
+        lambda: iface.DisplayPasskey(other, 123456, 0),
+        lambda: iface.RequestAuthorization(other),
+        lambda: iface.AuthorizeService(other, "0000fe60-cc7a-482a-984a-7f2ed5b3e58f"),
+        lambda: iface.RequestPinCode(DEV),
+        lambda: iface.DisplayPinCode(DEV, "0000"),
+    ]
+    for call in calls:
+        with pytest.raises(errors.DBusError) as caught:
+            call()
+        assert caught.value.type == bp.ERR_REJECTED
+        assert isinstance(caught.value.__cause__, bp.AgentRejected)
+    # Het eigen apparaat: geen fout.
+    iface.DisplayPasskey(DEV, 123456, 0)
+    iface.RequestAuthorization(DEV)
+    iface.AuthorizeService(DEV, "0000fe60-cc7a-482a-984a-7f2ed5b3e58f")
+    iface.Cancel()
+    iface.Release()
+    assert agent.cancelled
+    assert agent.released
 
 
 # --- adapterkeuze ------------------------------------------------------------------------
