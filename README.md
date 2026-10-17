@@ -494,10 +494,11 @@ src/pitoolbox/
   frontends/mcp_server.py     # MCPServer (opvolger van FastMCP in mcp 2.x), stdio + HTTP
   frontends/agent_cli.py      # pitoolbox-agent (terminal)
   frontends/flipper_ui/       # bridge naar de Flipper-app: protocol, bridge, presets
+                              #   (protocol_*.py en bridge_*.py: de delen per onderdeel)
   agent/ llm/                 # agent-loop; providers (openai-compatible, anthropic, openai)
   auth/                       # OAuth 2.1: provider, SQLite-store, /login, crypto, CLI
-  flipper_cli.py              # pitoolbox-flipper: ble-scan/pair/unpair/list/test
-  flipper_ui_cli.py           # pitoolbox-flipper: ui-install/ui-test/ui-droptest
+  flipper_cli.py              # pitoolbox-flipper: ble-scan/pair/unpair/list/test, ui-*
+  flipper_ble_*.py flipper_ui_*.py  # de subcommando's per groep
 deploy/                       # install.sh, env-voorbeeld, en per doel een map:
   systemd/ cloudflared/       #   service-units, tunnelconfig (fase 2)
   network/                    #   .link-bestanden: wlan0 = ingebouwd, wlan1 = Alfa (fase 5)
