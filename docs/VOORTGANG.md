@@ -9,6 +9,7 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 - Protocoldetails (BLE-UUID's, RPC-berichten, flow control, SDK-functies) komen uit officiële bronnen of repo's, nooit uit het geheugen. Noem de bron in een comment.
 - **Geen generieke shell-tool, nergens.** Alleen benoemde acties met gevalideerde argumenten.
 - Commit alleen als Stijn erom vraagt. Werkbranch: `fase-1` (alle fases tot nu toe staan erop).
+- **Code guidelines (2026-10-17):** alle code volgt [CODE_GUIDELINES.md](../CODE_GUIDELINES.md), de gedeelde template uit Stijns andere repo's (Ampeer, GDash, Launchpad), met een eigen deel "Project specifics". `scripts/gates.sh` draait dezelfde controles als CI (`.github/workflows/ci.yml`): ruff, format, mypy strict, pytest, `uv audit` en shellcheck. Een bestand dat over de grens ging (>500 regels) is opgesplitst in refactor-only commits; de publieke importpaden zijn gebleven.
 - **LLM-provider-neutraal.** Claude is **niet** de standaardprovider, en er is er helemaal geen (besluit van Stijn). `llm/providers.py` (fase 4) moet meerdere providers ondersteunen, ook lokale (Ollama, llama.cpp, LM Studio, vLLM) en Chinese (DeepSeek, Qwen, Kimi, GLM, MiniMax). Het plan is één OpenAI-compatibele adapter plus native adapters. De default staat in de config, nooit hardcoded.
 
 ## Status per fase
@@ -21,7 +22,7 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 | 4 Flipper als bediening | **spike klaar** ([fase4-spike.md](fase4-spike.md), advies: DataExchange); **providerlaag klaar** (`llm/`: openai-compatible, anthropic, openai; geen default); **agent-loop + `pitoolbox-agent` klaar** (alleen een mens bevestigt, `confirm_action` onzichtbaar voor het model, grenzen per beurt, beurt-audit) ; **FAP `pitoolbox_ui` + protocol v1 klaar** (bouwt tegen API 87.1, niet op hardware); **bridge klaar** (`PITOOLBOX_FLIPPER_UI=on`, "Flipper verplicht" in de kern, getest met een nagebootste FAP **en op hardware**: install, rooktest en valtest 20/20 over BLE) | **nog:** OK/Back en menu met de hand, spike-test 7; adapters + agent één keer tegen de echte API's en Ollama testen |
 | 5 Klaar voor onderweg | **deploybestanden klaar, niet op hardware getest** (root + reboot nodig); nog: README van nul | `install.sh --onderweg`: .link-namen wlan0/wlan1 (op driver/USB-id), NM unmanaged `driver:mt7921u`, logrotate audit-log, tmpfiles captures; optioneel `--bluez-le`; `--dry-run`, backups; [fase5-onderweg.md](fase5-onderweg.md) |
 
-Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck; 1333 passed, 1 skipped op de Pi; de skip is shellcheck als die niet op PATH staat). Daarnaast `uv run ruff check src tests` en `uv run mypy`.
+Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck; 1336 passed, 1 skipped op de Pi; de skip is shellcheck als die niet op PATH staat). Daarnaast `uv run ruff check src tests` en `uv run mypy`.
 
 ## Open punten die Stijn nog moet aanleveren
 
