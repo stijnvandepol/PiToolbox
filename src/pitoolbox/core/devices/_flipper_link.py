@@ -345,30 +345,36 @@ class FlipperLink:
         if not self._lock.acquire(blocking=False):
             return
         try:
-            transport, client = self._transport, self._client
-            # Alleen voor transports die altijd RPC zijn (BLE): USB heeft geen keepalive nodig
-            # en blijft zo exact zoals in fase 1.
-            if (
-                transport is None
-                or not transport.is_open
-                or not getattr(transport, "starts_in_rpc", False)
-                or self._mode != "rpc"
-                or client is None
-                or self._app_active
-                or time.monotonic() - self._last_io < self._keepalive_s
-            ):
-                return
-            ping = flipper_pb2.Main()
-            ping.system_ping_request.data = b"keepalive"
-            try:
-                client.request(ping, self._timing.probe_timeout_s)
-            except DeviceError as exc:
-                log.warning("keepalive-ping mislukte (%s); verbinding wordt gesloten", exc)
-                self._drop_connection()  # de volgende actie verbindt opnieuw
-                return
-            self._last_io = time.monotonic()
+            self._ping_if_idle()
         finally:
             self._lock.release()
+
+    def _ping_if_idle(self) -> None:
+        """Onder de lock: één keepalive-ping als de link `keepalive_s` idle is. Mislukt hij,
+        dan wordt de verbinding gesloten (de volgende actie verbindt opnieuw)."""
+        transport, client = self._transport, self._client
+        # Alleen voor transports die altijd RPC zijn (BLE): USB heeft geen keepalive nodig
+        # en blijft zo exact zoals in fase 1.
+        if (
+            self._keepalive_s <= 0
+            or transport is None
+            or not transport.is_open
+            or not getattr(transport, "starts_in_rpc", False)
+            or self._mode != "rpc"
+            or client is None
+            or self._app_active
+            or time.monotonic() - self._last_io < self._keepalive_s
+        ):
+            return
+        ping = flipper_pb2.Main()
+        ping.system_ping_request.data = b"keepalive"
+        try:
+            client.request(ping, self._timing.probe_timeout_s)
+        except DeviceError as exc:
+            log.warning("keepalive-ping mislukte (%s); verbinding wordt gesloten", exc)
+            self._drop_connection()
+            return
+        self._last_io = time.monotonic()
 
 
 def _keepalive_main(
