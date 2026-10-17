@@ -60,24 +60,22 @@ handdruk rond, elk afgeleverd bericht, losgekoppeld. Alleen kijken, niet sturen;
 **Opbouw.** `FlipperUiBridge` is één object, per verantwoordelijkheid verdeeld over
 `bridge_core.py` (toestand, inbox, loskoppelen), `bridge_output.py` (berichten naar de FAP),
 `bridge_sender.py` (zendrij en zender), `bridge_start.py` (starten, §8), `bridge_confirm.py`
-(bevestigen, §6), `bridge_actions.py` (acties, §7), `bridge_lanes.py` (werkthreads) en
-`bridge_text.py` (tekst voor het scherm). Hier: levenscyclus, hoofdlus, timers, berichten van
-de FAP en de handdruk (§5). Alles hierboven geldt voor alle delen.
+(bevestigen, §6), `bridge_actions.py` (acties, §7), `bridge_intake.py` (ingangen van de
+hoofdlus, de lezer, decoderen en verdelen van FAP-berichten), `bridge_lanes.py` (werkthreads)
+en `bridge_text.py` (tekst voor het scherm). Hier: levenscyclus, hoofdlus, timers,
+app-gebeurtenissen en de handdruk (§5). Alles hierboven geldt voor alle delen.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import TYPE_CHECKING
 
 from pitoolbox.agent.session import AgentLimits
 from pitoolbox.core.devices.flipper import AppEvent
-from pitoolbox.core.policy import PendingEvent
-from pitoolbox.frontends.flipper_ui.bridge_actions import _ActionFlow
-from pitoolbox.frontends.flipper_ui.bridge_confirm import _ConfirmFlow
 from pitoolbox.frontends.flipper_ui.bridge_core import _Fap
+from pitoolbox.frontends.flipper_ui.bridge_intake import _Intake
 from pitoolbox.frontends.flipper_ui.bridge_start import (
     START_REQUEST_MAX_AGE_S,
     START_REQUEST_MAX_BYTES,
@@ -93,20 +91,10 @@ from pitoolbox.frontends.flipper_ui.bridge_types import (
 )
 from pitoolbox.frontends.flipper_ui.protocol import (
     PROTO_VERSION,
-    Action,
-    ActionKind,
-    Cancel,
-    ConfirmAnswer,
     ConfirmHandles,
     ErrorCode,
-    FapMessage,
     Hello,
-    PresetsRequest,
-    ProtocolError,
-    QuickAction,
-    StatusRequest,
     Welcome,
-    decode_from_fap,
 )
 
 if TYPE_CHECKING:
@@ -134,7 +122,7 @@ log = logging.getLogger(__name__)
 MAX_QUEUED_PROMPTS = 8  # protocol §6: hoogstens 8 open handles (in de praktijk 1: één vraag)
 
 
-class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
+class FlipperUiBridge(_Intake):
     """Pi-kant van docs/fase4-protocol.md. `start()` en `stop()` vanuit de eigenaar."""
 
     # --- levenscyclus -----------------------------------------------------------------
@@ -146,14 +134,6 @@ class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
     @property
     def agent_available(self) -> bool:
         return self.provider is not None
-
-    def request_start(self) -> None:
-        """Start de app nu (als hij niet al draait en de loader vrij is). Thread-safe."""
-        self._post(lambda: self._request_start("op verzoek"))
-
-    def send_status(self) -> None:
-        """Stuur een verse STATUS naar de app (als de handdruk rond is). Thread-safe."""
-        self._post(self._send_status)
 
     def start(self) -> None:
         if self._threads:
@@ -227,10 +207,6 @@ class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
         # Device-thread, met de device-lock: alleen doorzetten.
         self._post(lambda: self._handle_app_event(event), external=True)
 
-    def _on_pending_event(self, event: PendingEvent) -> None:
-        # Met de lock van de PendingStore: alleen doorzetten.
-        self._post(lambda: self._handle_pending_event(event), external=True)
-
     def _main(self) -> None:
         while True:
             with self._cond:
@@ -289,15 +265,6 @@ class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
             self._next_poll = now + self.timing.start_poll_s
             self._lanes["device"].submit(self._poll_start_request)
 
-    # --- lezer ---------------------------------------------------------------------------------
-
-    def _reader_main(self) -> None:
-        while not self._stopping.is_set():
-            if self.device.rpc_app_state != "active" or not self.device.poll_app_events(
-                self.timing.poll_slice_s
-            ):
-                time.sleep(self.timing.poll_idle_s)
-
     # --- app-gebeurtenissen ---------------------------------------------------------------
 
     def _handle_app_event(self, event: AppEvent) -> None:
@@ -328,36 +295,6 @@ class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
         if gap:
             log.info("%d bericht(en) van de app gemist", gap)
         self._dispatch(fap, msg)
-
-    def _decode_limited(self, data: bytes) -> FapMessage | None:
-        """Decoderen en de rate limit toepassen; None: het bericht vervalt (soms met ERROR)."""
-        try:
-            msg = decode_from_fap(data)
-        except ProtocolError as exc:
-            if self._rx_rate.allow():
-                log.info("ongeldig bericht van de app: %s", exc)
-                self._send_error(exc.seq or 0, exc.code, str(exc), instance=None)
-            return None
-        # De noodstop gaat altijd door, ook boven de rate limit.
-        if not _is_emergency_stop(msg) and not self._rx_rate.allow():
-            log.info("bericht van de app gedropt (rate limit, totaal %d)", self._rx_rate.dropped)
-            if isinstance(msg, Action):
-                self._send_error(msg.seq, ErrorCode.RATE_LIMITED, "te snel", instance=None)
-            return None
-        return msg
-
-    def _dispatch(self, fap: _Fap, msg: FapMessage) -> None:
-        match msg:
-            case StatusRequest():
-                self._send_status()
-            case PresetsRequest():
-                self._send_presets(fap)
-            case Action():
-                self._on_action(fap, msg)
-            case ConfirmAnswer():
-                self._on_confirm_answer(fap, msg)
-            case Cancel():
-                self._on_cancel(fap, msg)
 
     # --- handdruk (§5) ----------------------------------------------------------------------
 
@@ -423,14 +360,6 @@ class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
             self._send_status()
         # Alles wat al openstaat, moet nu op de Flipper (de chat kan het niet meer).
         self._show_next()
-
-
-def _is_emergency_stop(msg: FapMessage) -> bool:
-    return (
-        isinstance(msg, Action)
-        and msg.kind is ActionKind.QUICK
-        and msg.action_id == QuickAction.EMERGENCY_STOP
-    )
 
 
 # --- opbouw vanuit Settings -------------------------------------------------------------------

@@ -4,9 +4,11 @@
 `_BridgeCore` (hier) -> `_FapOutput` (`bridge_output.py`, berichten naar de FAP) ->
 `_AppStarter` (`bridge_start.py`, de app starten, §8) -> `_ConfirmFlow` (`bridge_confirm.py`,
 bevestigen, §6); `_ActionFlow` (`bridge_actions.py`, acties, §7) bouwt ook op `_FapOutput`.
-Elk deel gebruikt alleen wat eronder ligt. De regels voor threads en toestand staan in de
-module-docstring van `bridge.py` en gelden voor alle delen: toestand wordt alleen in de
-hoofdlus gewijzigd, andere threads posten werk (`_post`).
+`_Intake` (`bridge_intake.py`, wat de hoofdlus binnenkrijgt) bouwt op beide flows, en
+`FlipperUiBridge` (`bridge.py`) op `_Intake`. Elk deel gebruikt alleen wat eronder ligt. De
+regels voor threads en toestand staan in de module-docstring van `bridge.py` en gelden voor
+alle delen: toestand wordt alleen in de hoofdlus gewijzigd, andere threads posten werk
+(`_post`).
 """
 
 from __future__ import annotations
