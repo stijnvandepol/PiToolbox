@@ -184,7 +184,7 @@ Blijvend: zet in `/etc/bluetooth/main.conf` onder `[LE]` de regels `MinConnectio
 
 Op een echte Pi 4 of 5 (Kali) met een echte Flipper, in deze volgorde:
 
-- [ ] `systemctl status bluetooth` is actief; `bluetoothctl show` meldt `Powered: yes`.
+- [x] `systemctl status bluetooth` is actief; `bluetoothctl show` meldt `Powered: yes`. *(2026-10-17; de Flipper hangt aan hci1, de interne adapter van de Pi)*
 - [ ] Gebruiker en `pitoolbox` zitten in `bluetooth`; `systemctl start pitoolbox-mcp` start zonder fout (groep bestaat).
 - [x] `ble-scan` toont de Flipper met RSSI. *(2026-10-17: A1tkethe, −57 dBm, "gekoppeld: ja", op hci1)*
 - [ ] `ble-pair <adres>`: de Flipper toont de code, de agent vraagt erom, na invoer meldt de CLI succes. Controleer dat `RequestPasskey` echt wordt aangeroepen (blijft de vraag uit, herzie dan de capability `KeyboardOnly`; `btmon` toont de SMP-uitwisseling met de IO-capabilities).
