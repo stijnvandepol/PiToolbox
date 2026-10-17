@@ -14,6 +14,10 @@ Gedrag nagebootst uit de firmwarebronnen (flipperzero-firmware 3fb1d517):
   begint een volgend frame dus een nieuw, leeg bestand. mkdir maakt één niveau
   (ERROR_STORAGE_EXIST als het er al is), md5sum geeft hex in kleine letters, rename verwijdert
   een bestaand doel eerst (storage_external_api.c `storage_common_rename`).
+* GUI op afstand zoals Momentum mntm-012 `rpc_gui.c`: input-events bevestigen met OK; de
+  schermstream geeft ERROR_VIRTUAL_DISPLAY_ALREADY_STARTED als hij al loopt, stuurt na de start
+  meteen een frame (`gui_add_framebuffer_callback` vraagt een redraw, gui.c) en daarna één per
+  `set_screen`; stoppen geeft altijd OK; een nieuwe sessie begint zonder stream.
 
 De uitvoer van subghz/rfid/nfc komt uit tests/fixtures/flipper/*.txt (zelf geschreven op basis
 van de printf-formaten; de decoder-tekst van Sub-GHz is synthetisch). De `*_momentum_*`-fixtures
@@ -38,7 +42,13 @@ from pathlib import Path
 from typing import Any
 
 from pitoolbox.core.devices._flipper_rpc.framing import FrameDecoder, encode_frame
-from pitoolbox.core.devices._flipper_rpc.pb import application_pb2, flipper_pb2, storage_pb2
+from pitoolbox.core.devices._flipper_rpc.pb import (
+    application_pb2,
+    flipper_pb2,
+    gui_pb2,
+    storage_pb2,
+)
+from pitoolbox.core.devices._flipper_screen import FRAME_BYTES
 from pitoolbox.core.devices.flipper import FlipperTiming, TransportError
 from pitoolbox.frontends.flipper_ui import protocol as proto
 
@@ -145,6 +155,13 @@ class FakeFlipperTransport:
         self.write_chunks: list[int] = []  # grootte van elk storage_write-blok
         self.fail_write_at: int | None = None  # dit blok (1-based, telt over alle writes) faalt
         self.corrupt_writes = False  # het geschreven bestand wijkt 1 byte af
+        # --- GUI op afstand (rpc_gui.c) ---
+        self.screen = bytes(FRAME_BYTES)  # het huidige framebuffer
+        self.screen_orientation = gui_pb2.HORIZONTAL
+        self.screen_streaming = False
+        self.redraw_on_stream_start = True  # False: er komt geen frame (time-out testen)
+        self.stream_requests: list[str] = []  # "start" / "stop", in volgorde
+        self.gui_inputs: list[tuple[str, str]] = []  # (knop, type), bijv. ("OK", "PRESS")
         # --- waarnemingen ---
         self.opens = 0
         self.closes = 0
@@ -297,9 +314,20 @@ class FakeFlipperTransport:
             self.fap.on_stopped()
 
     def _session_closed(self) -> None:
-        # SessionClose: een RPC-gekoppelde app sluit zichzelf (pitoolbox_ui.c).
+        # SessionClose: een RPC-gekoppelde app sluit zichzelf (pitoolbox_ui.c), en de stream
+        # van deze sessie stopt (rpc_system_gui_free).
+        self.screen_streaming = False
         if self._running_app is not None:
             self._stop_app()
+
+    # --- GUI op afstand ---------------------------------------------------------------
+
+    def set_screen(self, data: bytes) -> None:
+        """De GUI tekent opnieuw; loopt de stream, dan gaat het frame meteen naar de Pi."""
+        with self._cond:
+            self.screen = data
+            if self._open and self.screen_streaming:
+                self._emit(self._frame(self._screen_frame()))
 
     # --- intern -----------------------------------------------------------------------
 
@@ -716,6 +744,39 @@ class FakeFlipperTransport:
         self._stop_app()
         self._send(request, self._ok(request), self._state_event(application_pb2.APP_CLOSED))
 
+    def _screen_frame(self) -> Any:
+        frame = flipper_pb2.Main()
+        frame.command_id = 0
+        frame.gui_screen_frame.data = self.screen
+        frame.gui_screen_frame.orientation = self.screen_orientation
+        return frame
+
+    def _rpc_gui_start_screen_stream_request(self, request: Any) -> None:
+        self.stream_requests.append("start")
+        if self.screen_streaming:
+            status = flipper_pb2.ERROR_VIRTUAL_DISPLAY_ALREADY_STARTED
+            self._send(request, self._error(request, status))
+            return
+        self.screen_streaming = True
+        frames = [self._ok(request)]
+        if self.redraw_on_stream_start:
+            frames.append(self._screen_frame())
+        self._send(request, *frames)
+
+    def _rpc_gui_stop_screen_stream_request(self, request: Any) -> None:
+        self.stream_requests.append("stop")
+        self.screen_streaming = False
+        self._send(request, self._ok(request))
+
+    def _rpc_gui_send_input_event_request(self, request: Any) -> None:
+        event = request.gui_send_input_event_request
+        key, kind = gui_pb2.InputKey.Name(event.key), gui_pb2.InputType.Name(event.type)
+        self.gui_inputs.append((key, kind))
+        self._send(request, self._ok(request))
+        # De app reageert op SHORT (ptb_confirm_view.c), ná het antwoord op dit event.
+        if kind == "SHORT" and self.fap_running and self.fap is not None:
+            self.fap.on_key(key)
+
     def _rpc_stop_session(self, request: Any) -> None:
         self._send(request, self._ok(request))
         self._mode = "cli"
@@ -764,12 +825,15 @@ class FakeFap:
         self.rehellos = 0  # NOT_READY's waarop hij opnieuw ging groeten
         self.reject_next = 0
         self.hang = False
+        self.keys: list[str] = []  # knoppen via gui_send_input (SHORT)
+        self.confirm_arm_s = 0.0  # PTB_CONFIRM_ARM_MS, geschaald: OK telt pas daarna
         self.received: list[proto.PiMessage] = []
         self.received_at: list[float] = []
         self.invalid = 0
         self._seq = proto.SeqCounter()
         self._cond = threading.Condition()
         self._hello_at = float("-inf")  # laatste HELLO (`hello_tick` in de C-code)
+        self._answered: set[int] = set()  # vragen die met een knop beantwoord zijn
 
     # --- door de transport aangeroepen (met de transport-lock) ---
 
@@ -814,6 +878,29 @@ class FakeFap:
         elif isinstance(msg, proto.Error) and msg.code is proto.ErrorCode.NOT_READY:
             self._on_not_ready()
         return "ok"
+
+    def on_key(self, key: str) -> None:
+        """Een klik op afstand. Op de bevestigingsvraag (ptb_confirm_view.c): OK = ja, maar
+        pas `confirm_arm_s` na de vraag; Back = nee. Geldt voor de laatste open vraag."""
+        self.keys.append(key)
+        if key not in ("OK", "BACK"):
+            return
+        with self._cond:
+            closed = {m.handle for m in self.received if isinstance(m, proto.ConfirmClosed)}
+            prompts = [
+                (m, at)
+                for m, at in zip(self.received, self.received_at, strict=True)
+                if isinstance(m, proto.ConfirmPrompt)
+                and m.handle not in closed
+                and m.handle not in self._answered
+            ]
+        if not prompts:
+            return
+        prompt, shown_at = prompts[-1]
+        if key == "OK" and time.monotonic() - shown_at < self.confirm_arm_s:
+            return  # nog niet gewapend: de echte app negeert deze OK
+        self._answered.add(prompt.handle)
+        self.answer(prompt.handle, approve=key == "OK")
 
     def _on_not_ready(self) -> None:
         """`ptb_on_not_ready`: de Pi kent deze sessie niet (meer). Niet nagebootst: de toestand

@@ -39,12 +39,17 @@ geldige PiToolbox-FAP (`_fap.inspect_fap`), en alleen als de loader vrij is. Sch
 naar `<pad>.part`, controleert de MD5 op de Flipper en hernoemt dan; een mislukte upload laat
 de vorige app dus heel.
 
+**Op afstand** (`gui_press`, `gui_screen`, alleen voor de ontwikkelaarsmodus
+`pitoolbox-flipper remote` en `ui-test --confirm-check --auto`, nooit een tool): knoppen
+indrukken via de officiële GUI-RPC, alleen als onze gekoppelde app of geen app open is, en één
+schermbeeld lezen. Regels en bronnen: `_flipper_remote`.
+
 **Opbouw.** `FlipperDevice` erft van lagen in eigen modules die dezelfde toestand en dezelfde
 lock delen: `_flipper_link_core` (toestand, haken voor de gekoppelde app), `_flipper_link`
 (operatiekader, keepalive), `_flipper_modes` (CLI/RPC-wissel), `_flipper_cli_actions`
 (Sub-GHz/NFC/RFID), `_flipper_app_channel` (gekoppelde app), `_flipper_install` (FAP
-installeren) en `_flipper_ir` (ir_send met handoff). Alles wat andere code nodig heeft,
-importeer je uit deze module.
+installeren), `_flipper_ir` (ir_send met handoff) en `_flipper_remote` (op afstand). Alles wat
+andere code nodig heeft, importeer je uit deze module.
 """
 
 from __future__ import annotations
@@ -60,7 +65,9 @@ from pitoolbox.core.devices._flipper_install import (
     ProgressFn,
 )
 from pitoolbox.core.devices._flipper_ir import FlipperIr
+from pitoolbox.core.devices._flipper_remote import REMOTE_KEYS, FlipperRemote
 from pitoolbox.core.devices._flipper_rpc.pb import flipper_pb2, storage_pb2
+from pitoolbox.core.devices._flipper_screen import ScreenFrame
 from pitoolbox.core.devices._flipper_transport import (
     FLIPPER_PID,
     FLIPPER_VID,
@@ -76,6 +83,7 @@ from pitoolbox.core.devices._flipper_types import (
     AppRejected,
     DeviceBusy,
     FlipperTiming,
+    RemoteInputRefused,
     _Attempt,
 )
 from pitoolbox.core.errors import DeviceError
@@ -86,6 +94,7 @@ if TYPE_CHECKING:
 __all__ = [
     "FLIPPER_PID",
     "FLIPPER_VID",
+    "REMOTE_KEYS",
     "STORAGE_CHUNK",
     "AppEvent",
     "AppEventSink",
@@ -99,6 +108,8 @@ __all__ = [
     "FlipperDevice",
     "FlipperTiming",
     "ProgressFn",
+    "RemoteInputRefused",
+    "ScreenFrame",
     "TransportError",
     "UsbSerialTransport",
     "make_transport",
@@ -128,7 +139,7 @@ def make_transport(settings: Settings) -> ByteTransport:
     )
 
 
-class FlipperDevice(FlipperCliActions, FlipperIr, FlipperInstaller):
+class FlipperDevice(FlipperCliActions, FlipperIr, FlipperInstaller, FlipperRemote):
     """Thread-safe Flipper-toegang met automatische CLI/RPC-modewissel."""
 
     @classmethod

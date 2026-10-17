@@ -105,7 +105,11 @@ class _LinkCore:
         ):
             self._rpc_app_lost("de app sloot zichzelf", kind="closed")
             return True
-        return False
+        # Schermbeelden wil alleen de ontwikkelaarsmodus op afstand (`_flipper_remote`), en die
+        # pakt het ene frame met `wait_event` vóór deze hook. Wat hier aankomt liep na (de
+        # stream stopt pas als de Flipper de stop bevestigt): weggooien (True), want ~1 KiB per
+        # frame hoort niet in de begrensde eventqueue.
+        return bool(content == "gui_screen_frame")
 
     def _exit_app(self, client: RpcClient, timeout: float) -> None:
         """app_exit_request + wachten op APP_CLOSED; nooit een uitzondering (opruimcode)."""

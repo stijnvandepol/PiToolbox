@@ -33,6 +33,12 @@ class AppRejected(DeviceError):
     code = "app_rejected"
 
 
+class RemoteInputRefused(DeviceError):
+    """Knopdruk op afstand geweigerd: er is een andere app open dan de gekoppelde PiToolbox-app."""
+
+    code = "remote_input_refused"
+
+
 @dataclass(frozen=True)
 class AppEvent:
     """Ongevraagd bericht van de RPC-gekoppelde app, voor de sink (de Flipper-bridge).
