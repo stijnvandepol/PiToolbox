@@ -238,6 +238,56 @@ def test_redirect_is_not_followed() -> None:
     assert len(script.requests) == 1
 
 
+# --- fout in een 200-antwoord (BodyCheck) ---
+
+
+def _flag_error(data: dict[str, Any], clean: Callable[[str], str]) -> LLMServerError | None:
+    return LLMServerError(clean(str(data["fout"]))) if "fout" in data else None
+
+
+def _post_checked(client: JsonHttpClient) -> dict[str, Any]:
+    return client.post_json(
+        "/x", {"a": 1}, {"Authorization": f"Bearer {KEY}"}, check_body=_flag_error
+    )
+
+
+def test_body_check_error_is_retried_like_http_error() -> None:
+    script = Script(httpx.Response(200, json={"fout": "even niet"}), httpx.Response(200, json=OK))
+    sleeps: list[float] = []
+    assert _post_checked(_client(script, sleeps=sleeps)) == OK
+    assert len(script.requests) == 2 and sleeps == [0.5]
+
+
+def test_body_check_error_stops_at_max_retries() -> None:
+    script = Script(*(httpx.Response(200, json={"fout": "x"}) for _ in range(3)))
+    with pytest.raises(LLMServerError):
+        _post_checked(_client(script, max_retries=2))
+    assert len(script.requests) == 3
+
+
+def test_body_check_uses_retry_after_header() -> None:
+    script = Script(
+        httpx.Response(200, headers={"retry-after": "3"}, json={"fout": "x"}),
+        httpx.Response(200, json=OK),
+    )
+    sleeps: list[float] = []
+    assert _post_checked(_client(script, sleeps=sleeps)) == OK
+    assert sleeps == [3.0]
+
+
+def test_body_check_message_is_cleaned() -> None:
+    script = Script(httpx.Response(200, json={"fout": f"sleutel {KEY}\n" + "x" * 1000}))
+    with pytest.raises(LLMServerError) as exc:
+        _post_checked(_client(script, max_retries=0))
+    assert KEY not in str(exc.value) and "\n" not in str(exc.value)
+    assert len(str(exc.value)) <= 300
+
+
+def test_without_body_check_200_is_returned_as_is() -> None:
+    script = Script(httpx.Response(200, json={"fout": "x"}))
+    assert _post(_client(script)) == {"fout": "x"}
+
+
 # --- hulpfuncties ---
 
 

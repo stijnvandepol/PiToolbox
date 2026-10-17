@@ -11,6 +11,7 @@ import httpx
 
 from pitoolbox.llm._http import JsonHttpClient
 from pitoolbox.llm.config import LLMConfig, ProviderKind
+from pitoolbox.llm.errors import LLMError
 from pitoolbox.llm.types import Completion, Message, ProviderState, ToolDef
 
 
@@ -78,7 +79,7 @@ class HttpProvider:
         body = self._build_body(
             messages, system=system, tools=tools, max_tokens=max_tokens or self.config.max_tokens
         )
-        data = self._http.post_json(self.path, body, self._headers())
+        data = self._http.post_json(self.path, body, self._headers(), check_body=self._body_error)
         return self._parse(data)
 
     # --- per provider ---
@@ -98,6 +99,10 @@ class HttpProvider:
 
     def _parse(self, data: dict[str, Any]) -> Completion:
         raise NotImplementedError
+
+    def _body_error(self, data: dict[str, Any], clean: Callable[[str], str]) -> LLMError | None:
+        """Fout in een HTTP 200-antwoord (zie `_http.BodyCheck`); standaard: geen."""
+        return None
 
     # --- hulp ---
 

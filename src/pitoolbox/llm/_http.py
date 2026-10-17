@@ -20,6 +20,9 @@ Gedrag:
   exponential backoff", "honoring the retry-after header") en
   https://developers.openai.com/api/docs/guides/error-codes ("follow the Retry-After header
   when it's present").
+- Sommige providers melden een fout in een HTTP 200-antwoord. De adapter kan daarvoor een
+  `BodyCheck` meegeven; een fout daaruit loopt door dezelfde retry-logica als een echte
+  HTTP-fout (zie `_body_errors.py`).
 - Antwoordgrootte begrensd (stream lezen en afbreken), ook voor foutantwoorden.
 - Foutberichten van de server worden ingekort en de sleutel wordt eruit geredigeerd.
 """
@@ -58,6 +61,10 @@ BACKOFF_MAX_S = 8.0
 CONNECT_TIMEOUT_S = 10.0
 
 _REDACTED = "[geredigeerd]"
+
+# Zoekt in een geparst 200-antwoord naar een fout. Het tweede argument maakt servertekst
+# veilig voor een foutbericht (één regel, sleutel geredigeerd, ingekort).
+BodyCheck = Callable[[dict[str, Any], Callable[[str], str]], LLMError | None]
 
 
 def redact(text: str, secrets: Iterable[str]) -> str:
@@ -111,8 +118,12 @@ def _error_details(body: bytes) -> tuple[str, str | None]:
     return "", None
 
 
-def _error_for_status(status: int, message: str, provider_code: str | None) -> LLMError:
-    text = f"HTTP {status}" + (f": {message}" if message else "")
+def error_for_status(
+    status: int, message: str, provider_code: str | None, *, in_body: bool = False
+) -> LLMError:
+    """Foutklasse bij een HTTP-status; `in_body`: de status stond in een 200-antwoord."""
+    where = f"fout {status} in een HTTP 200-antwoord" if in_body else f"HTTP {status}"
+    text = where + (f": {message}" if message else "")
     kwargs: dict[str, Any] = {"status": status, "provider_code": provider_code}
     if status in (401, 403):
         return LLMAuthError(f"authenticatie/rechten geweigerd ({text})", **kwargs)
@@ -155,13 +166,18 @@ class JsonHttpClient:
         self._client.close()
 
     def post_json(
-        self, path: str, body: Mapping[str, Any], headers: Mapping[str, str]
+        self,
+        path: str,
+        body: Mapping[str, Any],
+        headers: Mapping[str, str],
+        *,
+        check_body: BodyCheck | None = None,
     ) -> dict[str, Any]:
         url = self.base_url + path
         attempt = 0
         while True:
             try:
-                return self._post_once(url, body, headers)
+                return self._post_once(url, body, headers, check_body)
             except LLMError as exc:
                 delay = self._retry_delay(exc, attempt)
                 if delay is None:
@@ -187,13 +203,18 @@ class JsonHttpClient:
         return backoff * (0.5 + 0.5 * self._rng())
 
     def _post_once(
-        self, url: str, body: Mapping[str, Any], headers: Mapping[str, str]
+        self,
+        url: str,
+        body: Mapping[str, Any],
+        headers: Mapping[str, str],
+        check_body: BodyCheck | None,
     ) -> dict[str, Any]:
         try:
             with self._client.stream("POST", url, json=body, headers=dict(headers)) as resp:
                 if resp.status_code >= 300:
                     raise self._http_error(resp)
                 raw = self._read_limited(resp, self._max_response_bytes)
+                retry_after = resp.headers.get("retry-after")
         except httpx.TimeoutException as exc:
             raise LLMTimeoutError(f"time-out bij de LLM-provider ({type(exc).__name__})") from None
         except httpx.TransportError as exc:
@@ -207,7 +228,16 @@ class JsonHttpClient:
             raise LLMResponseError("antwoord van de provider is geen geldige JSON") from None
         if not isinstance(data, dict):
             raise LLMResponseError("antwoord van de provider is geen JSON-object")
+        err = check_body(data, self._clean) if check_body is not None else None
+        if err is not None:
+            if err.retry_after_s is None:
+                err.retry_after_s = parse_retry_after(retry_after)
+            raise err
         return data
+
+    def _clean(self, message: str) -> str:
+        """Servertekst voor een foutbericht: één regel, sleutel geredigeerd, ingekort."""
+        return redact(" ".join(message.split()), self._secrets)[:MAX_ERROR_MESSAGE_CHARS]
 
     def _read_limited(self, resp: httpx.Response, limit: int) -> bytes:
         declared = resp.headers.get("content-length")
@@ -233,7 +263,7 @@ class JsonHttpClient:
         except LLMResponseError:
             body = b""
         message, provider_code = _error_details(body)
-        message = redact(" ".join(message.split()), self._secrets)[:MAX_ERROR_MESSAGE_CHARS]
-        err = _error_for_status(resp.status_code, message, provider_code)
+        message = self._clean(message)
+        err = error_for_status(resp.status_code, message, provider_code)
         err.retry_after_s = parse_retry_after(resp.headers.get("retry-after"))
         return err
