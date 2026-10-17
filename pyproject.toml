@@ -44,11 +44,22 @@ target-version = "py311"
 extend-exclude = ["src/pitoolbox/core/devices/_flipper_rpc/pb"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "S", "BLE"]
+# C90/PLR09/ERA: de grenzen uit CODE_GUIDELINES.md §3 en §2 ("split above"), zodat tooling ze
+# afdwingt. Een bewuste uitzondering krijgt een noqa met de reden erbij.
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "S", "BLE", "C90", "PLR0912", "PLR0913", "PLR0915", "ERA"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # Nederlandse tekst met typografische tekens
 
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pylint]
+max-args = 6
+max-branches = 15
+max-statements = 50
+
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106", "S108"]
+# Fakes spiegelen de constructors van de echte klassen.
+"tests/**" = ["S101", "S105", "S106", "S108", "PLR0913"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

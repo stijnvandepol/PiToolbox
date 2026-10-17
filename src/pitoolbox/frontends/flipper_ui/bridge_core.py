@@ -67,7 +67,7 @@ class _Fap:
 class _BridgeCore:
     """Toestand en basis van `FlipperUiBridge`; zie de module-docstring."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
         self,
         runner: ToolRunner,
         *,

@@ -219,7 +219,7 @@ def format_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
     return " of ".join(f"{lo}...{hi}" for lo, hi in ranges)
 
 
-# subghz_cli.c: SUBGHZ_FREQUENCY_RANGE_STR
+# Officiële bereiken; bron: subghz_cli.c, SUBGHZ_FREQUENCY_RANGE_STR
 OFFICIAL_SUBGHZ_RANGES_HZ: tuple[tuple[int, int], ...] = (
     (299_999_755, 348_000_000),
     (386_999_938, 464_000_000),
@@ -268,7 +268,7 @@ MOMENTUM = replace(
 PROFILES: dict[str, CliProfile] = {"official": OFFICIAL, "momentum": MOMENTUM}
 
 # DeviceInfo `firmware_origin_fork` (kleine letters) -> profielnaam. Momentum zet
-# FIRMWARE_ORIGIN = "Momentum" in fbt_options.py (lib/toolbox/version.c, furi_hal_info.c);
+# FIRMWARE_ORIGIN op "Momentum" in fbt_options.py (lib/toolbox/version.c, furi_hal_info.c);
 # op de hardware gelezen: firmware_origin_fork = "Momentum".
 _FORK_TO_PROFILE: dict[str, str] = {"official": "official", "momentum": "momentum"}
 

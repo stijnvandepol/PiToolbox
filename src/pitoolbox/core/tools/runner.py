@@ -430,7 +430,7 @@ class ToolRunner:
             log.exception("tool %s faalde", spec.name)
             return {"ok": False, "error": "internal_error", "message": type(exc).__name__}
 
-    def _finish(
+    def _finish(  # noqa: PLR0913 één auditregel: alle velden verplicht
         self,
         t0: float,
         frontend: str,

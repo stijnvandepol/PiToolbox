@@ -98,7 +98,7 @@ class _Capture:
 class CaptureManager:
     """Beheert airodump-ng pcap-captures (max. 2 tegelijk) in captures_dir/<sessie>/."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
         self,
         iface: str,
         uplink_iface: str,

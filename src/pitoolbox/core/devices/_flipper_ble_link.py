@@ -103,7 +103,7 @@ class _LoopThread:
 class BleLink:
     """Toestand en verbindingsopbouw van `BleTransport` (zie daar)."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
         self,
         address: str | None = None,
         name_prefix: str = "Flipper",

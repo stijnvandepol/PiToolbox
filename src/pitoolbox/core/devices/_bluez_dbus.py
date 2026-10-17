@@ -253,7 +253,7 @@ def find_device(objects: ManagedObjects, mac: str, adapter: str | None = None) -
     return None
 
 
-async def _call(
+async def _call(  # noqa: PLR0913 spiegelt bus.call (dbus-fast Message)
     bus: BluezBus,
     context: str,
     path: str,

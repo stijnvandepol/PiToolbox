@@ -211,7 +211,7 @@ async def _cancel_pairing(bus: BluezBus, device_path: str) -> None:
 # --- publieke async-API ------------------------------------------------------------------
 
 
-async def pair_async(
+async def pair_async(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
     address: str,
     passkey_provider: Callable[[], int],
     timeout: float = 90.0,

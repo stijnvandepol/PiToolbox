@@ -79,7 +79,7 @@ def _normalize_resource(resource: str) -> str:
 class PitoolboxOAuthProvider:
     """SDK-provider met SQLite-opslag; zie moduledocstring."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
         self,
         store: AuthStore,
         *,

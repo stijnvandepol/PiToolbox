@@ -126,7 +126,7 @@ def _error_for_status(status: int, message: str, provider_code: str | None) -> L
 class JsonHttpClient:
     """POST JSON naar `base_url + path` met retries, limieten en nette fouten."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
         self,
         *,
         base_url: str,

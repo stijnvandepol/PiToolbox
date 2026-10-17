@@ -83,7 +83,7 @@ def _filter_band(networks: list[dict[str, Any]], band: str) -> list[dict[str, An
 class AlfaAdapter:
     """Wijzigt en leest de staat van de Alfa-interface. Raakt NOOIT de uplink-interface aan."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 keyword-only afhankelijkheden (werkt als een struct)
         self,
         iface: str,
         uplink_iface: str,
