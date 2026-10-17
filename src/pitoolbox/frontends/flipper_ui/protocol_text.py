@@ -24,7 +24,8 @@ from pitoolbox.frontends.flipper_ui.protocol_spec import (
 # --- tekst ------------------------------------------------------------------------------------
 
 # Het Flipper-font kent alleen ASCII. De Pi zet tekst om vóór het versturen; de decoder
-# weigert alles daarbuiten. Newline alleen in samenvatting en resultaat.
+# weigert alles daarbuiten. Newline alleen in teksten die de FAP in een TextBox toont
+# (samenvatting, resultaat, PROGRESS en ERROR); de Pi breekt die zelf af (`to_text_box`).
 _PRINTABLE = frozenset(range(0x20, 0x7F))
 _PRINTABLE_NL = _PRINTABLE | {0x0A}
 
@@ -47,7 +48,7 @@ def _v_summary(v: str) -> str:
 
 
 def _v_progress(v: str) -> str:
-    return _check_text(v, max_len=MAX_PROGRESS)
+    return _check_text(v, max_len=MAX_PROGRESS, multiline=True)
 
 
 def _v_chunk(v: str) -> str:
@@ -55,7 +56,7 @@ def _v_chunk(v: str) -> str:
 
 
 def _v_error(v: str) -> str:
-    return _check_text(v, max_len=MAX_ERROR_TEXT)
+    return _check_text(v, max_len=MAX_ERROR_TEXT, multiline=True)
 
 
 def _v_uplink(v: str) -> str:
@@ -198,32 +199,19 @@ def wrap_lines(text: str, *, prefix_px: int = 0) -> list[str]:
     return lines
 
 
-def _line_end(line: str, room: int, *, multiline: bool) -> str:
-    """Wat na een regel komt zodat de TextBox daar afbreekt: een newline, of in een veld van
-    één regel spaties tot de regel vol is. Dat laatste werkt omdat de spatie het smalste
-    teken is: na het opvullen blijft er minder over dan elk volgend teken breed is."""
-    return "\n" if multiline else " " * ((room - text_width(line)) // _SPACE_ADVANCE)
-
-
-def to_text_box(text: str, *, max_len: int, multiline: bool = True, prefix_px: int = 0) -> str:
+def to_text_box(text: str, *, max_len: int, prefix_px: int = 0) -> str:
     """Willekeurige tekst als tekst voor een TextBox van de FAP, afgebroken op woordgrenzen.
 
-    Eerst `to_display_text` (ASCII, afkappen), dan `wrap_lines`. `multiline=False` is voor
-    velden die volgens het protocol één regel zijn (PROGRESS, ERROR): daar vult de Pi elke
-    regel op met spaties. Wordt de tekst door het afbreken langer dan `max_len`, dan eindigt
-    hij op "..." op een regel die nog past. Het resultaat komt altijd door de validatie van het
-    veld met dezelfde `max_len`/`multiline`.
+    Eerst `to_display_text` (ASCII, afkappen), dan `wrap_lines`, met een newline tussen de
+    regels. Wordt de tekst daardoor langer dan `max_len`, dan eindigt hij op "..." op een regel
+    die nog past. Het resultaat komt altijd door de validatie van de velden die een TextBox
+    vullen (samenvatting, RESULT, PROGRESS, ERROR) met dezelfde `max_len`.
     """
     if max_len < len(_ELLIPSIS):
         raise ValueError(f"max_len moet >= {len(_ELLIPSIS)} zijn")
-    lines = wrap_lines(
-        to_display_text(text, max_len=max_len, multiline=multiline), prefix_px=prefix_px
-    )
+    lines = wrap_lines(to_display_text(text, max_len=max_len, multiline=True), prefix_px=prefix_px)
     rooms = [TEXT_BOX_WIDTH - prefix_px] + [TEXT_BOX_WIDTH] * (len(lines) - 1)
-    ends = [
-        _line_end(line, room, multiline=multiline) for line, room in zip(lines, rooms, strict=True)
-    ]
-    ends[-1] = ""
+    ends = ["\n"] * (len(lines) - 1) + [""]
     full = "".join(line + end for line, end in zip(lines, ends, strict=True))
     if len(full) <= max_len:
         return full

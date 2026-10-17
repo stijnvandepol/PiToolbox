@@ -137,34 +137,34 @@ def test_to_text_box_converts_to_ascii_first() -> None:
 
 
 @pytest.mark.parametrize("prefix", ["", "Mislukt: ", "Agent niet beschikbaar: ", "Fout 12: "])
-def test_to_text_box_single_line_pads_so_the_firmware_breaks_between_words(prefix: str) -> None:
+def test_to_text_box_behind_a_prefix_breaks_between_words(prefix: str) -> None:
+    # ERROR en PROGRESS: de FAP zet er een titel voor; de Pi rekent die mee op regel 1.
     rng = _rng(len(prefix))
     for _ in range(200):
         text = _random_text(rng, rng.randint(1, 12)).replace("\n", " ")
-        out = p.to_text_box(
-            text, max_len=p.MAX_ERROR_TEXT, multiline=False, prefix_px=p.text_width(prefix)
-        )
-        assert "\n" not in out and len(out) <= p.MAX_ERROR_TEXT
+        out = p.to_text_box(text, max_len=p.MAX_ERROR_TEXT, prefix_px=p.text_width(prefix))
+        assert len(out) <= p.MAX_ERROR_TEXT
         p.Error(seq=1, ref=1, code=p.ErrorCode.TOOL_FAILED, text=out)  # geldig veld
-        shown = [line.rstrip(" ") for line in text_box_lines(prefix + out)]
+        shown = text_box_lines(prefix + out)
+        assert all(p.text_width(line) <= WIDTH for line in shown)
         if out.endswith("..."):
             continue  # afgekapt: de woorden zijn niet meer dezelfde
         expected = p.wrap_lines(
             p.to_display_text(text, max_len=p.MAX_ERROR_TEXT), prefix_px=p.text_width(prefix)
         )
         expected[0] = prefix + expected[0]
-        assert shown == [line.rstrip(" ") for line in expected]
+        assert shown == expected
 
 
-def test_to_text_box_single_line_example() -> None:
+def test_to_text_box_behind_a_prefix_example() -> None:
     prefix = "Agent niet beschikbaar: "
     out = p.to_text_box(
         "Geen LLM ingesteld op de Pi (PITOOLBOX_LLM_*)",
         max_len=p.MAX_ERROR_TEXT,
-        multiline=False,
         prefix_px=p.text_width(prefix),
     )
-    assert [line.rstrip() for line in text_box_lines(prefix + out)] == [
+    assert out == "Geen\nLLM ingesteld op de Pi\n(PITOOLBOX_LLM_*)"
+    assert text_box_lines(prefix + out) == [
         "Agent niet beschikbaar: Geen",
         "LLM ingesteld op de Pi",
         "(PITOOLBOX_LLM_*)",
@@ -185,10 +185,10 @@ def test_error_titles_match_the_flipper_app() -> None:
 def test_error_text_breaks_between_words_behind_the_title(code: p.ErrorCode) -> None:
     text = "wifi_error: adapter wlan1 staat niet in monitor mode; zet hem om met alfa_set_mode"
     out = _error_screen_text(code, text)
-    p.Error(seq=1, ref=1, code=code, text=out)  # geldig veld: één regel, <= 120 tekens
-    shown = " ".join(line.rstrip(" ") for line in text_box_lines(fap_error_line(code, out)))
-    # Elke regelgrens valt op een spatie. Na een lange titel kost het opvullen zoveel tekens
-    # dat de tekst niet meer in 120 past: dan afgekapt met "...".
+    p.Error(seq=1, ref=1, code=code, text=out)  # geldig veld, <= 120 tekens
+    # Past het eerste woord niet meer achter de titel, dan begint de tekst op regel 2.
+    shown = " ".join(" ".join(text_box_lines(fap_error_line(code, out))).split())
+    # Elke regelgrens valt op een spatie (de newline van de Pi vervangt die spatie).
     if shown.endswith("..."):
         assert fap_error_line(code, text).startswith(shown.removesuffix("..."))
     else:

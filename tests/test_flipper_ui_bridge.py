@@ -360,9 +360,9 @@ def test_quick_status_goes_through_runner(lab: Lab) -> None:
     lab.connect()
     ref = lab.fap.quick(Q.STATUS)
     text = lab.fap.result_text(ref)
-    # Te breed voor één TextBox-regel: afgebroken op een spatie.
-    assert "Uplink: aan wlan0\n10.0.0.2/24" in text
-    assert "Voeding: OK (eerder\nonderspanning)" in text
+    # Zelfde regelindeling als het statusscherm: adres en "eerder onderspanning" apart.
+    assert "Uplink: aan\nwlan0 10.0.0.2/24" in text
+    assert "Voeding: OK\n(eerder onderspanning)" in text
     # Zelfde woorden als het statusscherm van de app (ptb_scene_status_show).
     assert "Flipper-link: BLE" in text and "Captures: 0 actief" in text
     assert "Open bevestigingen: 0" in text
@@ -470,7 +470,8 @@ def test_preset_llm_error_is_explained_on_the_flipper(tmp_path: Path) -> None:
         ref = lab.fap.action(proto.ActionKind.PRESET, 1)
         error = lab.error(ref)
         assert error.code is proto.ErrorCode.TOOL_FAILED
-        assert error.text == "Model: API-sleutel geweigerd (llm_auth)"
+        # Afgebroken op woordgrenzen achter "Mislukt: " (regelgrenzen zijn newlines).
+        assert error.text.replace("\n", " ") == "Model: API-sleutel geweigerd (llm_auth)"
         assert "invalid key" not in error.text  # servertekst hoort niet op het scherm
     finally:
         lab.bridge.stop()

@@ -31,7 +31,7 @@ Strikt decoderen betekent aan beide kanten hetzelfde: verkeerde magic of versie,
 
 **Regels op het scherm.** De FAP toont het resultaat in een TextBox van de firmware. Die breekt een regel af zodra het volgende teken niet meer in 120 pixels past, ook midden in een woord (`text_box_seek_next_line` in Momentum mntm-012). Daarom breekt de Pi de tekst zelf af vóór het opsplitsen in delen (`to_text_box` in `protocol_text.py`): op spaties, en alleen in een woord dat breder is dan een hele regel na `/`, `-` of `_`, of anders midden in het woord. De breedte per teken komt uit het font van de firmware (`_font_widths.py`, gegenereerd door `scripts/gen_flipper_font_widths.py`). Een Momentum-assetpack met een eigen font maakt die breedtes onjuist; dan breekt de TextBox weer zelf af.
 
-PROGRESS en ERROR zijn één regel (geen `\n`), maar de FAP toont ze ook in die TextBox: PROGRESS op een eigen regel onder "Bezig...", ERROR als `<titel>: <tekst>` (`ptb_error_title` in `pitoolbox_ui.c`; de Pi kent dezelfde titels, `_ERROR_TITLES` in `bridge_text.py`, en een test vergelijkt ze met de C-bron). Daar vult de Pi elke regel op met spaties tot hij vol is. De spatie is het smalste teken (2 px), dus daarna past het eerste teken van het volgende woord niet meer en begint de TextBox precies daar een nieuwe regel. Het opvullen kost tekens van de 120 (ERROR) of 64 (PROGRESS): een lange foutmelding wordt daardoor eerder afgekapt met `...`. Tekst die de FAP zelf samenstelt (het statusscherm) breekt de Pi niet af.
+PROGRESS en ERROR mogen sinds 2026-10-17 ook `\n` bevatten (decoder Pi en FAP; een oudere FAP weigert ze, dus Pi en app samen bijwerken met `ui-install`). De FAP toont ze in dezelfde TextBox: PROGRESS op een eigen regel onder "Bezig...", ERROR als `<titel>: <tekst>` (`ptb_error_title` in `pitoolbox_ui.c`; de Pi kent dezelfde titels, `_ERROR_TITLES` in `bridge_text.py`, en een test vergelijkt ze met de C-bron). De Pi breekt ze net als RESULT af op woordgrenzen, met de titel als deel van de eerste regel. Tekst die de FAP zelf samenstelt (het statusscherm) breekt de FAP zelf af.
 
 ## 3. Berichten
 
@@ -57,9 +57,9 @@ PROGRESS en ERROR zijn één regel (geen `\n`), maar de FAP toont ze ook in die 
 | `0x83` | PRESETS | `count u8` en dan `count ×(id u8, label str8)` | `count` ≤ 12, ids 1..255 en uniek, label 1..24 tekens. Alleen het label gaat naar de FAP, de prompt blijft op de Pi |
 | `0x84` | CONFIRM_PROMPT | `handle u32, ttl_s u8, summary str8` | `handle ≠ 0`, `ttl_s` 1..120, samenvatting 1..200 (mag `\n` bevatten) |
 | `0x85` | CONFIRM_CLOSED | `handle u32, reason u8` | 1 uitgevoerd, 2 geweigerd, 3 verlopen, 4 ingetrokken, 5 mislukt |
-| `0x86` | PROGRESS | `ref u16, text str8` | tekst ≤ 64, één regel; vervangt de vorige |
+| `0x86` | PROGRESS | `ref u16, text str8` | tekst ≤ 64, `\n` toegestaan; vervangt de vorige |
 | `0x87` | RESULT | `ref u16, part u8, total u8, text…` | `total` 1..8, `part < total`, tekst = rest van het bericht, ≤ 500 bytes, mag `\n` bevatten |
-| `0x88` | ERROR | `ref u16, code u8, text str8` | code 1 bezig, 2 rate limit, 3 onbekende actie, 4 ongeldig bericht, 5 versie, 6 tool faalde, 7 geen agent, 8 afgebroken, 9 time-out, 10 bevestiging ongeldig, 11 nog geen HELLO; tekst ≤ 120 |
+| `0x88` | ERROR | `ref u16, code u8, text str8` | code 1 bezig, 2 rate limit, 3 onbekende actie, 4 ongeldig bericht, 5 versie, 6 tool faalde, 7 geen agent, 8 afgebroken, 9 time-out, 10 bevestiging ongeldig, 11 nog geen HELLO; tekst ≤ 120, `\n` toegestaan |
 
 ### Grenzen
 

@@ -118,7 +118,7 @@ bool ptb_decode_pi(const uint8_t* data, size_t len, PtbMsg* out) {
         break;
     case PtbMsgProgress:
         out->progress.ref = rd_u16(&r);
-        rd_str8(&r, out->progress.text, 0, PTB_MAX_PROGRESS, false);
+        rd_str8(&r, out->progress.text, 0, PTB_MAX_PROGRESS, true);
         break;
     case PtbMsgResult:
         out->result.ref = rd_u16(&r);
@@ -136,7 +136,7 @@ bool ptb_decode_pi(const uint8_t* data, size_t len, PtbMsg* out) {
     case PtbMsgError:
         out->error.ref = rd_u16(&r);
         out->error.code = rd_u8(&r);
-        rd_str8(&r, out->error.text, 0, PTB_MAX_ERROR_TEXT, false);
+        rd_str8(&r, out->error.text, 0, PTB_MAX_ERROR_TEXT, true);
         if(out->error.code == 0 || out->error.code > 11) return false;
         break;
     default:

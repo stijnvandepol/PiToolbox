@@ -57,13 +57,10 @@ _ERROR_TITLES = {
 
 
 def _error_screen_text(code: ErrorCode, text: str) -> str:
-    """De tekst van een ERROR, afgebroken voor de TextBox achter "<titel>: " van de FAP.
-
-    ERROR is één regel in het protocol, dus `to_text_box` vult de regels op met spaties.
-    """
+    """De tekst van een ERROR, afgebroken voor de TextBox achter "<titel>: " van de FAP."""
     title = _ERROR_TITLES.get(code)
     prefix = f"{title}: " if title else f"Fout {int(code)}: "
-    return to_text_box(text, max_len=MAX_ERROR_TEXT, multiline=False, prefix_px=text_width(prefix))
+    return to_text_box(text, max_len=MAX_ERROR_TEXT, prefix_px=text_width(prefix))
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -127,8 +124,9 @@ def _uplink_line(uplink: Any) -> str:
     if isinstance(uplink, dict) and "iface" in uplink:
         ipv4 = _list(uplink.get("ipv4"))
         up = str(uplink.get("operstate") or "").lower() == "up"
+        # Adres op een eigen regel, zoals het statusscherm (past zo binnen 120 px).
         return (
-            f"Uplink: {'aan' if up else 'UIT'} {uplink['iface']} {ipv4[0] if ipv4 else 'geen IP'}"
+            f"Uplink: {'aan' if up else 'UIT'}\n{uplink['iface']} {ipv4[0] if ipv4 else 'geen IP'}"
         )
     return "Uplink: onbekend"
 
@@ -139,7 +137,7 @@ def _power_line(power: Any) -> str:
     if power.get("undervoltage_now"):
         return "Voeding: ONDERSPANNING!"
     if "undervoltage" in _list(power.get("occurred")):
-        return "Voeding: OK (eerder onderspanning)"
+        return "Voeding: OK\n(eerder onderspanning)"
     return "Voeding: OK"
 
 

@@ -237,18 +237,21 @@ static void ptb_scene_status_show(PtbApp* app) {
         furi_string_set_str(t, "Status ophalen...");
     } else {
         const PtbStatus* s = &app->status;
+        /* Regels binnen de 120 px van de TextBox (die breekt per teken af, ook midden in een
+         * woord): wat lang kan zijn (adres, "eerder onderspanning", toolnaam) op een eigen
+         * regel. Breedtes gemeten met de tabel van FontSecondary (_font_widths.py op de Pi). */
         const char* power = "OK";
         if(s->flags & PTB_STATUS_POWER_UNKNOWN) {
             power = "onbekend";
         } else if(s->flags & PTB_STATUS_UNDERVOLTAGE_NOW) {
             power = "ONDERSPANNING!";
         } else if(s->flags & PTB_STATUS_UNDERVOLTAGE_OCCURRED) {
-            power = "OK (eerder onderspanning)";
+            power = "OK\n(eerder onderspanning)";
         }
         static const char* const links[] = {"?", "USB", "BLE"};
         furi_string_printf(
             t,
-            "Uplink: %s %s\nVoeding: %s\nFlipper-link: %s\nCaptures: %u actief\n"
+            "Uplink: %s\n%s\nVoeding: %s\nFlipper-link: %s\nCaptures: %u actief\n"
             "Open bevestigingen: %u\n",
             (s->flags & PTB_STATUS_UPLINK_UP) ? "aan" : "UIT",
             s->uplink,
@@ -260,14 +263,11 @@ static void ptb_scene_status_show(PtbApp* app) {
             furi_string_cat_str(t, "Laatste tool: -\n");
         } else {
             furi_string_cat_printf(
-                t,
-                "Laatste tool: %s %s",
-                s->last_tool,
-                s->last_result == PtbLastOk ? "OK" : "FOUT");
+                t, "Laatste tool: %s", s->last_result == PtbLastOk ? "OK" : "FOUT");
             if(s->last_age_s != PTB_AGE_UNKNOWN) {
                 furi_string_cat_printf(t, " (%us)", s->last_age_s);
             }
-            furi_string_push_back(t, '\n');
+            furi_string_cat_printf(t, "\n%s\n", s->last_tool);
         }
     }
     furi_string_cat_printf(t, "Bevestiging: %s", app->last_confirm_text);
