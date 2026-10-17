@@ -177,10 +177,12 @@ In de eerste moet `resource` **exact** `https://toolbox.example.nl/mcp` zijn en 
 # 6.3 Alles wat niet in de ingress staat is 404:
 curl -i https://toolbox.example.nl/iets-anders
 # 6.4 Host-header-check lokaal (op de Pi): een onbekende hostnaam moet geweigerd worden:
-curl -i -H 'Host: kwaad.example' http://127.0.0.1:8765/mcp     # verwacht: 421 Invalid Host header
+curl -i -H 'Host: kwaad.example' http://127.0.0.1:8765/mcp     # zonder token: 401 Unauthorized
+curl -i -H 'Host: kwaad.example' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/mcp
+                                                               # met geldig token: 421 Invalid Host header
 ```
 
-De MCP-SDK antwoordt 421 bij een ongeldige `Host`, 403 bij een ongeldige `Origin` en 400 bij een ongeldige `Content-Type` (gecontroleerd in `mcp/server/transport_security.py` van de geïnstalleerde SDK).
+De MCP-SDK antwoordt 421 bij een ongeldige `Host`, 403 bij een ongeldige `Origin` en 400 bij een ongeldige `Content-Type` (gecontroleerd in `mcp/server/transport_security.py` van de geïnstalleerde SDK). Die controle zit in het MCP-transport op `/mcp` en draait pas **na** de tokencontrole (de auth-middleware staat ervoor): zonder geldig token geeft ook een vreemde `Host` dus eerst 401. Om de 421 zelf te zien heb je een geldig access-token nodig (`$TOKEN`, bijvoorbeeld uit een Inspector-sessie, zie stap 7). De OAuth- en discovery-routes hebben deze `Host`-controle niet.
 
 ## 7. Testen met de MCP Inspector (op je laptop)
 
@@ -239,6 +241,15 @@ De docs zeggen: "A connected connector is available in your conversations on the
 - **Logs.** De accessregels in de journal tonen methode, pad en status, maar nooit de querystring (`GET /login?[weggelaten]`): daarin staan het id van het inlogverzoek en de parameters van `/authorize`.
 - **Geheimen.** `pitoolbox.env` is `0600` en bevat ook de LLM-API-sleutel; `/etc/cloudflared/<UUID>.json` is `0640 root:cloudflared`. De systemd-man-page raadt omgevingsvariabelen voor geheimen af; `LoadCredential=` is het alternatief voor later.
 - **Updates.** `cloudflared` komt via apt (de unit gebruikt `--no-autoupdate`); update met `sudo apt update && sudo apt install --only-upgrade cloudflared` en `sudo systemctl restart cloudflared-pitoolbox`.
+
+### Bekende beperkingen (gedrag van de MCP-SDK)
+
+Gecontroleerd in de geïnstalleerde SDK (mcp 2.3.0); niet door pitoolbox opgelost:
+
+- **`resource` bij `/token` wordt niet gecontroleerd.** De SDK neemt de `resource`-parameter (RFC 8707) bij `/token` aan, maar geeft hem bij `authorization_code` en `refresh_token` niet door aan de provider (`mcp/server/auth/handlers/token.py`). Vraagt een client daar een andere resource, dan volgt geen `invalid_target` maar gewoon een token. Dat lekt niets: pitoolbox bindt elk token aan de resource uit `/authorize`, en dat is altijd de eigen `<PUBLIC_URL>/mcp` (een andere resource weigert `/authorize` al met `invalid_target`); `/mcp` neemt alleen tokens voor die resource aan.
+- **De metadata noemt alleen `client_secret_*`.** `/.well-known/oauth-authorization-server` geeft `token_endpoint_auth_methods_supported` en `revocation_endpoint_auth_methods_supported` als `["client_secret_post", "client_secret_basic"]` (vast in `build_metadata` in `mcp/server/auth/routes.py`), terwijl DCR bij pitoolbox alleen publieke clients (`none`, zonder secret) uitgeeft. Claude registreert zich als publieke client en dat werkt; een client die strikt op die lijst afgaat, kan ten onrechte denken dat dat niet mag.
+
+Wel opgelost: de `/revoke` van de SDK eist een `client_secret`, ook van publieke clients (python-sdk issue #3508). pitoolbox zet er een eigen `/revoke` (RFC 7009) voor, met dezelfde regels (`src/pitoolbox/auth/revoke.py`).
 
 ### Optioneel: Cloudflare WAF-regel
 
@@ -301,7 +312,7 @@ Meestal na het inloggen. Controleer in deze volgorde ([docs](https://claude.com/
 
 ### 421 / 403 / 400 bij een aanvraag (Host-header-controle)
 
-De server controleert `Host` en `Origin` (bescherming tegen DNS-rebinding). Toegestaan zijn de hostnaam uit `PITOOLBOX_PUBLIC_URL` en `127.0.0.1:<poort>`, `localhost:<poort>`, `[::1]:<poort>`. De MCP-SDK geeft **421** bij een foute `Host`, **403** bij een foute `Origin` en **400** bij een foute `Content-Type`.
+De server controleert `Host` en `Origin` op `/mcp` (bescherming tegen DNS-rebinding). Toegestaan zijn de hostnaam uit `PITOOLBOX_PUBLIC_URL` en `127.0.0.1:<poort>`, `localhost:<poort>`, `[::1]:<poort>`. De MCP-SDK geeft **421** bij een foute `Host`, **403** bij een foute `Origin` en **400** bij een foute `Content-Type`, maar pas met een geldig token: zonder (geldig) token komt eerst de **401** van de tokencontrole. Een 401 bij een verkeerde hostnaam zegt dus nog niets over de `Host`-controle.
 
 - **421 via de tunnel:** `PITOOLBOX_PUBLIC_URL` verschilt van de hostnaam waarmee je aanroept (typefout, `www.`, een tweede hostnaam). Pas `pitoolbox.env` aan en herstart: `sudo systemctl restart pitoolbox-mcp`. Zet **niet** `httpHostHeader` in de tunnelconfig om dit te "omzeilen".
 - **421 bij testen op de Pi:** gebruik `http://127.0.0.1:8765/mcp` met de poort erbij, niet een ander IP-adres of een andere hostnaam.
