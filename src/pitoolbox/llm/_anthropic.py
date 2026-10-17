@@ -86,34 +86,7 @@ class AnthropicProvider(HttpProvider):
         tools: Sequence[ToolDef],
         max_tokens: int,
     ) -> dict[str, Any]:
-        turns: list[dict[str, Any]] = []
-
-        def add(role: str, blocks: list[dict[str, Any]]) -> None:
-            if not blocks:
-                return
-            if turns and turns[-1]["role"] == role:
-                turns[-1]["content"].extend(blocks)
-            else:
-                turns.append({"role": role, "content": blocks})
-
-        for m in messages:
-            if isinstance(m, UserMessage):
-                add("user", [{"type": "text", "text": m.text}] if m.text else [])
-            elif isinstance(m, AssistantMessage):
-                add("assistant", self._assistant_blocks(m))
-            elif isinstance(m, ToolResult):
-                block: dict[str, Any] = {"type": "tool_result", "tool_use_id": m.call_id}
-                if m.content:
-                    block["content"] = m.content
-                if m.is_error:
-                    block["is_error"] = True
-                add("user", [block])
-
-        for turn in turns:
-            if turn["role"] == "user":
-                # tool_result-blokken eerst, tekst daarna (stabiel gesorteerd).
-                turn["content"].sort(key=lambda b: b.get("type") != "tool_result")
-
+        turns = self._turns(messages)
         body: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "messages": turns}
         if system:
             body["system"] = system
@@ -123,6 +96,23 @@ class AnthropicProvider(HttpProvider):
                 for t in tools
             ]
         return body
+
+    def _turns(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
+        """Berichten als beurten; opeenvolgende blokken met dezelfde rol in één beurt."""
+        turns: list[dict[str, Any]] = []
+        for m in messages:
+            if isinstance(m, UserMessage):
+                _add_blocks(turns, "user", [{"type": "text", "text": m.text}] if m.text else [])
+            elif isinstance(m, AssistantMessage):
+                _add_blocks(turns, "assistant", self._assistant_blocks(m))
+            elif isinstance(m, ToolResult):
+                _add_blocks(turns, "user", [_tool_result_block(m)])
+
+        for turn in turns:
+            if turn["role"] == "user":
+                # tool_result-blokken eerst, tekst daarna (stabiel gesorteerd).
+                turn["content"].sort(key=lambda b: b.get("type") != "tool_result")
+        return turns
 
     def _assistant_blocks(self, m: AssistantMessage) -> list[dict[str, Any]]:
         state = self._own_state(m.state)
@@ -173,3 +163,22 @@ class AnthropicProvider(HttpProvider):
             model=as_str(data.get("model")),
             state=ProviderState(self.kind.value, {"content": content}),
         )
+
+
+def _add_blocks(turns: list[dict[str, Any]], role: str, blocks: list[dict[str, Any]]) -> None:
+    """Voeg blokken toe aan de laatste beurt als die dezelfde rol heeft, anders een nieuwe beurt."""
+    if not blocks:
+        return
+    if turns and turns[-1]["role"] == role:
+        turns[-1]["content"].extend(blocks)
+    else:
+        turns.append({"role": role, "content": blocks})
+
+
+def _tool_result_block(m: ToolResult) -> dict[str, Any]:
+    block: dict[str, Any] = {"type": "tool_result", "tool_use_id": m.call_id}
+    if m.content:
+        block["content"] = m.content
+    if m.is_error:
+        block["is_error"] = True
+    return block
