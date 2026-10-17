@@ -732,6 +732,9 @@ def test_restart_gives_up_when_the_loader_stays_busy(tmp_path: Path) -> None:
         assert _locked_starts(seen) == tries  # opgegeven
         assert lab.bridge.state is BridgeState.IDLE and lab.store.physical_confirmer is None
         assert lab.fake.user_app_open and "app_exit_request" not in lab.fake.rpc_log
+        # Opgeven zet de herstart-administratie terug: een volgend verlies telt zijn vensters
+        # (restart_window_s, locked_retry_s) vanaf dat nieuwe verlies, niet vanaf het oude.
+        assert lab.bridge._restart_step == 0
     finally:
         lab.bridge.stop()
 

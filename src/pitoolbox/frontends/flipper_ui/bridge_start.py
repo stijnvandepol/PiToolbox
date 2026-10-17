@@ -97,6 +97,7 @@ class _AppStarter(_FapOutput):
             self._schedule_restart()
         else:
             self._restart_at = None
+            self._restart_step = 0  # een volgend verlies begint zijn vensters opnieuw
 
     def _poll_start_request(self) -> None:
         """Device-lane: verzoekbestand van een handmatig gestarte FAP (§8). Alleen als het

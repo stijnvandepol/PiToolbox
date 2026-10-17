@@ -220,7 +220,7 @@ class _Sender:
             except (AppNotRunning, DeviceError) as exc:
                 log.info("versturen naar de app mislukte: %s", exc)
                 return _Delivery.DEAD
-            except ToolboxError as exc:  # bijv. Aborted door een noodstop midden in een write
+            except ToolboxError as exc:  # vangnet: geen enkele fout mag de zendthread stoppen
                 log.info("versturen naar de app afgebroken: %s", exc)
                 return _Delivery.DROPPED
         return _Delivery.DROPPED  # pragma: no cover
