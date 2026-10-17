@@ -21,6 +21,6 @@ jobs:
         with:
           version: "0.13.1"
           python-version: "3.14"
-      - run: sudo apt-get install -y --no-install-recommends shellcheck
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck
       - run: uv sync --frozen
       - run: scripts/gates.sh
