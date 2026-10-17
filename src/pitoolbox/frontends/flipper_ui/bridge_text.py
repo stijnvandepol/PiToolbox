@@ -54,12 +54,12 @@ def _status_text(status: Mapping[str, Any], *, pending: int) -> str:
     lines = [_uplink_line(status.get("uplink")), _power_line(status.get("power"))]
     flipper = status.get("flipper")
     if isinstance(flipper, dict):
-        lines.append(f"Flipper: {flipper.get('transport_kind') or '?'}")
+        lines.append(f"Flipper-link: {str(flipper.get('transport_kind') or '?').upper()}")
     wifi = status.get("wifi")
     if isinstance(wifi, dict):
         lines.append(f"Wifi: {wifi.get('iface', '?')} {wifi.get('mode', '?')}")
     captures = status.get("captures")
-    lines.append(f"Captures: {len(captures) if isinstance(captures, list) else '?'}")
+    lines.append(f"Captures: {len(captures) if isinstance(captures, list) else '?'} actief")
     scope = status.get("scope")
     if isinstance(scope, dict):
         lines.append(f"Scope: {scope.get('networks', '?')} wifi, {scope.get('ir_devices', '?')} IR")
@@ -69,11 +69,15 @@ def _status_text(status: Mapping[str, Any], *, pending: int) -> str:
     return "\n".join(lines)
 
 
+# Dezelfde woorden als het statusscherm van de app (`ptb_scene_status_show` in ptb_scenes.c),
+# zodat de snelle actie Status en het statusscherm hetzelfde zeggen.
 def _uplink_line(uplink: Any) -> str:
     if isinstance(uplink, dict) and "iface" in uplink:
         ipv4 = _list(uplink.get("ipv4"))
-        state = str(uplink.get("operstate") or "?").lower()
-        return f"Uplink: {uplink['iface']} {ipv4[0] if ipv4 else 'geen IP'} ({state})"
+        up = str(uplink.get("operstate") or "").lower() == "up"
+        return (
+            f"Uplink: {'aan' if up else 'UIT'} {uplink['iface']} {ipv4[0] if ipv4 else 'geen IP'}"
+        )
     return "Uplink: onbekend"
 
 
@@ -81,10 +85,10 @@ def _power_line(power: Any) -> str:
     if not (isinstance(power, dict) and power.get("available")):
         return "Voeding: onbekend"
     if power.get("undervoltage_now"):
-        return "Voeding: ONDERSPANNING"
+        return "Voeding: ONDERSPANNING!"
     if "undervoltage" in _list(power.get("occurred")):
-        return "Voeding: eerder onderspanning"
-    return "Voeding: ok"
+        return "Voeding: OK (eerder onderspanning)"
+    return "Voeding: OK"
 
 
 def _wifi_text(scan: Mapping[str, Any], top: int = 5) -> str:

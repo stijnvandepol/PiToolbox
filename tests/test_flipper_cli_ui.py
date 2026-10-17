@@ -281,7 +281,7 @@ def test_ui_test_wait_action_status_end_to_end(
     thread.join(1.0)
     out = capsys.readouterr().out
     assert "actie Status: antwoord afgeleverd" in out
-    assert "Uplink: wlan0" in "".join(m.text for m in lab.fap.of_type(proto.ResultChunk))
+    assert "Uplink: aan wlan0" in "".join(m.text for m in lab.fap.of_type(proto.ResultChunk))
 
 
 def test_ui_test_other_action_is_refused_by_allowlist(

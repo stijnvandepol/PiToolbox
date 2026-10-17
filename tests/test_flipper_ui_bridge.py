@@ -353,8 +353,10 @@ def test_quick_status_goes_through_runner(lab: Lab) -> None:
     lab.connect()
     ref = lab.fap.quick(Q.STATUS)
     text = lab.fap.result_text(ref)
-    assert "Uplink: wlan0 10.0.0.2/24 (up)" in text
-    assert "Voeding: eerder onderspanning" in text
+    assert "Uplink: aan wlan0 10.0.0.2/24" in text
+    assert "Voeding: OK (eerder onderspanning)" in text
+    # Zelfde woorden als het statusscherm van de app (ptb_scene_status_show).
+    assert "Flipper-link: BLE" in text and "Captures: 0 actief" in text
     assert "Open bevestigingen: 0" in text
     calls = [r for r in lab.audit() if r.get("tool") == "status"]
     assert calls and all(r["frontend"] == FRONTEND for r in calls)
