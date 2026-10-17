@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import pytest
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakDBusError, BleakError, BleakGATTProtocolError
 from flipper_fakes import (
     BLE_ADV_UUID,
@@ -26,6 +27,7 @@ from flipper_fakes import (
 
 from pitoolbox.core.devices import _ble_pairing as bp
 from pitoolbox.core.devices import _flipper_ble as ble
+from pitoolbox.core.devices import _flipper_ble_gatt, _flipper_ble_link, _flipper_ble_scan
 from pitoolbox.core.devices._flipper_rpc.framing import FrameDecoder, encode_frame
 from pitoolbox.core.devices._flipper_rpc.pb import flipper_pb2
 from pitoolbox.core.devices.flipper import FlipperDevice, TransportError
@@ -144,10 +146,10 @@ def test_uuid_conversion_reverses_bytes_and_validates_length() -> None:
 
 
 def test_flow_control_value_is_big_endian_uint32() -> None:
-    assert ble._parse_flow_credit(b"\x00\x00\x04\x00") == 1024
-    assert ble._parse_flow_credit(bytearray(b"\x00\x00\x00\x2a")) == 42
+    assert _flipper_ble_gatt._parse_flow_credit(b"\x00\x00\x04\x00") == 1024
+    assert _flipper_ble_gatt._parse_flow_credit(bytearray(b"\x00\x00\x00\x2a")) == 42
     with pytest.raises(DeviceError, match="4"):
-        ble._parse_flow_credit(b"\x00\x04")
+        _flipper_ble_gatt._parse_flow_credit(b"\x00\x04")
 
 
 def test_is_auth_error_classification() -> None:
@@ -843,8 +845,8 @@ def bluez(monkeypatch: pytest.MonkeyPatch) -> FakeBluez:
 def recorded(monkeypatch: pytest.MonkeyPatch, world: FakeBleWorld) -> dict[str, list[Any]]:
     """Neemt op wat de transport aan BleakClient/BleakScanner meegeeft (bovenop de fakes)."""
     seen: dict[str, list[Any]] = {"client": [], "scan": []}
-    client_cls = ble.BleakClient
-    scanner_cls = ble.BleakScanner
+    client_cls = _flipper_ble_link.BleakClient
+    scanner_cls = _flipper_ble_scan.BleakScanner
 
     class Client(client_cls):  # type: ignore[misc, valid-type]
         def __init__(self, device: Any, *args: Any, **kwargs: Any) -> None:
@@ -868,8 +870,8 @@ def recorded(monkeypatch: pytest.MonkeyPatch, world: FakeBleWorld) -> dict[str, 
             seen["scan"].append(kwargs)
             return await scanner_cls.discover(*args, **kwargs)
 
-    monkeypatch.setattr(ble, "BleakClient", Client)
-    monkeypatch.setattr(ble, "BleakScanner", Scanner)
+    monkeypatch.setattr(_flipper_ble_link, "BleakClient", Client)
+    monkeypatch.setattr(_flipper_ble_scan, "BleakScanner", Scanner)
     return seen
 
 
@@ -917,7 +919,7 @@ def test_unpaired_or_unknown_device_still_scans(
     bluez.objects[FLIPPER_PATH][bp.DEVICE_IFACE].update(Paired=False, Bonded=False)
     make_transport(flipper).open()
     assert len(recorded["scan"]) == 1
-    assert isinstance(recorded["client"][0][0], ble.BLEDevice)
+    assert isinstance(recorded["client"][0][0], BLEDevice)
     assert recorded["client"][0][0].details is None  # het device uit de (fake) scan
 
     del bluez.objects[FLIPPER_PATH]

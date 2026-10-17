@@ -1228,14 +1228,16 @@ class FakeBleakScanner:
 
 
 def install_fake_bleak(monkeypatch: Any, world: FakeBleWorld) -> None:
-    """Laat `_flipper_ble` de fake client en scanner gebruiken (niets raakt echte Bluetooth)."""
-    from pitoolbox.core.devices import _flipper_ble
+    """Laat de BLE-transport de fake client en scanner gebruiken (niets raakt echte Bluetooth)."""
+    from pitoolbox.core.devices import _flipper_ble_link, _flipper_ble_scan
 
     monkeypatch.setattr(
-        _flipper_ble, "BleakClient", type("BoundFakeClient", (FakeBleakClient,), {"world": world})
+        _flipper_ble_link,
+        "BleakClient",
+        type("BoundFakeClient", (FakeBleakClient,), {"world": world}),
     )
     monkeypatch.setattr(
-        _flipper_ble,
+        _flipper_ble_scan,
         "BleakScanner",
         type("BoundFakeScanner", (FakeBleakScanner,), {"world": world}),
     )

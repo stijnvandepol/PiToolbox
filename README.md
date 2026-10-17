@@ -474,7 +474,10 @@ src/pitoolbox/
     devices/_flipper_app_channel.py  # kanaal naar de RPC-gekoppelde PiToolbox-app
     devices/_flipper_install.py      # FAP installeren (ui-install)
     devices/_flipper_ir.py    # ir_send met handoff van de gekoppelde app
-    devices/_flipper_ble.py   # BLE-transport (bleak), serial-service-UUID's, flow control
+    devices/_flipper_ble.py   # BLE-transport (bleak): lezen, schrijven met flow control
+    devices/_flipper_ble_scan.py  # serial-service-UUID's, Flipper herkennen, scannen
+    devices/_flipper_ble_gatt.py  # pairingfouten, BlueZ-opzoekingen, MTU, krediet
+    devices/_flipper_ble_link.py  # BLE-verbinding opzetten, toestand, bleak-callbacks
     devices/_ble_pairing.py   # koppelen met PIN via BlueZ (D-Bus); publieke pairing-API
     devices/_bluez_dbus.py    # BlueZ-namen, foutmeldingen, BluezBus-protocol, opzoekingen
     devices/_bluez_agent.py   # de tijdelijke pairing-agent (org.bluez.Agent1)
