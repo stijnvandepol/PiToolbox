@@ -517,6 +517,7 @@ src/pitoolbox/
     devices/_wifi_capture.py  # CaptureManager (airodump-ng pcap)
     devices/system.py         # get_throttled, uplink, schijf
     tools/                    # base, runner, flipper_tools, wifi_tools, system_tools
+                              #   (_runner_core.py: confirm_action-spec, uitkomsten, audit)
   frontends/mcp_server.py     # MCPServer (opvolger van FastMCP in mcp 2.x), stdio + HTTP
   frontends/agent_cli.py      # pitoolbox-agent (terminal)
                               #   (_agent_cli_view.py: weergave; _agent_cli_args.py: argumenten)
