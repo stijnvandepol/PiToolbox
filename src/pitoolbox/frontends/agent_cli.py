@@ -15,7 +15,8 @@ vraagt de terminal alsnog ``Bevestigen? [j/N]``. Het model hoort de uitkomst in 
 beurt, maar kan zelf nooit bevestigen.
 
 Commando's: ``/stop`` (noodstop: captures stoppen, Flipper-actie afbreken, bevestigingen
-wissen), ``/help`` en ``/exit``.
+wissen), ``/new`` (nieuw gesprek: de geschiedenis weg, open bevestigingen blijven),
+``/help`` en ``/exit``.
 
 Ctrl+C tijdens een beurt breekt alleen de beurt af: er volgt geen modelcall of tool meer, en
 een openstaande bevestiging wordt afgewezen. Het is **geen** noodstop: een lopende capture
@@ -78,9 +79,12 @@ _sleep = time.sleep
 HELP = """\
 Commando's:
   /stop   noodstop: captures stoppen, Flipper-actie afbreken, bevestigingen wissen
+  /new    nieuw gesprek (geschiedenis weg; open bevestigingen blijven staan)
   /help   deze hulp
   /exit   afsluiten (ook Ctrl+D)
 Ctrl+C tijdens een beurt breekt alleen de beurt af (geen noodstop)."""
+
+RESET_HINT = " Blijft dit gebeuren, typ dan /new (nieuw gesprek)."
 
 _STOP_NOTICES = {
     TurnStop.MAX_TOKENS: "(antwoord afgekapt: maximum aantal tokens bereikt)",
@@ -130,7 +134,10 @@ def print_event(event: AgentEvent) -> None:
         case AssistantText():
             _out(for_terminal(event.text))
         case ToolCallStarted():
-            _out(f"  → {for_terminal(event.name) or '?'} {_compact(event.arguments or {})}")
+            args = (
+                "<ongeldige argumenten>" if event.arguments is None else _compact(event.arguments)
+            )
+            _out(f"  → {for_terminal(event.name) or '?'} {args}")
         case ToolCallFinished():
             _out(_finished_line(event))
         case PendingConfirmation():
@@ -259,7 +266,7 @@ def run_turn(session: AgentSession, text: str) -> TurnResult:
     result = session.run_turn(text, on_event=print_event)
     if result.stop is TurnStop.LLM_ERROR:
         retry = " Je bericht is niet verwerkt; probeer het opnieuw." if result.rolled_back else ""
-        _out(f"Fout van het model ({for_terminal(result.error or '?')}).{retry}")
+        _out(f"Fout van het model ({for_terminal(result.error or '?')}).{retry}{RESET_HINT}")
     elif (notice := _STOP_NOTICES.get(result.stop)) is not None:
         _out(notice)
     handle_confirmations(session, result)
@@ -291,6 +298,8 @@ def repl(session: AgentSession) -> int:
             _out(HELP)
         elif text == "/stop":
             emergency_stop(session)
+        elif text == "/new":
+            _out(f"Nieuw gesprek ({session.reset()} beurt(en) gewist).")
         elif text.startswith("/"):
             _out(f"Onbekend commando: {for_terminal(text)} (zie /help)")
         else:

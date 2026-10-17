@@ -258,6 +258,27 @@ def test_long_history_drops_oldest_whole_turns(
     assert any(r.get("event") == "agent_history_trimmed" for r in lab.audit())
 
 
+def test_reset_starts_a_new_conversation(
+    tmp_path: Path, make_ctx: Callable[..., ToolContext]
+) -> None:
+    lab = Lab(tmp_path, make_ctx(tmp_path))
+    lab.provider.add(use(tool_call("status")), reply("eerste antwoord"))
+    lab.turn("vraag 1")
+    lab.provider.add(reply("tweede antwoord"))
+    lab.turn("vraag 2")
+
+    assert lab.session.reset() == 2
+    assert lab.session.history == ()
+    assert any(
+        r.get("event") == "agent_history_reset" and r.get("dropped_turns") == 2 for r in lab.audit()
+    )
+    # Het model krijgt daarna alleen de nieuwe beurt.
+    lab.provider.add(reply("vers begin"))
+    assert lab.turn("vraag 3").stop is TurnStop.END_TURN
+    sent = lab.provider.requests[-1].messages
+    assert len(sent) == 1 and isinstance(sent[0], UserMessage) and sent[0].text == "vraag 3"
+
+
 def test_history_keeps_last_turn_even_if_over_budget(
     tmp_path: Path, make_ctx: Callable[..., ToolContext]
 ) -> None:

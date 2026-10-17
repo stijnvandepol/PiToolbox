@@ -339,6 +339,19 @@ class AgentSession:
         )
         self._audit_event("agent_history_trimmed", dropped_turns=dropped_turns)
 
+    def reset(self) -> int:
+        """Begin een nieuw gesprek: de hele geschiedenis weg (op verzoek van de gebruiker).
+
+        Uitweg als de provider een item uit de geschiedenis blijft weigeren (bijv. een
+        reasoning-item dat hij niet meer kent). Open bevestigingen en nog niet gemelde
+        uitkomsten blijven staan: die horen bij acties, niet bij het gesprek. Geeft het
+        aantal weggegooide beurten.
+        """
+        dropped_turns = sum(1 for m in self._history if isinstance(m, UserMessage))
+        self._history.clear()
+        self._audit_event("agent_history_reset", dropped_turns=dropped_turns)
+        return dropped_turns
+
     # --- alleen voor de frontend (na een expliciete menselijke keuze) ---------------------
 
     def confirm(self, pending: PendingConfirmation, *, approved: bool) -> ConfirmOutcome:

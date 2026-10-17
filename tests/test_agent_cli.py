@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from llm_fakes import ScriptedProvider, reply, tool_call, use
+from llm_fakes import ScriptedProvider, broken_call, reply, tool_call, use
 
 from pitoolbox.core.audit import AuditLog
 from pitoolbox.core.policy import Policy
@@ -177,6 +177,25 @@ def test_ctrl_c_during_turn_aborts_turn_only(cli: Any, capsys: pytest.CaptureFix
     c.ctx.flipper.abort.assert_not_called()  # Ctrl+C is geen noodstop
 
 
+def test_invalid_arguments_are_shown_as_invalid(
+    cli: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    c = cli([use(broken_call()), reply("Sorry.")], ["hoi", "/exit"])
+    assert c.run() == 0
+    out = capsys.readouterr().out
+    assert "→ status <ongeldige argumenten>" in out and "→ status {}" not in out
+
+
+def test_new_command_starts_a_fresh_conversation(
+    cli: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    c = cli([reply("Eerste."), reply("Vers.")], ["vraag 1", "/new", "vraag 2", "/exit"])
+    assert c.run() == 0
+    assert "Nieuw gesprek (1 beurt(en) gewist)." in capsys.readouterr().out
+    sent = c.provider.requests[-1].messages
+    assert len(sent) == 1 and sent[0].text == "vraag 2"
+
+
 def test_stop_command(cli: Any, capsys: pytest.CaptureFixture[str]) -> None:
     c = cli([], ["/stop", "/exit"])
     assert c.run() == 0
@@ -193,6 +212,7 @@ def test_llm_error_message(cli: Any, capsys: pytest.CaptureFixture[str]) -> None
     out = capsys.readouterr().out
     assert "Fout van het model (llm_timeout: time-out na 60 s)" in out
     assert "niet verwerkt" in out and "Nu wel." in out
+    assert "typ dan /new" in out
 
 
 def test_model_output_is_sanitized(cli: Any, capsys: pytest.CaptureFixture[str]) -> None:
