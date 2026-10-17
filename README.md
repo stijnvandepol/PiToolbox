@@ -30,7 +30,7 @@ Alle vijf fases zijn gebouwd en getest met nagebootste apparaten (`uv run pytest
 | Alfa (wifi-tools) | **nee** (heeft root of capabilities nodig) |
 | Remote via de Claude-app (fase 2) | lokaal op de Pi end-to-end getest (HTTP + volledige OAuth-flow + MCP op 127.0.0.1); tunnel en claude.ai-connector nog niet |
 | Agent en LLM-providers (fase 4) | end-to-end als echt proces tegen nagebootste servers van de drie API-formaten (62/64; de 2 afwijkingen lagen aan de stub, nagekeken in de OpenAI-docs). Nog niet tegen de echte API's of Ollama |
-| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | ja, over USB en BLE: installeren (`ui-install`), rooktest (`ui-test`), valtest 20/20 (`ui-droptest`), 5 minuten open zonder verbreking. Nog niet met de hand: OK/Back op een echte vraag (test: `ui-test --confirm-check`), snelle acties en presets vanuit het menu |
+| Flipper-app `pitoolbox_ui` en de bridge (fase 4) | ja, over USB en BLE: installeren (`ui-install`), rooktest (`ui-test`), valtest 20/20 (`ui-droptest`), 5 minuten open zonder verbreking, OK/Back op een echte vraag (`ui-test --confirm-check`, door Stijn, 2026-10-17). Nog niet: snelle acties en presets vanuit het menu, handmatige start |
 | Systeemconfig voor onderweg (fase 5) | **nee**: alleen de bestanden, `--dry-run` en de controles zonder root |
 
 ## Veiligheidsmodel
