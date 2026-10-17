@@ -1,4 +1,4 @@
-"""MCP-frontend: ontsluit elke ToolSpec van de ToolRunner als MCP-tool (stdio of HTTP).
+"""MCP-frontend: ontsluit elke toegestane ToolSpec van de ToolRunner als MCP-tool (stdio of HTTP).
 
 Ontwerpkeuzes:
 - Het inputschema dat de client ziet is exact `spec.params.model_json_schema()`; er wordt
@@ -150,13 +150,16 @@ def _make_tool(runner: ToolRunner, spec: ToolSpec, frontend: Frontend) -> Tool:
 def build_server(
     runner: ToolRunner, frontend: Frontend = "mcp", auth: AuthBundle | None = None
 ) -> MCPServer:
-    """Bouwt een MCPServer met één MCP-tool per `runner.specs()`-entry.
+    """Bouwt een MCPServer met één MCP-tool per `runner.allowed_specs()`-entry.
+
+    Least privilege: een tool buiten PITOOLBOX_TOOL_ALLOWLIST staat niet in `tools/list` (en
+    een aanroep ervan bereikt de runner niet); de runner dwingt de allowlist zelf ook af.
 
     Met `auth` worden de OAuth-routes van de SDK (authorize/token/register/revoke + metadata),
     de protected-resource-metadata, de 401-met-resource_metadata en onze /login-routes actief.
     Onze eigen /revoke komt er pas bij in `build_http_app` (`install_override_routes`).
     """
-    tools = [_make_tool(runner, spec, frontend) for spec in runner.specs()]
+    tools = [_make_tool(runner, spec, frontend) for spec in runner.allowed_specs()]
     if auth is None:
         return MCPServer(name=SERVER_NAME, instructions=INSTRUCTIONS, tools=tools)
     server = MCPServer(
@@ -327,7 +330,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     from pitoolbox.frontends.flipper_ui.bridge import start_from_settings
 
     runner = build_runner(settings)
-    log.info("pitoolbox-mcp start: %d tools, transport=%s", len(runner.specs()), args.transport)
+    log.info(
+        "pitoolbox-mcp start: %d tools, transport=%s", len(runner.allowed_specs()), args.transport
+    )
     # PITOOLBOX_FLIPPER_UI=on: de bediening via de Flipper-app draait in dit proces (dat de
     # Flipper bezit). Zolang die app verbonden is, bevestigt alleen OK op de Flipper.
     bridge = start_from_settings(runner, settings)

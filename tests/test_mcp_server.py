@@ -53,7 +53,9 @@ def _check(args: TargetArgs, scope: Scope) -> ScopeCheck:
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, ctx: ToolContext) -> None:
+    def __init__(
+        self, tmp_path: Path, ctx: ToolContext, allowlist: list[str] | None = None
+    ) -> None:
         self.calls: list[str] = []
         self.threads: dict[str, int] = {}
         self.release = threading.Event()
@@ -97,7 +99,7 @@ class Harness:
         self.runner = ToolRunner(
             Registry(self.specs),
             ctx,
-            Policy(ctx.scope_store),
+            Policy(ctx.scope_store, allowlist),
             AuditLog(self.audit_path),
         )
 
@@ -185,7 +187,7 @@ def test_server_instructions_are_dutch_and_mention_confirmation(harness: Harness
 
 def test_empty_runner_gives_server_without_tools() -> None:
     class Empty:
-        def specs(self) -> list[ToolSpec]:
+        def allowed_specs(self) -> list[ToolSpec]:
             return []
 
     server = build_server(Empty())  # type: ignore[arg-type]
@@ -279,7 +281,7 @@ async def test_handler_runs_in_worker_thread(harness: Harness) -> None:
 
 async def test_runner_crash_does_not_leak_details() -> None:
     class Crashing:
-        def specs(self) -> list[ToolSpec]:
+        def allowed_specs(self) -> list[ToolSpec]:
             return [ToolSpec("t", "d", Risk.READ, NoArgs, lambda c, a: {})]
 
         def call(self, frontend: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -346,6 +348,44 @@ async def test_transmit_out_of_scope_never_reaches_confirmation(harness: Harness
     assert _structured(result)["error"] == "denied"
     assert "pending_id" not in _structured(result)
     assert harness.runner.ctx.pending.list() == []
+
+
+# --- PITOOLBOX_TOOL_ALLOWLIST ---
+
+
+def _allowlisted(tmp_path: Path, make_ctx: Any, allowlist: list[str]) -> Harness:
+    scope = Scope.model_validate({"wifi": [{"bssid": BSSID, "channel": 6}]})
+    return Harness(tmp_path, make_ctx(tmp_path, scope), allowlist)
+
+
+async def test_list_tools_follows_allowlist(tmp_path: Path, make_ctx: Any) -> None:
+    harness = _allowlisted(tmp_path, make_ctx, ["read_tool"])
+    async with Client(build_server(harness.runner)) as client:
+        names = [t.name for t in (await client.list_tools()).tools]
+    # confirm_action handelt de runner af vóór de allowlist, dus die blijft (zoals altijd) staan.
+    assert names == ["read_tool", CONFIRM_TOOL]
+
+
+async def test_unlisted_tool_cannot_be_called(tmp_path: Path, make_ctx: Any) -> None:
+    harness = _allowlisted(tmp_path, make_ctx, ["read_tool"])
+    async with Client(build_server(harness.runner)) as client:
+        result = await client.call_tool("control_tool", {})
+    assert result.is_error is True
+    assert harness.calls == []
+
+
+async def test_confirm_flow_with_allowlist_without_confirm_action(
+    tmp_path: Path, make_ctx: Any
+) -> None:
+    harness = _allowlisted(tmp_path, make_ctx, ["transmit_tool"])
+    async with Client(build_server(harness.runner)) as client:
+        names = {t.name for t in (await client.list_tools()).tools}
+        assert names == {"transmit_tool", CONFIRM_TOOL}
+        pending = _structured(await client.call_tool("transmit_tool", {"bssid": BSSID}))
+        assert pending["error"] == "confirmation_required"
+        confirmed = await client.call_tool(CONFIRM_TOOL, {"pending_id": pending["pending_id"]})
+    assert _structured(confirmed)["ok"] is True
+    assert harness.calls == ["transmit_tool"]
 
 
 def test_main_starts_and_stops_flipper_bridge(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -131,6 +131,20 @@ class ToolRunner:
     def specs(self) -> list[ToolSpec]:
         return self.registry.all()
 
+    def allowed_specs(self) -> list[ToolSpec]:
+        """De tools die een frontend aanbiedt: alles wat `call()` niet al op de allowlist weigert.
+
+        Spiegelt `call()`: `confirm_action` wordt vóór de policy afgehandeld (de pending-tool
+        zelf wordt bij het uitvoeren opnieuw beslist) en blijft dus altijd staan; de rest volgt
+        `Policy.allows_tool` (een lege allowlist staat alles toe). Alleen voor de lijst: `call()`
+        blijft zelf afdwingen.
+        """
+        return [
+            spec
+            for spec in self.registry.all()
+            if spec.name == CONFIRM_TOOL or self.policy.allows_tool(spec.name)
+        ]
+
     def shutdown(self) -> None:
         """Bij afsluiten: geen achtergebleven captures, Flipper-poort netjes dicht."""
         for name, fn in (

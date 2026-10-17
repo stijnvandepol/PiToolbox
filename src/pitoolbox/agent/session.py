@@ -160,9 +160,7 @@ class AgentSession:
         self._clock = clock
         # Least privilege: tools buiten PITOOLBOX_TOOL_ALLOWLIST ziet het model niet eens (de
         # runner zou ze toch weigeren).
-        self._tools = model_tool_defs(
-            spec for spec in runner.specs() if runner.policy.allows_tool(spec.name)
-        )
+        self._tools = model_tool_defs(runner.allowed_specs())
         self._history: list[Message] = []
         self._notes: list[str] = []
         self._session_id = secrets.token_hex(4)

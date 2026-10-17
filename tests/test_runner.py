@@ -242,6 +242,25 @@ def test_allowlist_denies(tmp_path: Path, make_ctx: Any, fixed_scope: Scope) -> 
     assert [r["decision"] for r in fx.audit()] == ["allow", "deny"]
 
 
+def test_allowed_specs_without_allowlist_is_everything(fx: Fixture) -> None:
+    # Lege allowlist (PITOOLBOX_TOOL_ALLOWLIST niet gezet) staat alles toe.
+    assert fx.runner.allowed_specs() == fx.runner.specs()
+
+
+def test_allowed_specs_matches_what_call_accepts(
+    tmp_path: Path, make_ctx: Any, fixed_scope: Scope
+) -> None:
+    fx = Fixture(tmp_path, make_ctx(tmp_path, fixed_scope), allowlist=["read_tool"])
+    assert [s.name for s in fx.runner.allowed_specs()] == ["read_tool", CONFIRM_TOOL]
+    # Wat niet in de lijst staat, weigert call() nog steeds zelf.
+    for spec in fx.runner.specs():
+        if spec not in fx.runner.allowed_specs():
+            assert fx.runner.call("mcp", spec.name, {})["error"] == "denied"
+    # confirm_action gaat niet langs de allowlist: geen "denied", maar een gewone pending-fout.
+    unknown = fx.runner.call("mcp", CONFIRM_TOOL, {"pending_id": "onbekend"})
+    assert unknown["error"] == "unknown_pending"
+
+
 # --- confirm-flow ---
 
 
