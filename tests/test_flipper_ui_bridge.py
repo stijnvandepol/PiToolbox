@@ -244,6 +244,40 @@ def test_observer_sees_start_handshake_deliveries_and_detach(tmp_path: Path) -> 
         lab.bridge.stop()
 
 
+def test_lease_is_attached_before_the_bridge_reports_connected(tmp_path: Path) -> None:
+    lab = _make(tmp_path)
+    lease_at_connected: list[str | None] = []
+
+    def observe(event: BridgeEvent) -> None:
+        if event.kind == "connected":
+            lease_at_connected.append(lab.store.physical_confirmer)
+
+    lab.bridge = FlipperUiBridge(
+        lab.runner, app_path=FAP_PATH, timing=FAST_BRIDGE, observer=observe
+    )
+    try:
+        lab.connect()
+        assert lease_at_connected == [FRONTEND]
+    finally:
+        lab.bridge.stop()
+
+
+def test_no_session_without_the_lease(lab: Lab) -> None:
+    # Al een fysieke bevestiger (kan alleen bij een tweede bridge in hetzelfde proces): dan geen
+    # CONNECTED, want vragen tonen zonder "Flipper verplicht" zou de mens misleiden.
+    other = lab.runner.attach_physical_confirmer("andere-bridge")
+    try:
+        lab.bridge.start()
+        lab.bridge.request_start()
+        assert wait_until(lambda: lab.fake.app_starts == [FAP_PATH])
+        assert wait_until(lambda: not lab.fake.fap_running)  # eigen app weer gesloten
+        assert lab.bridge.state is BridgeState.IDLE
+        assert lab.store.physical_confirmer == "andere-bridge"
+        assert not lab.fap.of_type(proto.Presets)
+    finally:
+        lab.runner.detach_physical_confirmer(other, "test")
+
+
 def test_observer_reports_locked_loader(tmp_path: Path) -> None:
     lab = _make(tmp_path)
     seen: list[BridgeEvent] = []

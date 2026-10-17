@@ -405,14 +405,20 @@ class FlipperUiBridge(_ConfirmFlow, _ActionFlow):
         if fap is None or fap.instance != instance or self._state is BridgeState.STOPPED:
             return
         if self._state is not BridgeState.CONNECTED:
-            self._state = BridgeState.CONNECTED
-            self._hello_deadline = None
-            self._notify("connected", instance=instance)
+            # Eerst de lease, dan CONNECTED: wie CONNECTED ziet, mag erop rekenen dat alleen
+            # nog OK op de Flipper bevestigt. Lukt koppelen niet (er is al een bevestiger),
+            # dan geen sessie: vragen tonen zonder die regel zou de mens misleiden.
             if self._lease is None:
                 try:
                     self._lease = self.runner.attach_physical_confirmer(FRONTEND)
                 except RuntimeError:
-                    log.exception("fysieke bevestiger koppelen mislukte")
+                    log.exception("fysieke bevestiger koppelen mislukte; app wordt gesloten")
+                    self._detach("fysieke bevestiger koppelen mislukte", restart=False)
+                    self._lanes["device"].submit(self.device.exit_rpc_app)
+                    return
+            self._state = BridgeState.CONNECTED
+            self._hello_deadline = None
+            self._notify("connected", instance=instance)
             self._send_presets(fap)
             self._send_status()
         # Alles wat al openstaat, moet nu op de Flipper (de chat kan het niet meer).
