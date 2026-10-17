@@ -47,10 +47,17 @@ else
     run "uv audit" uv audit --locked --preview-features audit-command
 fi
 
+# Geen shellcheck op PATH: de vastgepinde binary uit PyPI (shellcheck-py) via uvx, als er
+# internet is. Dan draait ook tests/test_deploy.py::test_install_sh_shellcheck mee.
+SHELLCHECK_PY="shellcheck-py==0.11.0.1"
 if command -v shellcheck >/dev/null; then
     run "shellcheck" shellcheck deploy/install.sh scripts/gates.sh
+elif (( ! no_net )) && sc_path="$(uvx --from "$SHELLCHECK_PY" python -c 'import shutil; print(shutil.which("shellcheck") or "")')" && [[ -n "$sc_path" ]]; then
+    run "shellcheck" "$sc_path" deploy/install.sh scripts/gates.sh
+    run "pytest shellcheck" env PATH="$(dirname "$sc_path"):$PATH" \
+        uv run --frozen pytest -q tests/test_deploy.py -k shellcheck
 else
-    skipped+=("shellcheck (niet geïnstalleerd)")
+    skipped+=("shellcheck (niet geïnstalleerd; zonder --no-net haalt uvx $SHELLCHECK_PY)")
 fi
 
 echo

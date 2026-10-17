@@ -22,7 +22,7 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 | 4 Flipper als bediening | **spike klaar** ([fase4-spike.md](fase4-spike.md), advies: DataExchange); **providerlaag klaar** (`llm/`: openai-compatible, anthropic, openai; geen default); **agent-loop + `pitoolbox-agent` klaar** (alleen een mens bevestigt, `confirm_action` onzichtbaar voor het model, grenzen per beurt, beurt-audit) ; **FAP `pitoolbox_ui` + protocol v1 klaar** (bouwt tegen API 87.1, op hardware getest); **bridge klaar** (`PITOOLBOX_FLIPPER_UI=on`, "Flipper verplicht" in de kern, getest met een nagebootste FAP **en op hardware**: install, rooktest en valtest 20/20 over BLE) | **nog:** OK/Back en menu met de hand, spike-test 7; adapters + agent één keer tegen de echte API's en Ollama testen |
 | 5 Klaar voor onderweg | **deploybestanden klaar, niet op hardware getest** (root + reboot nodig); nog: README van nul | `install.sh --onderweg`: .link-namen wlan0/wlan1 (op driver/USB-id), NM unmanaged `driver:mt7921u`, logrotate audit-log, tmpfiles captures; optioneel `--bluez-le`; `--dry-run`, backups; [fase5-onderweg.md](fase5-onderweg.md) |
 
-Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck; 1345 passed, 1 skipped op de Pi; de skip is shellcheck als die niet op PATH staat). Daarnaast `uv run ruff check src tests` en `uv run mypy`.
+Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck): 1356 passed, 1 skipped in pytest zelf (de skip is de shellcheck-test als shellcheck niet op PATH staat; `gates.sh` haalt dan een vastgepinde shellcheck via uvx en draait die test alsnog). Op de Pi draait nu alles groen, zonder overslaan.
 
 ## Open punten die Stijn nog moet aanleveren
 
