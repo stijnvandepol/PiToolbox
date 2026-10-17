@@ -20,9 +20,23 @@ Dit bestand is het startpunt voor een nieuwe (Claude-)sessie, bijvoorbeeld op de
 | 2 Remote via Claude-app | klaar, **niet op hardware getest** | streamable HTTP op 127.0.0.1:8765/mcp, OAuth 2.1 (DCR, PKCE, wachtwoord + TOTP), cloudflared, systemd, [fase2-remote.md](fase2-remote.md) |
 | 3 Flipper via BLE | klaar; **op hardware getest** (koppelen, system_info, storage, ping/doorvoer); `ir_send` en reconnect-lijst nog open | bleak-transport, flow control, transport auto/usb/ble, keepalive, `pitoolbox-flipper ble-*`, [fase3-ble.md](fase3-ble.md) |
 | 4 Flipper als bediening | **spike klaar** ([fase4-spike.md](fase4-spike.md), advies: DataExchange); **providerlaag klaar** (`llm/`: openai-compatible, anthropic, openai; geen default); **agent-loop + `pitoolbox-agent` klaar** (alleen een mens bevestigt, `confirm_action` onzichtbaar voor het model, grenzen per beurt, beurt-audit) ; **FAP `pitoolbox_ui` + protocol v1 klaar** (bouwt tegen API 87.1, op hardware getest); **bridge klaar** (`PITOOLBOX_FLIPPER_UI=on`, "Flipper verplicht" in de kern, getest met een nagebootste FAP **en op hardware**: install, rooktest en valtest 20/20 over BLE) | **nog:** OK/Back en menu met de hand, spike-test 7; adapters + agent één keer tegen de echte API's en Ollama testen |
-| 5 Klaar voor onderweg | **deploybestanden klaar, niet op hardware getest** (root + reboot nodig); nog: README van nul | `install.sh --onderweg`: .link-namen wlan0/wlan1 (op driver/USB-id), NM unmanaged `driver:mt7921u`, logrotate audit-log, tmpfiles captures; optioneel `--bluez-le`; `--dry-run`, backups; [fase5-onderweg.md](fase5-onderweg.md) |
+| 5 Klaar voor onderweg | **deploybestanden klaar, niet op hardware getest** (root + reboot nodig); README van nul staat er | `install.sh --onderweg`: .link-namen wlan0/wlan1 (op driver/USB-id), NM unmanaged `driver:mt7921u`, logrotate audit-log, tmpfiles captures; optioneel `--bluez-le`; `--dry-run`, backups; [fase5-onderweg.md](fase5-onderweg.md) |
 
 Tests: `scripts/gates.sh` (ruff, format, mypy, pytest, `uv audit`, shellcheck): 1356 passed, 1 skipped in pytest zelf (de skip is de shellcheck-test als shellcheck niet op PATH staat; `gates.sh` haalt dan een vastgepinde shellcheck via uvx en draait die test alsnog). Op de Pi draait nu alles groen, zonder overslaan.
+
+## Nachtsessie 2026-10-17 (00:45–09:00)
+
+58 commits op `fase-1`, niet gepusht (`fase-1` loopt 77 commits voor op `origin/fase-1`). In het kort: README van nul, CODE_GUIDELINES.md + `scripts/gates.sh` + CI, alle bestanden onder 500 regels (refactor-only commits, publieke importpaden gelijk), ruff dwingt de grenzen af, review-fixes in bridge/keepalive/noodstop/app-kanaal, `ui-install`/`ui-test`/`ui-droptest`/`ui-test --confirm-check`, drie flaky tests opgelost (races in de tests; daarna 6/6 volledige runs groen). Hardwareresultaten: zie "Hardwaretest op de Pi" hieronder.
+
+**Voor Stijn, met de hand:**
+
+1. `uv run pitoolbox-flipper ui-test --confirm-check`: OK op vraag 1, Back op vraag 2 (zendt niets).
+2. Vanuit het menu van de app: snelle acties en presets; de handmatige start; spike-test 7 (vergrendelen over BLE).
+3. Eigen `.ir`-bestanden in `scope.yaml` zetten als je `ir_send` wilt testen (de Pi past scope.yaml niet aan).
+4. Pushen: `git push origin fase-1`.
+5. Fase 5 (sudo): eerst `deploy/install.sh --dry-run --onderweg`, dan `sudo deploy/install.sh --onderweg` (optioneel `--bluez-le`) en herstarten; BLE-adres in `/etc/pitoolbox/pitoolbox.env`; `PITOOLBOX_UPLINK_IFACE=eth0` uit `~/.zshenv` halen vóór je onderweg gaat.
+6. Alfa-wifitests (root/caps nodig); LLM-adapters tegen een echte API (sleutel nodig) of Ollama (~1 GB download, de Pi heeft weinig vrij geheugen).
+7. Optioneel: de spike-testapps in `/ext/apps/Debug` op de Flipper weghalen.
 
 ## Open punten die Stijn nog moet aanleveren
 
