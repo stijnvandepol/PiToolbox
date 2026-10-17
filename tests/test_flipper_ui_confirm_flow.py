@@ -1,7 +1,7 @@
 """Bridge: bevestigen, opnieuw groeten en levenscyclus (regressies uit de review van fase 4).
 
 Zelfde opzet als `test_flipper_ui_bridge.py` (echte `FlipperDevice`, nagebootste FAP, echte
-runner/policy/PendingStore/audit). `RehelloFap` doet wat `pitoolbox_ui.c` doet bij ERROR
+runner/policy/PendingStore/audit). `FakeFap` doet wat `pitoolbox_ui.c` doet bij ERROR
 `NOT_READY`: opnieuw HELLO met dezelfde instance (docs/fase4-protocol.md §5).
 """
 
@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from flipper_fakes import FakeFap, FakeFlipperTransport, wait_until
+from flipper_fakes import FAST_TIMING, FakeFap, FakeFlipperTransport, wait_until
 from llm_fakes import ScriptedProvider, reply, tool_call, use
-from test_flipper_ui_bridge import FAST_BRIDGE, IR_POWER, Lab
+from test_flipper_ui_bridge import FAP_PATH, FAST_BRIDGE, IR_POWER, Lab
 
 from pitoolbox.agent.session import AgentSession, ConfirmStatus
+from pitoolbox.core.devices.flipper import AppEvent, FlipperDevice
 from pitoolbox.core.tools.runner import CONFIRM_ON_FLIPPER, CONFIRM_TOOL
 from pitoolbox.frontends.flipper_ui import bridge_confirm
 from pitoolbox.frontends.flipper_ui import protocol as proto
@@ -27,28 +28,10 @@ from pitoolbox.frontends.flipper_ui.bridge import FRONTEND, BridgeState
 IR_VOL = {"device": "tv", "button": "Vol_up"}
 
 
-class RehelloFap(FakeFap):
-    """FAP die op ERROR NOT_READY opnieuw groet (zoals pitoolbox_ui.c sinds deze fix)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.rehellos = 0
-
-    def on_data(self, data: bytes) -> str:
-        verdict = super().on_data(data)
-        if verdict == "ok":
-            msg = proto.decode_from_pi(data)
-            if isinstance(msg, proto.Error) and msg.code is proto.ErrorCode.NOT_READY:
-                self.rehellos += 1
-                # Na de bevestiging, vanuit de app-thread (niet midden in de DataExchange).
-                threading.Timer(0.01, lambda: self.send(self.hello())).start()
-        return verdict
-
-
 def _lab(tmp_path: Path, *, rehello: bool = True, **kwargs: Any) -> Lab:
     lab = Lab(tmp_path, **kwargs)
-    if rehello:
-        lab.fap = lab.fake.attach_fap(RehelloFap())
+    if not rehello:
+        lab.fap = lab.fake.attach_fap(FakeFap(rehello=False))
     return lab
 
 
@@ -130,6 +113,53 @@ def test_app_that_does_not_greet_again_is_closed(tmp_path: Path) -> None:
         assert lab.fap.starts == 1
     finally:
         lab.bridge.stop()
+
+
+def test_fake_fap_greets_again_like_the_real_app() -> None:
+    """Bewaakt de nabootsing waar de tests hierboven op leunen (`ptb_on_not_ready` in
+    pitoolbox_ui.c): genegeerd tijdens de handdruk, dan zelfde instance, hoogstens één HELLO
+    per `hello_retry_s`."""
+    fake = FakeFlipperTransport(start_in_rpc=True, kind="ble")
+    fap = fake.attach_fap(FakeFap(hello_retry_s=0.3))
+    device = FlipperDevice(lambda: fake, timing=FAST_TIMING)
+    hellos: list[tuple[float, int]] = []
+
+    def sink(event: AppEvent) -> None:
+        msg = proto.decode_from_fap(event.data) if event.kind == "data" else None
+        if isinstance(msg, proto.Hello):
+            hellos.append((time.monotonic(), msg.instance))
+
+    def pi_says(msg: proto.PiMessage) -> None:
+        device.app_send(proto.encode(msg))
+
+    def not_ready() -> proto.Error:
+        return proto.Error(seq=1, ref=0, code=proto.ErrorCode.NOT_READY, text="x")
+
+    device.set_app_sink(sink)
+    try:
+        device.start_rpc_app(FAP_PATH)
+        pi_says(not_ready())  # handdruk loopt nog: genegeerd
+        pi_says(
+            proto.Welcome(
+                seq=2,
+                proto=proto.PROTO_VERSION,
+                instance=fap.instance,
+                confirm_on_flipper=True,
+                agent_available=False,
+            )
+        )
+        assert fap.connected
+        pi_says(not_ready())
+        pi_says(not_ready())  # de nieuwe handdruk loopt al: genegeerd
+        assert wait_until(lambda: device.poll_app_events(0.02) and len(hellos) >= 2)
+        time.sleep(0.4)
+        device.poll_app_events(0.02)
+        assert len(hellos) == 2 and fap.rehellos == 1
+        (first_at, first), (again_at, again) = hellos
+        assert first == again == fap.instance
+        assert again_at - first_at >= 0.25  # gemeten bij het lezen; zonder grens: 0,01 s
+    finally:
+        device.close()
 
 
 # --- #7: OK op een net verlopen handle ---------------------------------------------------------
@@ -342,7 +372,7 @@ def test_start_request_poll_never_connects(tmp_path: Path) -> None:
 def test_start_request_poll_leaves_usb_cli_alone(tmp_path: Path) -> None:
     lab = _lab(tmp_path)
     lab.fake = FakeFlipperTransport(start_in_rpc=False, kind="usb")
-    lab.fap = lab.fake.attach_fap(RehelloFap())
+    lab.fap = lab.fake.attach_fap(FakeFap())
     try:
         lab.device.connect()  # USB: CLI
         assert lab.device.status()["mode"] == "cli"

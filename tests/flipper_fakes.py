@@ -723,23 +723,42 @@ class FakeFlipperTransport:
         self._emit(MAIN_PROMPT)
 
 
+# PTB_HELLO_RETRY_MS (pitoolbox_ui_i.h, 3 s) geschaald zoals hello_timeout_s in de snelle
+# bridge-tijden (10 s -> 1 s): anders sluit de bridge de app voordat hij opnieuw groet.
+HELLO_RETRY_S = 0.3
+
+
 class FakeFap:
     """Nagebootste `pitoolbox_ui` (FAP-kant van docs/fase4-protocol.md) voor de bridge-tests.
 
     Gedraagt zich als `pitoolbox_ui.c`: groet na de start met HELLO (nieuwe willekeurige
     instance per start), bevestigt elke DataExchange direct (OK, of ERROR_APP_CMD_ERROR bij
     `reject_next`), en neemt Pi-berichten op met hun aankomsttijd. `hang` = nooit bevestigen.
+    Op ERROR `NOT_READY` groet hij opnieuw (`ptb_on_not_ready`, protocol §5): zelfde instance,
+    hoogstens één HELLO per `hello_retry_s`, en niet zolang de handdruk nog loopt (nog geen
+    WELCOME). `rehello=False` = een oude build die dat niet doet.
     """
 
-    def __init__(self, *, auto_hello: bool = True, max_rx: int = proto.MAX_MSG) -> None:
+    def __init__(
+        self,
+        *,
+        auto_hello: bool = True,
+        max_rx: int = proto.MAX_MSG,
+        rehello: bool = True,
+        hello_retry_s: float = HELLO_RETRY_S,
+    ) -> None:
         self.transport: FakeFlipperTransport | None = None
         self.auto_hello = auto_hello
         self.max_rx = max_rx
+        self.rehello = rehello
+        self.hello_retry_s = hello_retry_s
         self.instances: list[int] = []  # vaste instances voor de volgende starts (anders random)
         self.instance = 0
         self.running = False
+        self.connected = False  # WELCOME voor deze instance ontvangen (handdruk rond)
         self.starts = 0
         self.stops = 0
+        self.rehellos = 0  # NOT_READY's waarop hij opnieuw ging groeten
         self.reject_next = 0
         self.hang = False
         self.received: list[proto.PiMessage] = []
@@ -747,6 +766,7 @@ class FakeFap:
         self.invalid = 0
         self._seq = proto.SeqCounter()
         self._cond = threading.Condition()
+        self._hello_at = float("-inf")  # laatste HELLO (`hello_tick` in de C-code)
 
     # --- door de transport aangeroepen (met de transport-lock) ---
 
@@ -754,6 +774,7 @@ class FakeFap:
         import secrets
 
         self.running = True
+        self.connected = False
         if self.instances:
             self.instance = self.instances.pop(0)
         else:
@@ -761,10 +782,11 @@ class FakeFap:
         # Pas na de nieuwe instance: tests wachten op `starts` en lezen daarna `instance`.
         self.starts += 1
         if self.auto_hello:
-            self.send(self.hello())
+            self._greet()
 
     def on_stopped(self) -> None:
         self.running = False
+        self.connected = False
         self.stops += 1
         with self._cond:
             self._cond.notify_all()
@@ -784,7 +806,33 @@ class FakeFap:
             self.received.append(msg)
             self.received_at.append(time.monotonic())
             self._cond.notify_all()
+        if isinstance(msg, proto.Welcome) and msg.instance == self.instance:
+            self.connected = True
+        elif isinstance(msg, proto.Error) and msg.code is proto.ErrorCode.NOT_READY:
+            self._on_not_ready()
         return "ok"
+
+    def _on_not_ready(self) -> None:
+        """`ptb_on_not_ready`: de Pi kent deze sessie niet (meer)."""
+        if not self.rehello or not self.running or not self.connected:
+            return  # oude build, of de handdruk loopt al (de HELLO is onderweg)
+        self.connected = False
+        self.rehellos += 1
+        # Nooit midden in de DataExchange: de app-thread groet na de bevestiging, en hoogstens
+        # één HELLO per hello_retry_s (anders verstuurt de tick hem later).
+        delay = max(0.01, self._hello_at + self.hello_retry_s - time.monotonic())
+        instance = self.instance
+        timer = threading.Timer(delay, self._greet_again, args=(instance,))
+        timer.daemon = True
+        timer.start()
+
+    def _greet_again(self, instance: int) -> None:
+        if self.running and not self.connected and self.instance == instance:
+            self._greet()
+
+    def _greet(self) -> None:
+        self._hello_at = time.monotonic()
+        self.send(self.hello())
 
     # --- testkant ---
 
