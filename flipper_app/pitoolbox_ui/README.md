@@ -96,4 +96,5 @@ Met `--wait-action 30` kies je zelf op de Flipper Snelle acties → Status. Met 
 - `ui-test` over BLE: verbinden 8,1 s; daarna app gestart 0,9 s, HELLO 0,1 s, WELCOME 0,1 s, STATUS 0,6 s, sluiten 0,7 s.
 - `ui-droptest --rounds 20`: **20 van 20 geslaagd**, geen bevriezing of BusFault. Verbreking gezien na mediaan 2,4 s, app terug na mediaan 6,8 s (max 8,7 s), ping daarna ~97 ms.
 - Na de review-fixes (2026-10-17, 04:00): valtest opnieuw 20/20 (app terug mediaan 6,8 s, max 7,6 s); 5 minuten open en stil zonder verbreking; keepalive loopt door terwijl de app open is.
+- Duurtest 40 minuten over BLE, app open, elke 10 s STATUS: 240/240 afgeleverd, 0 verbrekingen, geheugen stabiel.
 - **Nog met de hand:** OK/Back op een echte bevestigingsvraag, de snelle acties en presets vanuit het menu, de handmatige start (verzoekbestand).
