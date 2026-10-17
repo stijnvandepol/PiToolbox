@@ -126,20 +126,24 @@ def _compact(value: Any, limit: int = ARGS_PREVIEW) -> str:
 
 
 def print_event(event: AgentEvent) -> None:
-    if isinstance(event, AssistantText):
-        _out(for_terminal(event.text))
-    elif isinstance(event, ToolCallStarted):
-        _out(f"  → {for_terminal(event.name) or '?'} {_compact(event.arguments or {})}")
-    elif isinstance(event, ToolCallFinished):
-        if event.ok:
-            _out("  ← ok")
-        elif event.error == "confirmation_required":
-            _out("  ← wacht op jouw bevestiging")
-        else:
-            detail = for_terminal(event.message or "")[:ARGS_PREVIEW]
-            _out(f"  ← fout: {for_terminal(event.error or '?')}{': ' + detail if detail else ''}")
-    elif isinstance(event, PendingConfirmation):
-        _out(f"  ! bevestiging nodig: {for_terminal(event.summary)}")
+    match event:
+        case AssistantText():
+            _out(for_terminal(event.text))
+        case ToolCallStarted():
+            _out(f"  → {for_terminal(event.name) or '?'} {_compact(event.arguments or {})}")
+        case ToolCallFinished():
+            _out(_finished_line(event))
+        case PendingConfirmation():
+            _out(f"  ! bevestiging nodig: {for_terminal(event.summary)}")
+
+
+def _finished_line(event: ToolCallFinished) -> str:
+    if event.ok:
+        return "  ← ok"
+    if event.error == "confirmation_required":
+        return "  ← wacht op jouw bevestiging"
+    detail = for_terminal(event.message or "")[:ARGS_PREVIEW]
+    return f"  ← fout: {for_terminal(event.error or '?')}{': ' + detail if detail else ''}"
 
 
 def ask_yes_no(question: str) -> bool:
