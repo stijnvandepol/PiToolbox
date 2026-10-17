@@ -18,7 +18,8 @@ nergens een shell of ``bluetoothctl`` gestart. De Flipper-BLE-transportlaag zelf
 core/devices/_flipper_ble.py en wordt pas bij gebruik geimporteerd.
 
 Hier staan de parser en de dispatch; de subcommando's staan per groep in flipper_ble_cli.py
-(koppelen), flipper_ble_measure.py (ble-test) en flipper_ui_cli.py (de PiToolbox-app).
+(koppelen), flipper_ble_measure.py en flipper_ble_report.py (ble-test) en flipper_ui_cli.py
+(de PiToolbox-app).
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from .config import Settings
 from .core.devices import _ble_pairing as ble_pairing
 from .core.errors import ToolboxError
 from .flipper_ble_cli import prompt_passkey
-from .flipper_ble_measure import FlipperLike, TransportReport, measure_transport
+from .flipper_ble_measure import FlipperLike, measure_transport
+from .flipper_ble_report import TransportReport
 from .flipper_cli_common import CliError, _err
 
 __all__ = [
