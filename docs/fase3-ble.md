@@ -144,7 +144,7 @@ Daarbij: er is maar één RPC-sessie tegelijk. Staat er al een RPC-sessie open (
 
 ## 7. Keepalive en herverbinden
 
-- `PITOOLBOX_FLIPPER_KEEPALIVE_S` (standaard 20): is de BLE-verbinding zolang idle, dan stuurt de transportlaag een RPC-ping, zodat de verbinding niet wegvalt; `0` zet dit uit. Alleen BLE gebruikt dit.
+- `PITOOLBOX_FLIPPER_KEEPALIVE_S` (standaard 20): is de BLE-verbinding zolang idle, dan stuurt de transportlaag een RPC-ping, zodat de verbinding niet wegvalt; `0` zet dit uit. Alleen BLE gebruikt dit. Idle betekent: geen eigen verzoek met antwoord van de Pi. Berichten die de PiToolbox-app (fase 4) uit zichzelf stuurt, tellen niet mee: de ping controleert of de RPC-sessie in beide richtingen werkt, en ruimt een link op die nog open lijkt maar dood is. Staat de app open, dan pingt de lezer van de bridge zelf (de keepalive-thread komt dan niet aan de beurt).
 - Valt de verbinding weg (Flipper uit, buiten bereik, Bluetooth uitgezet, app ertussen), dan opent de eerstvolgende tool-aanroep de verbinding opnieuw; de Flipper adverteert na een verbroken verbinding vanzelf weer (`gap.c`). Het precieze gedrag (aantal pogingen, wachttijden) staat in `core/devices/_flipper_ble.py` en moet op de hardware worden bevestigd. *(niet geverifieerd)*
 - Een tool die tijdens het wegvallen draait, geeft een fout (bijvoorbeeld `device_not_connected` of `device_timeout`) in plaats van te blijven hangen. *(niet geverifieerd)*
 

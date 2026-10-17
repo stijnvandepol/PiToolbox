@@ -5,6 +5,8 @@ from __future__ import annotations
 import calendar
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any
 
@@ -47,11 +49,11 @@ class Sink:
 
 
 def make(
-    *, ble: bool = True, auto_hello: bool = True
+    *, ble: bool = True, auto_hello: bool = True, keepalive_s: float = 0.0
 ) -> tuple[FlipperDevice, FakeFlipperTransport, FakeFap, Sink]:
     fake = FakeFlipperTransport(start_in_rpc=ble, kind="ble" if ble else "usb")
     fap = fake.attach_fap(FakeFap(auto_hello=auto_hello))
-    device = FlipperDevice(lambda: fake, timing=TIMING)
+    device = FlipperDevice(lambda: fake, timing=TIMING, keepalive_s=keepalive_s)
     sink = Sink()
     device.set_app_sink(sink)
     return device, fake, fap, sink
@@ -229,6 +231,47 @@ def test_poll_yields_to_waiting_tool_call() -> None:
     finally:
         stop.set()
         thread.join()
+
+
+@contextmanager
+def bridge_reader(device: FlipperDevice, slice_s: float) -> Iterator[None]:
+    """Leest zoals de lezer van de bridge: direct opnieuw pollen zolang er iets te lezen viel."""
+    stop = threading.Event()
+
+    def run() -> None:
+        while not stop.is_set():
+            if not device.poll_app_events(slice_s):
+                time.sleep(0.001)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
+
+
+def test_keepalive_keeps_pinging_while_the_reader_polls() -> None:
+    """De keepalive-thread wacht nooit op de lock; met een continu lezende bridge kwam hij
+    er dus (bijna) nooit aan (gemeten: 0 pings in 3 s). Nu pingt de lezer zelf."""
+    device, fake, fap, _sink = make(keepalive_s=0.1)
+    device.start_rpc_app(FAP)
+
+    def pings() -> int:
+        return fake.rpc_log.count("system_ping_request")
+
+    try:
+        with bridge_reader(device, 0.2):
+            before = pings()
+            # Verkeer van de app telt niet als verkeer: de ping gaat ook tijdens HELLO's door.
+            for _ in range(5):
+                fap.send(fap.hello())
+                time.sleep(0.1)
+            assert wait_until(lambda: pings() >= before + 3, timeout=2.0)
+        assert device.rpc_app_state == "active"
+    finally:
+        device.close()
 
 
 def test_cli_actions_refused_while_app_open() -> None:

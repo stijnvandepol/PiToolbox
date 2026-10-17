@@ -124,9 +124,18 @@ class FlipperAppChannel(FlipperModes):
 
         Geeft False als er niets te lezen viel (geen RPC-sessie, of bezet): de aanroeper
         wacht dan even voordat hij het opnieuw probeert.
+
+        Leest de bridge vrijwel continu, dan krijgt de keepalive-thread de lock nooit (die
+        wacht niet). Daarom pingt deze lezer zelf als de link `keepalive_s` idle is. Wat de
+        app ongevraagd stuurt, telt niet als verkeer: de keepalive bewijst dat de RPC-sessie
+        in beide richtingen werkt (onze write met flow control én een antwoord), en ruimt zo
+        een link op die nog open lijkt maar dood is. Een ongevraagd frame bewijst alleen de
+        richting Flipper -> Pi. (De BLE-supervision zelf heeft geen verkeer nodig; de
+        controllers houden de link met lege pakketten in stand.)
         """
 
         def op() -> bool:
+            self._ping_if_idle()
             client = self._client
             if self._mode != "rpc" or client is None:
                 return False
