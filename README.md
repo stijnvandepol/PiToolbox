@@ -590,6 +590,7 @@ Alles hieronder is alleen getest tegen nagebootste apparaten, behalve wat in [St
 - [ ] `ir_send` op je eigen tv: bevestiging → zendt → app sluit weer
 - [x] `emergency_stop` tijdens een `subghz_rx` van 60 s: stopt binnen ~1 s (2026-10-17: noodstop 1 ms, rx 15 ms later afgebroken; daarna werken CLI en RPC gewoon)
 - [ ] USB eruit en erin tijdens gebruik: de volgende call verbindt opnieuw
+- [x] `pitoolbox-mcp` over stdio als echt proces met een MCP-client (SDK): `tools/list` volgt de allowlist, `status`/`system_info`/`storage_list`/`storage_read` via USB werken, `ir_send` buiten scope, een verzonnen `pending_id`, een tool buiten de allowlist en een pad met `..` worden geweigerd, `emergency_stop` werkt, alles staat in de audit-log (2026-10-17, 12/12)
 
 **Alfa AWUS036AXML (mt7921u)**
 - [ ] `alfa_set_mode monitor` / `managed`. Gooit NetworkManager roet in het eten? (oplossing: `install.sh --onderweg`, zie [docs/fase5-onderweg.md](docs/fase5-onderweg.md))
