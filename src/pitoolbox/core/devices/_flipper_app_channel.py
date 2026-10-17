@@ -22,7 +22,7 @@ from pitoolbox.core.devices._flipper_types import (
     DeviceBusy,
     _Attempt,
 )
-from pitoolbox.core.errors import DeviceError
+from pitoolbox.core.errors import DeviceError, DeviceTimeout
 
 # Loggernaam van flipper.py: alle logregels van FlipperDevice onder één naam.
 log = logging.getLogger("pitoolbox.core.devices.flipper")
@@ -93,8 +93,8 @@ class FlipperAppChannel(FlipperModes):
 
         Raises:
             AppRejected: de app weigerde (ongeldig of wachtrij vol); later opnieuw proberen.
-            AppNotRunning: de app draait niet (meer).
-            DeviceTimeout: geen bevestiging binnen `timeout_s`: de sessie geldt als dood.
+            AppNotRunning: de app draait niet (meer), of bevestigde niet binnen `timeout_s`
+                (dan hangt ze of is ze weg; het device heeft haar gesloten).
             DeviceError: verbinding weg.
         """
         if not 1 <= len(data) <= 512:
@@ -108,6 +108,12 @@ class FlipperAppChannel(FlipperModes):
             main.app_data_exchange_request.data = data
             try:
                 client.request(main, timeout_s)
+            except DeviceTimeout as exc:
+                self._close_unresponsive_app()
+                raise AppNotRunning(
+                    f"de PiToolbox-app bevestigde een bericht niet binnen {timeout_s:g} s; "
+                    "de Pi heeft haar gesloten"
+                ) from exc
             except RpcError as exc:
                 if exc.status_name == "ERROR_APP_CMD_ERROR":
                     raise AppRejected("de PiToolbox-app weigerde het bericht") from exc
@@ -252,6 +258,22 @@ class FlipperAppChannel(FlipperModes):
         except BaseException:
             self._rpc_app_state = "off"
             raise
+
+    def _close_unresponsive_app(self) -> None:
+        """Onder de lock: onze app bevestigde een DataExchange niet op tijd, dus ze hangt of is
+        weg. Zelf sluiten (wij startten haar met "RPC"; nooit een app van de gebruiker) en pas
+        daarna `lost` melden, zodat een nieuwe start niet op onze eigen app stuit.
+
+        De link blijft open: een app die niet antwoordt is geen kapotte verbinding (over BLE
+        zou sluiten de hele sessie kosten). Is de link toch dood, dan merkt de keepalive dat.
+        Een late bevestiging van het verlopen verzoek heeft een eigen command_id; de RpcClient
+        zet die in zijn eventqueue, waar geen later verzoek of `wait_event` hem voor zich houdt.
+        """
+        try:
+            self._exit_rpc_app_locked()
+        except (RpcError, DeviceTimeout) as exc:
+            log.warning("PiToolbox-app sluiten na een time-out mislukte: %s", exc)
+        self._rpc_app_lost("de app bevestigde een bericht niet op tijd")
 
     def _exit_rpc_app_locked(self) -> None:
         client = self._client

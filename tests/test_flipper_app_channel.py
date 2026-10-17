@@ -174,6 +174,51 @@ def test_app_send_ok_rejected_and_not_running() -> None:
     assert "closed" in sink.kinds()
 
 
+@pytest.mark.parametrize("ble", [True, False])
+def test_unacknowledged_message_closes_our_app_but_keeps_the_link(ble: bool) -> None:
+    """Geen bevestiging binnen de time-out: de app hangt of is weg. Het device sluit zijn eigen
+    app en meldt pas dan `lost`; de link blijft (BLE sloot eerst de hele link, USB liet de app
+    open staan zodat de volgende start op onze eigen app AppLocked kreeg)."""
+    device, fake, fap, sink = make(ble=ble)
+    device.start_rpc_app(FAP)
+    opens = fake.opens
+    fap.hang = True
+    with pytest.raises(AppNotRunning, match="gesloten"):
+        device.app_send(proto.encode(proto.Presets(seq=2, items=())), timeout_s=0.2)
+    assert "app_exit_request" in fake.rpc_log
+    assert not fake.fap_running
+    assert sink.kinds()[-1] == "lost"
+    assert device.rpc_app_state == "off"
+    assert device.status()["connected"] is True and fake.opens == opens
+    fap.hang = False
+    device.start_rpc_app(FAP)
+    assert fap.starts == 2 and fake.opens == opens
+
+
+def test_late_answer_to_timed_out_message_is_harmless() -> None:
+    """De bevestiging komt pas binnen als de Pi al opgegeven heeft (vóór het antwoord op
+    app_exit): sluiten en latere verzoeken lopen gewoon door."""
+    device, fake, fap, _sink = make()
+    fake.files = {"/ext/a.txt": b"abc"}
+    device.start_rpc_app(FAP)
+    original = fake._rpc_app_data_exchange_request
+
+    def answer_late(request: Any) -> None:
+        original(request)  # fap.hang: nu geen antwoord
+        fake.queue_extra_frame(fake._ok(request))  # pas vóór het volgende antwoord
+
+    fake._rpc_app_data_exchange_request = answer_late  # type: ignore[method-assign]
+    fap.hang = True
+    with pytest.raises(AppNotRunning):
+        device.app_send(proto.encode(proto.Presets(seq=2, items=())), timeout_s=0.2)
+    assert not fake.fap_running and fake.extra_frames == []  # het late antwoord is gelezen
+    assert device.storage_read("/ext/a.txt", 10) == b"abc"
+    fap.hang = False
+    device.start_rpc_app(FAP)
+    device.app_send(proto.encode(proto.Presets(seq=3, items=())))
+    assert isinstance(fap.received[-1], proto.Presets) and fap.received[-1].seq == 3
+
+
 def test_abort_does_not_break_app_messages() -> None:
     device, _fake, fap, _sink = make()
     device.start_rpc_app(FAP)
