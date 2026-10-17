@@ -140,7 +140,7 @@ Over BLE werken **alleen** de tools die het Flipper-RPC-protocol gebruiken: `sys
 
 Waarom: bij een BLE-verbinding opent de firmware meteen een RPC-sessie en koppelt de seriële BLE-service daaraan (`bt.c`: bij `GapEventTypeConnected` met het seriële profiel `rpc_session_open(bt->rpc, RpcOwnerBle)`). Er bestaat over BLE geen CLI-prompt; `subghz rx`, `lfrfid read` en de NFC-scanner zijn CLI-commando's (`subghz_cli.c`, `lfrfid_cli.c`, `nfc_cli.c`) en alleen via de USB-CDC-console bereikbaar. Dat is een eigenschap van de firmware, niet van pitoolbox.
 
-Daarbij: er is maar één RPC-sessie tegelijk. Staat er al een RPC-sessie open (bijvoorbeeld de officiële app of een USB-RPC-sessie), dan logt de Flipper "RPC is busy, failed to open new session" en doet de BLE-verbinding niets. Houd USB en BLE dus niet tegelijk in RPC-gebruik.
+Daarbij: USB en BLE kunnen elk een eigen RPC-sessie hebben. In mntm-012 telt `rpc_session_open` alleen het aantal sessies (`sessions_count`) en legt het geen limiet op; een gedeelde `busy_mutex` voert de berichten van alle sessies na elkaar uit (`applications/services/rpc/rpc.c`, tag mntm-012). Op hardware getest (2026-10-17): met een open USB-sessie verbindt BLE gewoon en blijven beide werken. Wel kan een verzoek op het ene transport even wachten op een verzoek op het andere. Weigert `rpc_session_open` toch, dan is dat de vergrendeling (Flipper op slot, zonder de Momentum-instelling die RPC op slot toestaat).
 
 ## 7. Keepalive en herverbinden
 
@@ -173,7 +173,7 @@ Blijvend: zet in `/etc/bluetooth/main.conf` onder `[LE]` de regels `MinConnectio
 | "De Flipper vroeg geen code" | Er was geen beveiligingsverzoek: staat Bluetooth aan, en is de Flipper niet bezet door een telefoon? |
 | "Geen verbinding met de Flipper" (`ConnectionAttemptFailed`) | Buiten bereik, of een andere centrale (de Flipper-app op een telefoon) houdt de enige verbinding vast. |
 | Gekoppeld, maar verbinden lukt later niet meer | Bond aan één kant weg (firmware-update, `Unpair All Devices` op de Flipper). Opnieuw koppelen: `ble-pair --force`. De Flipper kan opnieuw bonden (`ACI_GAP_BOND_LOST` → `aci_gap_allow_rebond` in `gap.c`), maar BlueZ houdt de oude sleutel tot je `ble-unpair` doet. |
-| BLE-verbinding is er, maar RPC doet niets | "RPC is busy": er is al een RPC-sessie (zie 6). Sluit de app of de USB-RPC-sessie. |
+| BLE-verbinding is er, maar RPC doet niets | De Flipper staat op slot (zie 6), of een andere RPC-sessie houdt de Flipper lang bezig. Ontgrendel de Flipper, of stop de andere sessie. |
 | Tool geeft `unsupported_transport` | Dat tool is CLI-gebaseerd (6): verbind USB of zet `PITOOLBOX_FLIPPER_TRANSPORT=usb`. |
 | Pairing werkt alleen op Linux | De pairing-commando's praten met BlueZ en geven op Windows/macOS een duidelijke melding; ontwikkel/test ze op de Pi. |
 | Doorvoer slecht | Zie 4, "Interpreteren" en "BLE sneller maken"; vergelijk met `--compare-usb`. |
@@ -186,17 +186,17 @@ Op een echte Pi 4 of 5 (Kali) met een echte Flipper, in deze volgorde:
 
 - [ ] `systemctl status bluetooth` is actief; `bluetoothctl show` meldt `Powered: yes`.
 - [ ] Gebruiker en `pitoolbox` zitten in `bluetooth`; `systemctl start pitoolbox-mcp` start zonder fout (groep bestaat).
-- [ ] `ble-scan` toont de Flipper met RSSI.
+- [x] `ble-scan` toont de Flipper met RSSI. *(2026-10-17: A1tkethe, −57 dBm, "gekoppeld: ja", op hci1)*
 - [ ] `ble-pair <adres>`: de Flipper toont de code, de agent vraagt erom, na invoer meldt de CLI succes. Controleer dat `RequestPasskey` echt wordt aangeroepen (blijft de vraag uit, herzie dan de capability `KeyboardOnly`; `btmon` toont de SMP-uitwisseling met de IO-capabilities).
 - [ ] Een foute code geeft "authenticatie mislukt" en de CLI keert terug zonder te hangen; een tweede `ble-pair` direct erna werkt weer (de agent was dus afgemeld).
-- [ ] `ble-list` toont gekoppeld, bonded en trusted; na het koppelen is de Flipper **niet** meer verbonden (de CLI verbreekt hem).
-- [ ] `ble-test --address <adres>`: verbinden, `system_info`, `/ext`-lijst en download slagen; noteer verbinden, latency (min/med/max) en KiB/s.
-- [ ] `ble-test --compare-usb` met USB aangesloten: de USB-kolom verschijnt en is sneller; geen conflict door twee verbindingen tegelijk (anders: eerst BLE, dan USB meten).
-- [ ] Een RPC-sessie die al op USB staat: wat doet BLE dan ("RPC is busy")?
+- [x] `ble-list` toont gekoppeld, bonded en trusted *(2026-10-17: ja/ja/ja, verbonden: nee)*; na het koppelen is de Flipper **niet** meer verbonden (de CLI verbreekt hem).
+- [x] `ble-test --address <adres>`: verbinden, `system_info`, `/ext`-lijst en download slagen; noteer verbinden, latency (min/med/max) en KiB/s. *(2026-10-17: verbinden + system_info 7,9–8,1 s (de eerste keer na uren stilte 15–16 s), ping 96/98/100 ms, download 1,2 KiB/s, 22 items in /ext)*
+- [x] `ble-test --compare-usb` met USB aangesloten: de USB-kolom verschijnt en is sneller; geen conflict door twee verbindingen tegelijk (anders: eerst BLE, dan USB meten). *(2026-10-17: USB 0,47 s, ping 2/3/3 ms, 97 KiB/s)*
+- [x] Een RPC-sessie die al op USB staat: wat doet BLE dan ("RPC is busy")? *(2026-10-17: geen conflict. Met een open USB-sessie verbindt BLE gewoon (8,0 s), ping 95 ms, en USB blijft daarna werken: de firmware heeft per transport een eigen RPC-sessie, `rpc.c` legt geen limiet op)*
 - [ ] De service met `PITOOLBOX_FLIPPER_TRANSPORT=ble`: `system_info`, `storage_list`, `storage_read` en `ir_send` werken via Claude; `subghz_rx`, `nfc_read` en `rfid_read` geven `unsupported_transport`.
-- [ ] Keepalive: 5 minuten niets doen en daarna `system_info`; de verbinding staat nog (of wordt netjes hersteld). Probeer ook `PITOOLBOX_FLIPPER_KEEPALIVE_S=0`.
+- [x] Keepalive: 5 minuten niets doen en daarna `system_info`; de verbinding staat nog (of wordt netjes hersteld). Probeer ook `PITOOLBOX_FLIPPER_KEEPALIVE_S=0`. *(2026-10-17: met de app open en keepalive 10 s 5 min zonder verbreking; met `KEEPALIVE_S=0` na 5 min stilte nog verbonden, `system_info` in 5,9 s)*
 - [ ] Herverbinden: Flipper Bluetooth uit/aan, of buiten bereik en terug; de volgende tool-aanroep slaagt.
-- [ ] Wegvallen midden in een `storage_read`: nette fout, geen hangende service.
+- [x] Wegvallen midden in een `storage_read`: nette fout, geen hangende service. *(2026-10-17: 20 KB lezen, na 4 s `Device1.Disconnect`: de Pi verbindt één keer opnieuw en leest het bestand alsnog (MD5 gelijk aan USB, 23,7 s in totaal); daarna `system_info` in 5,9 s)*
 - [ ] Hardening: `journalctl -u pitoolbox-mcp` zonder `Permission denied` of `AF_`-fouten bij BLE; `systemd-analyze security pitoolbox-mcp` ongewijzigd acceptabel.
 - [ ] Optioneel: `ble-test` met veel Wi-Fi-verkeer op `wlan0`/`wlan1`, om storing te beoordelen.
 
