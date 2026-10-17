@@ -7,6 +7,9 @@ Ontwerp:
 - Tokens, autorisatiecodes en request-id's worden uitsluitend als sha256-hash opgeslagen.
 - Schema-versie via PRAGMA user_version.
 - Alle tijden komen uit een injecteerbare klok (unix-seconden) zodat tests kunnen vooruitspoelen.
+
+Indeling: het schema en de migratie staan in `_schema`, de rijtypen in `_rows`; deze module
+heeft de queries en is het publieke importpad voor alles.
 """
 
 from __future__ import annotations
@@ -18,136 +21,23 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._rows import AuthRequestRow, CodeRow, StoreStats, TokenRow, UserRow
+from ._schema import CLIENT_TABLES, migrate
 from .crypto import hash_token
 
+__all__ = [
+    "AuthRequestRow",
+    "AuthStore",
+    "CodeRow",
+    "StoreStats",
+    "TokenRow",
+    "UserRow",
+]
+
 log = logging.getLogger(__name__)
-
-SCHEMA_VERSION = 1
-
-_SCHEMA_V1 = (
-    """
-CREATE TABLE user (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    password_hash TEXT NOT NULL,
-    totp_secret TEXT NOT NULL,
-    last_totp_counter INTEGER NOT NULL DEFAULT -1,
-    failed_attempts INTEGER NOT NULL DEFAULT 0,
-    locked_until REAL NOT NULL DEFAULT 0,
-    created REAL NOT NULL
-)""",
-    """
-CREATE TABLE clients (
-    client_id TEXT PRIMARY KEY,
-    json TEXT NOT NULL,
-    created REAL NOT NULL,
-    last_used REAL NOT NULL
-)""",
-    """
-CREATE TABLE auth_requests (
-    id_hash TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    params TEXT NOT NULL,
-    csrf TEXT NOT NULL,
-    created REAL NOT NULL,
-    expires REAL NOT NULL
-)""",
-    """
-CREATE TABLE auth_codes (
-    code_hash TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    scopes TEXT NOT NULL,
-    code_challenge TEXT NOT NULL,
-    redirect_uri TEXT NOT NULL,
-    redirect_uri_explicit INTEGER NOT NULL,
-    resource TEXT,
-    subject TEXT,
-    expires REAL NOT NULL,
-    used INTEGER NOT NULL DEFAULT 0,
-    family_id TEXT
-)""",
-    """
-CREATE TABLE access_tokens (
-    token_hash TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    family_id TEXT NOT NULL,
-    scopes TEXT NOT NULL,
-    resource TEXT,
-    subject TEXT,
-    expires REAL NOT NULL
-)""",
-    "CREATE INDEX access_tokens_family ON access_tokens (family_id)",
-    """
-CREATE TABLE refresh_tokens (
-    token_hash TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    family_id TEXT NOT NULL,
-    scopes TEXT NOT NULL,
-    resource TEXT,
-    subject TEXT,
-    expires REAL NOT NULL,
-    rotated INTEGER NOT NULL DEFAULT 0
-)""",
-    "CREATE INDEX refresh_tokens_family ON refresh_tokens (family_id)",
-)
-
-# Tabellen die aan een client hangen (voor opruimen van wezen).
-_CLIENT_TABLES = ("auth_requests", "auth_codes", "access_tokens", "refresh_tokens")
-
-
-@dataclass(frozen=True)
-class UserRow:
-    password_hash: str
-    totp_secret: str
-    last_totp_counter: int
-    failed_attempts: int
-    locked_until: float
-
-
-@dataclass(frozen=True)
-class AuthRequestRow:
-    client_id: str
-    params: dict[str, Any]
-    csrf: str
-    expires: float
-
-
-@dataclass(frozen=True)
-class CodeRow:
-    client_id: str
-    scopes: list[str]
-    code_challenge: str
-    redirect_uri: str
-    redirect_uri_explicit: bool
-    resource: str | None
-    subject: str | None
-    expires: float
-    used: bool = False
-    family_id: str | None = None
-
-
-@dataclass(frozen=True)
-class TokenRow:
-    """Gedeelde vorm voor access- en refresh-tokens."""
-
-    client_id: str
-    family_id: str
-    scopes: list[str]
-    resource: str | None
-    subject: str | None
-    expires: float
-    rotated: bool = False
-
-
-@dataclass(frozen=True)
-class StoreStats:
-    clients: int
-    active_access_tokens: int
-    active_refresh_tokens: int
-    pending_requests: int
 
 
 class AuthStore:
@@ -156,7 +46,8 @@ class AuthStore:
         self._clock = clock
         self._lock = threading.RLock()
         self._prepare_files()
-        self._migrate()
+        with self._tx() as conn:
+            migrate(conn)
 
     # --- infrastructuur ------------------------------------------------------------------
 
@@ -191,18 +82,6 @@ class AuthStore:
                     conn.execute("COMMIT")
             finally:
                 conn.close()
-
-    def _migrate(self) -> None:
-        with self._tx() as conn:
-            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if version > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"auth-database heeft schema {version}, nieuwer dan bekend ({SCHEMA_VERSION})"
-                )
-            if version < 1:
-                for statement in _SCHEMA_V1:
-                    conn.execute(statement)
-                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def schema_version(self) -> int:
         with self._tx() as conn:
@@ -298,7 +177,7 @@ class AuthStore:
     @staticmethod
     def _delete_orphans(conn: sqlite3.Connection) -> None:
         """Verwijder alles wat bij een niet meer bestaande client hoort."""
-        for table in _CLIENT_TABLES:
+        for table in CLIENT_TABLES:
             conn.execute(
                 f"DELETE FROM {table} WHERE client_id NOT IN (SELECT client_id FROM clients)"  # noqa: S608
             )
@@ -502,7 +381,7 @@ class AuthStore:
         """Verwijder alle tokens, codes, verzoeken en clients (de gebruiker blijft)."""
         counts: dict[str, int] = {}
         with self._tx() as conn:
-            for table in (*_CLIENT_TABLES, "clients"):
+            for table in (*CLIENT_TABLES, "clients"):
                 counts[table] = conn.execute(f"DELETE FROM {table}").rowcount  # noqa: S608
         return counts
 
