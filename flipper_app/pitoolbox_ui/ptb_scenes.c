@@ -150,6 +150,9 @@ static void ptb_scene_quick_on_enter(void* context) {
     for(size_t i = 0; i < COUNT_OF(ptb_quick_items); i++) {
         submenu_add_item(submenu, ptb_quick_items[i].label, i, ptb_submenu_callback, app);
     }
+    /* Terug uit het resultaat: de cursor blijft op de gekozen actie (zoals het hoofdmenu). */
+    submenu_set_selected_item(
+        submenu, scene_manager_get_scene_state(app->scene_manager, PtbSceneQuick));
     view_dispatcher_switch_to_view(app->view_dispatcher, PtbViewSubmenu);
 }
 
@@ -158,6 +161,7 @@ static bool ptb_scene_quick_on_event(void* context, SceneManagerEvent event) {
     if(event.type != SceneManagerEventTypeCustom || event.event < PtbEventMenuBase) return false;
     uint32_t index = event.event - PtbEventMenuBase;
     if(index >= COUNT_OF(ptb_quick_items)) return false;
+    scene_manager_set_scene_state(app->scene_manager, PtbSceneQuick, index);
     /* Eén actie tegelijk, behalve de noodstop: die mag altijd (de Pi voert hem direct uit). */
     bool emergency = ptb_quick_items[index].id == PtbQuickEmergencyStop;
     if(!app->busy || emergency) {
@@ -189,6 +193,9 @@ static void ptb_scene_presets_fill(PtbApp* app) {
         for(uint8_t i = 0; i < app->presets.count; i++) {
             submenu_add_item(submenu, app->presets.label[i], i, ptb_submenu_callback, app);
         }
+        /* Ook na het verversen van de lijst: de cursor blijft op de laatst gekozen preset. */
+        submenu_set_selected_item(
+            submenu, scene_manager_get_scene_state(app->scene_manager, PtbScenePresets));
     }
 }
 
@@ -209,6 +216,7 @@ static bool ptb_scene_presets_on_event(void* context, SceneManagerEvent event) {
     if(event.event < PtbEventMenuBase) return false;
     uint32_t index = event.event - PtbEventMenuBase;
     if(!app->presets_valid || index >= app->presets.count) return true; /* placeholder */
+    scene_manager_set_scene_state(app->scene_manager, PtbScenePresets, index);
     if(!app->busy) {
         ptb_send_action(app, PtbActionPreset, app->presets.id[index], app->presets.label[index]);
     }
