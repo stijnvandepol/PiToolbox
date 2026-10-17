@@ -279,6 +279,28 @@ def test_reset_starts_a_new_conversation(
     assert len(sent) == 1 and isinstance(sent[0], UserMessage) and sent[0].text == "vraag 3"
 
 
+def test_reset_drops_the_note_about_trimmed_turns(
+    tmp_path: Path, make_ctx: Callable[..., ToolContext]
+) -> None:
+    # Review 2026-10-17: een beurt kort de geschiedenis in, de provider faalt (teruggedraaid,
+    # meldingen blijven), de terminal raadt /new aan. Het nieuwe gesprek mag dan niet beginnen
+    # met "oudere beurten zijn weggelaten".
+    lab = Lab(tmp_path, make_ctx(tmp_path), limits=AgentLimits(max_history_chars=10_000))
+    for i in range(4):
+        lab.provider.add(use(tool_call("status")), reply(f"antwoord {i} " + "x" * 4000))
+        lab.turn(f"vraag {i}")
+    lab.provider.add(LLMServerError("boem"))
+    result = lab.turn("vraag 4")
+    assert result.stop is TurnStop.LLM_ERROR and result.rolled_back
+
+    lab.session.reset()
+    lab.provider.add(reply("vers begin"))
+    lab.turn("eerste vraag van het nieuwe gesprek")
+    sent = lab.provider.requests[-1].messages
+    assert len(sent) == 1 and isinstance(sent[0], UserMessage)
+    assert sent[0].text == "eerste vraag van het nieuwe gesprek"
+
+
 def test_history_keeps_last_turn_even_if_over_budget(
     tmp_path: Path, make_ctx: Callable[..., ToolContext]
 ) -> None:

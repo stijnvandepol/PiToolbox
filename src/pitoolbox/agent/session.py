@@ -258,12 +258,12 @@ class AgentSession(_HumanDecisions):
             return
         dropped_turns = sum(1 for m in self._history[:cut] if isinstance(m, UserMessage))
         del self._history[:cut]
-        self._notes.append(
-            note(
-                f"{dropped_turns} oudere gespreksbeurt(en) zijn weggelaten om binnen de "
-                "context te blijven; vraag de gebruiker als je die informatie nodig hebt."
-            )
+        trimmed = note(
+            f"{dropped_turns} oudere gespreksbeurt(en) zijn weggelaten om binnen de "
+            "context te blijven; vraag de gebruiker als je die informatie nodig hebt."
         )
+        self._history_notes.add(trimmed)
+        self._notes.append(trimmed)
         self._audit_event("agent_history_trimmed", dropped_turns=dropped_turns)
 
     def reset(self) -> int:
@@ -271,10 +271,13 @@ class AgentSession(_HumanDecisions):
 
         Uitweg als de provider een item uit de geschiedenis blijft weigeren (bijv. een
         reasoning-item dat hij niet meer kent). Open bevestigingen en nog niet gemelde
-        uitkomsten blijven staan: die horen bij acties, niet bij het gesprek. Geeft het
-        aantal weggegooide beurten.
+        uitkomsten blijven staan: die horen bij acties, niet bij het gesprek. Een melding over
+        weggelaten beurten hoort bij het oude gesprek en verdwijnt mee. Geeft het aantal
+        weggegooide beurten.
         """
         dropped_turns = sum(1 for m in self._history if isinstance(m, UserMessage))
         self._history.clear()
+        self._notes = [n for n in self._notes if n not in self._history_notes]
+        self._history_notes.clear()
         self._audit_event("agent_history_reset", dropped_turns=dropped_turns)
         return dropped_turns

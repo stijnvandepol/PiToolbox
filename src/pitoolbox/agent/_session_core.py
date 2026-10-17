@@ -57,6 +57,8 @@ class _SessionCore:
         self._tools = model_tool_defs(runner.allowed_specs())
         self._history: list[Message] = []
         self._notes: list[str] = []
+        # Meldingen over het gesprek zelf (weggelaten beurten); `reset()` gooit die weg.
+        self._history_notes: set[str] = set()
         self._session_id = secrets.token_hex(4)
         self._turns = 0
         self._confirmations = OpenConfirmations()
