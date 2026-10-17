@@ -135,41 +135,8 @@ class OpenAIResponsesProvider(HttpProvider):
                 f"provider meldt status 'failed' ({code or 'onbekend'})", provider_code=code
             )
         output = require_list(data, "output", "output")
-        texts: list[str] = []
-        calls: list[ToolCall] = []
-        refused = False
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            kind = item.get("type")
-            if kind == "message":
-                parts = item.get("content")
-                for part in parts if isinstance(parts, list) else []:
-                    if not isinstance(part, dict):
-                        continue
-                    if part.get("type") == "output_text" and isinstance(part.get("text"), str):
-                        texts.append(part["text"])
-                    elif part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
-                        texts.append(part["refusal"])
-                        refused = True
-            elif kind == "function_call":
-                calls.append(
-                    make_tool_call(item.get("call_id"), item.get("name"), item.get("arguments"))
-                )
-
-        raw_reason: str | None = status
-        if status == "incomplete":
-            raw_reason = as_str(as_dict(data.get("incomplete_details")).get("reason"))
-            reason = _INCOMPLETE_REASONS.get(raw_reason or "", StopReason.OTHER)
-        elif calls:
-            reason = StopReason.TOOL_USE
-        elif refused:
-            reason = StopReason.REFUSAL
-        elif status == "completed":
-            reason = StopReason.END_TURN
-        else:
-            reason = StopReason.OTHER
-
+        texts, calls, refused = _read_output(output)
+        reason, raw_reason = _stop_reason(data, status, has_calls=bool(calls), refused=refused)
         usage = as_dict(data.get("usage"))
         return Completion(
             text="\n\n".join(t for t in texts if t),
@@ -183,3 +150,53 @@ class OpenAIResponsesProvider(HttpProvider):
             model=as_str(data.get("model")),
             state=ProviderState(self.kind.value, {"output": output}),
         )
+
+
+def _read_output(output: list[Any]) -> tuple[list[str], list[ToolCall], bool]:
+    """Teksten, tool-calls en of het model weigerde, uit de `output`-items van een antwoord."""
+    texts: list[str] = []
+    calls: list[ToolCall] = []
+    refused = False
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "message":
+            refused = _read_message(item, texts) or refused
+        elif kind == "function_call":
+            calls.append(
+                make_tool_call(item.get("call_id"), item.get("name"), item.get("arguments"))
+            )
+    return texts, calls, refused
+
+
+def _read_message(item: dict[str, Any], texts: list[str]) -> bool:
+    """Voegt de `output_text`- en `refusal`-delen van een `message`-item toe aan `texts`;
+    True als er een weigering bij zat."""
+    refused = False
+    parts = item.get("content")
+    for part in parts if isinstance(parts, list) else []:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+            texts.append(part["text"])
+        elif part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
+            texts.append(part["refusal"])
+            refused = True
+    return refused
+
+
+def _stop_reason(
+    data: dict[str, Any], status: str | None, *, has_calls: bool, refused: bool
+) -> tuple[StopReason, str | None]:
+    """Genormaliseerde stopreden en de ruwe reden zoals de provider hem gaf."""
+    if status == "incomplete":
+        raw_reason = as_str(as_dict(data.get("incomplete_details")).get("reason"))
+        return _INCOMPLETE_REASONS.get(raw_reason or "", StopReason.OTHER), raw_reason
+    if has_calls:
+        return StopReason.TOOL_USE, status
+    if refused:
+        return StopReason.REFUSAL, status
+    if status == "completed":
+        return StopReason.END_TURN, status
+    return StopReason.OTHER, status
