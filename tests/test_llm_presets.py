@@ -87,10 +87,20 @@ def test_local_preset_defaults() -> None:
     }
 
 
-def test_local_preset_accepts_key_and_lan_override() -> None:
-    cfg = _cfg("vllm", base_url="http://192.168.1.20:8000/v1/")
+def test_local_preset_accepts_lan_override_without_key() -> None:
+    cfg = _cfg("vllm", key=None, base_url="http://192.168.1.20:8000/v1/")
     assert cfg.base_url == "http://192.168.1.20:8000/v1"
-    assert cfg.api_key is not None
+    assert cfg.api_key is None
+
+
+@pytest.mark.parametrize("name", ["vllm", "ollama", "openai-compatible"])
+def test_key_never_goes_over_plain_http_to_the_lan(name: str) -> None:
+    # Review 2026-10-17: ook bij een lokale preset geldt dat een gezette sleutel niet
+    # onversleuteld over het LAN mag; naar loopback wel.
+    with pytest.raises(LLMConfigError, match="https") as exc:
+        _cfg(name, base_url="http://192.168.1.20:8000/v1")
+    assert KEY not in str(exc.value)
+    assert _cfg(name, base_url="http://127.0.0.1:8000/v1").api_key is not None
 
 
 @pytest.mark.parametrize(

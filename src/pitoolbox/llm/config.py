@@ -122,12 +122,12 @@ class LLMConfig(BaseModel):
         model = (settings.llm_model or "").strip()
         if not model:
             raise LLMConfigError(f"Geen LLM-model ingesteld (PITOOLBOX_LLM_MODEL). {ENV_HELP}")
-        base_url = _base_url_for(preset, settings.llm_base_url)
         key = settings.llm_api_key
         if key is not None and not key.get_secret_value().strip():
             key = None
         if key is None and preset.requires_key:
             raise LLMConfigError(f"PITOOLBOX_LLM_API_KEY is verplicht voor {preset.name}")
+        base_url = _base_url_for(preset, settings.llm_base_url, has_key=key is not None)
         try:
             return cls(
                 provider=preset.kind,
@@ -155,13 +155,14 @@ def _preset_from(raw: str | None) -> ProviderPreset:
     return resolve_preset(name)
 
 
-def _base_url_for(preset: ProviderPreset, raw: str | None) -> str:
+def _base_url_for(preset: ProviderPreset, raw: str | None, *, has_key: bool) -> str:
     """Eigen PITOOLBOX_LLM_BASE_URL wint (bijv. een regio-endpoint), anders die van de preset.
 
-    Bij een preset met verplichte sleutel (cloud) moet een eigen URL https zijn: de sleutel
-    mag nooit onversleuteld over het netwerk, ook niet in het LAN. Alleen loopback mag wel
-    http (de sleutel verlaat de Pi dan niet), bijv. `openai` tegen de Responses-API van een
-    lokale Ollama of een lokale proxy.
+    Gaat er een sleutel mee (verplicht bij een cloudpreset, of zelf gezet bij een lokale), dan
+    moet een eigen URL https zijn: de sleutel mag nooit onversleuteld over het netwerk, ook
+    niet in het LAN. Alleen loopback mag wel http (de sleutel verlaat de Pi dan niet), bijv.
+    `openai` tegen de Responses-API van een lokale Ollama of een lokale proxy. Zonder sleutel
+    mag http naar het LAN, zoals `validate_base_url` toestaat.
     """
     override = (raw or "").strip()
     if not override:
@@ -174,7 +175,7 @@ def _base_url_for(preset: ProviderPreset, raw: str | None) -> str:
         return validate_base_url(preset.base_url)
     url = validate_base_url(override)
     parts = urlsplit(url)
-    if preset.requires_key and parts.scheme != "https" and not _is_loopback(parts.hostname):
+    if has_key and parts.scheme != "https" and not _is_loopback(parts.hostname):
         raise LLMConfigError(
             f"PITOOLBOX_LLM_BASE_URL moet https:// zijn voor {preset.name}: "
             "de API-sleutel gaat anders onversleuteld over het netwerk (http alleen naar "
