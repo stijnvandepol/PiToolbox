@@ -7,7 +7,9 @@ Host-header-check, dat een transmit-bevestiging gebonden is aan de OAuth-client 
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -25,15 +27,18 @@ from test_auth_flow import (
 )
 from test_auth_support import PASSWORD, PUBLIC_URL, FakeClock, make_settings, pkce_pair
 from test_mcp_server import BSSID, Harness
+from uvicorn.logging import AccessFormatter
 
 from pitoolbox.auth import build_auth
 from pitoolbox.auth.crypto import generate_totp_secret, hash_password
 from pitoolbox.core.scope import Scope
+from pitoolbox.frontends import mcp_server
 from pitoolbox.frontends.mcp_server import (
     _require_loopback,
     build_http_app,
     build_server,
     transport_security_for,
+    uvicorn_log_config,
 )
 
 HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
@@ -180,6 +185,59 @@ def test_transport_security_allows_public_and_loopback(tmp_path: Path) -> None:
 def test_transport_security_requires_public_url(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         transport_security_for(make_settings(tmp_path, public_url=None))
+
+
+def _access_log_line(path: str) -> str:
+    """Eén accessregel zoals uvicorn hem logt, door de formatter en de filters die onze logconfig
+    aan de access-handler hangt. Op een eigen logger en zonder dictConfig (dat sluit alle
+    bestaande handlers, ook die van pytest)."""
+    config = uvicorn_log_config()
+    filters = {name: spec["()"]() for name, spec in config["filters"].items()}
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(
+        AccessFormatter(fmt=config["formatters"]["access"]["fmt"], use_colors=False)
+    )
+    for name in config["handlers"]["access"]["filters"]:
+        handler.addFilter(filters[name])
+    logger = logging.getLogger("test.access")
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    try:
+        # Exact de aanroep uit uvicorn/protocols/http/h11_impl.py.
+        logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5555", "GET", path, "1.1", 200)
+    finally:
+        logger.removeHandler(handler)
+    return stream.getvalue()
+
+
+def test_access_log_redacts_query_string() -> None:
+    line = _access_log_line("/login?request=geheim-request-id")
+    assert "geheim-request-id" not in line
+    assert "request=" not in line
+    assert '127.0.0.1:5555 - "GET /login?[weggelaten] HTTP/1.1" 200' in line
+
+
+def test_access_log_keeps_path_without_query() -> None:
+    assert '"GET /.well-known/oauth-authorization-server HTTP/1.1" 200' in _access_log_line(
+        "/.well-known/oauth-authorization-server"
+    )
+
+
+def test_run_http_passes_redacting_log_config(
+    tmp_path: Path, make_ctx: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uvicorn
+    from uvicorn.config import LOGGING_CONFIG
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: seen.update(kwargs))
+    harness = Harness(tmp_path, make_ctx(tmp_path, Scope()))
+    mcp_server._run_http(harness.runner, make_settings(tmp_path))
+    assert "redact_query" in seen["log_config"]["handlers"]["access"]["filters"]
+    assert seen["log_config"]["loggers"]["uvicorn.access"]["handlers"] == ["access"]
+    assert "filters" not in LOGGING_CONFIG["handlers"]["access"]  # uvicorn's dict ongemoeid
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])

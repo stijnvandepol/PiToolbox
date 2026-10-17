@@ -20,6 +20,7 @@ Ontwerpkeuzes:
 from __future__ import annotations
 
 import argparse
+import copy
 import functools
 import json
 import logging
@@ -220,6 +221,38 @@ def install_override_routes(app: Starlette, auth: AuthBundle) -> None:
     app.router.routes[:0] = auth.override_routes
 
 
+ACCESS_LOG_ARGS = 5  # client, methode, pad+query, HTTP-versie, status
+REDACTED_QUERY = "[weggelaten]"
+
+
+class RedactQueryFilter(logging.Filter):
+    """Haalt de querystring uit uvicorn-accessregels.
+
+    Querystrings bevatten hier gevoelige waarden: ``/login?request=<id>`` (wie die id heeft, kan
+    de loginpagina met CSRF-token laden) en de parameters van ``/authorize``. Methode, pad en
+    status blijven staan. uvicorn logt ``'%s - "%s %s HTTP/%s" %d'`` met het pad+query als
+    derde argument (``protocols/http/h11_impl.py`` en ``httptools_impl.py``).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == ACCESS_LOG_ARGS and isinstance(args[2], str):
+            path, has_query, _ = args[2].partition("?")
+            if has_query:
+                record.args = (*args[:2], f"{path}?{REDACTED_QUERY}", *args[3:])
+        return True
+
+
+def uvicorn_log_config() -> dict[str, Any]:
+    """uvicorn's eigen logconfig, met `RedactQueryFilter` op de access-handler."""
+    from uvicorn.config import LOGGING_CONFIG
+
+    config = copy.deepcopy(LOGGING_CONFIG)
+    config.setdefault("filters", {})["redact_query"] = {"()": RedactQueryFilter}
+    config["handlers"]["access"].setdefault("filters", []).append("redact_query")
+    return config
+
+
 def _run_http(runner: ToolRunner, settings: Settings) -> None:
     import uvicorn
 
@@ -248,6 +281,7 @@ def _run_http(runner: ToolRunner, settings: Settings) -> None:
         proxy_headers=False,
         server_header=False,
         log_level="info",
+        log_config=uvicorn_log_config(),
     )
 
 
